@@ -7,6 +7,12 @@ all-features = true
 [advisories]
 # Уязвимости из RustSec — ошибка; unmaintained-крейты — только среди прямых зависимостей.
 unmaintained = "workspace"
+ignore = [
+    # rsa приходит из jsonwebtoken (бэкенд rust_crypto включает все алгоритмы). Атака касается
+    # операций с приватным RSA-ключом; мы подписываем токены только HS256, код RSA не вызывается.
+    # Исправленной версии rsa нет. Пересмотреть, если перейдём на RS256/ES256.
+    { id = "RUSTSEC-2023-0071", reason = "RSA не используется: JWT только HS256" },
+]
 
 [licenses]
 allow = [

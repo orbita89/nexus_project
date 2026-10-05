@@ -42,3 +42,27 @@ async fn migrations_create_schema(pool: PgPool) {
         );
     }
 }
+
+/// Одного и того же режиссёра (роль без персонажа) нельзя добавить к фильму дважды.
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn entity_credits_rejects_duplicate_role_without_character(pool: PgPool) {
+    sqlx::query(
+        "WITH e AS (INSERT INTO entities (kind, slug, title) VALUES ('movie', 'dune-2021', 'Дюна') RETURNING id),
+              p AS (INSERT INTO people (slug, full_name) VALUES ('denis-villeneuve', 'Дени Вильнёв') RETURNING id)
+         INSERT INTO entity_credits (entity_id, person_id, role) SELECT e.id, p.id, 'director' FROM e, p",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let duplicate = sqlx::query(
+        "INSERT INTO entity_credits (entity_id, person_id, role)
+         SELECT entity_id, person_id, role FROM entity_credits",
+    )
+    .execute(&pool)
+    .await;
+
+    let error = duplicate.expect_err("duplicate credit must be rejected");
+    let db_error = error.as_database_error().expect("database error");
+    assert!(db_error.is_unique_violation(), "{db_error}");
+}

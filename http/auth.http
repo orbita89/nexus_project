@@ -1,0 +1,157 @@
+# Авторизация. Нужны тестовые пользователи: make seed (пароль у всех password123).
+# Запросы зависят друг от друга (токены сохраняются в client.global) — запускайте файл целиком.
+# Из консоли: make http
+
+### Вход админом
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "login": "admin", "password": "password123" }
+
+> {%
+    client.test("200 и роль admin", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.user.role === "admin", JSON.stringify(response.body.user));
+    });
+    client.global.set("admin_token", response.body.access_token);
+%}
+
+### Вход обычным пользователем (по email, регистр не важен)
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "login": "USER@nexus.local", "password": "password123" }
+
+> {%
+    client.test("200 и роль user", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.user.role === "user");
+    });
+    client.global.set("user_token", response.body.access_token);
+    client.global.set("user_refresh", response.body.refresh_token);
+%}
+
+### Неверный пароль → 401
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "login": "user", "password": "wrong-password" }
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}
+
+### Заблокированный пользователь → 401
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "login": "blocked", "password": "password123" }
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}
+
+### Профиль по access-токену
+GET {{host}}/api/auth/me
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200 и свой профиль", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.username === "user");
+    });
+%}
+
+### Профиль без токена → 401
+GET {{host}}/api/auth/me
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}
+
+### Обновление токенов (refresh одноразовый: выдаётся новый)
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{ "refresh_token": "{{user_refresh}}" }
+
+> {%
+    // Что токен новый, а старый отозван, проверяют Rust-тесты (app/tests/auth.rs).
+    client.test("200 и выдан refresh-токен", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(!!response.body.refresh_token, JSON.stringify(response.body));
+    });
+    client.global.set("user_refresh", response.body.refresh_token);
+%}
+
+### Админка: обычный пользователь → 403
+GET {{host}}/api/auth/admin/users
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Админка: список пользователей
+GET {{host}}/api/auth/admin/users?limit=10
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("200 и есть тестовые пользователи", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.some(u => u.username === "author"));
+    });
+%}
+
+### Регистрация нового пользователя (уникальное имя на каждый запуск)
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "email": "u{{$timestamp}}@example.com",
+  "username": "u{{$timestamp}}",
+  "password": "password123",
+  "display_name": "Новичок"
+}
+
+> {%
+    client.test("201 и роль user", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.user.role === "user");
+    });
+    client.global.set("new_user_id", response.body.user.id);
+%}
+
+### Админ повышает нового пользователя до author
+PATCH {{host}}/api/auth/admin/users/{{new_user_id}}/role
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "role": "author" }
+
+> {%
+    client.test("200 и роль author", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.role === "author");
+    });
+%}
+
+### Выход: refresh-токен отзывается
+POST {{host}}/api/auth/logout
+Content-Type: application/json
+
+{ "refresh_token": "{{user_refresh}}" }
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### После выхода refresh не работает → 401
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{ "refresh_token": "{{user_refresh}}" }
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}

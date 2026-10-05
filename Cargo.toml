@@ -52,8 +52,18 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower = { version = "0.5", features = ["util"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+argon2 = "0.6"
+sha2 = "0.11"
 http-body-util = "0.1"
 
 [profile.dev]
 # Меньше отладочной информации -> заметно быстрее линковка и меньше target/ при hot-reload.
 debug = 1
+
+# Argon2 без оптимизаций считает хеш секундами: тормозят вход в dev и тесты авторизации.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

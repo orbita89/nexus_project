@@ -1,7 +1,7 @@
 //! Хелперы для тестов: подключаются только как dev-dependency.
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use shared::{AppState, Config};
@@ -53,8 +53,27 @@ pub async fn send(app: Router, request: Request<Body>) -> TestResponse {
 }
 
 pub async fn get(app: Router, uri: &str) -> TestResponse {
-    let request = Request::get(uri)
-        .body(Body::empty())
-        .expect("valid request");
-    send(app, request).await
+    request(app, Method::GET, uri, None, None).await
+}
+
+/// Запрос с необязательным JSON-телом и access-токеном (`Authorization: Bearer`).
+pub async fn request(
+    app: Router,
+    method: Method,
+    uri: &str,
+    body: Option<serde_json::Value>,
+    token: Option<&str>,
+) -> TestResponse {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let body = match body {
+        Some(json) => {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(json.to_string())
+        }
+        None => Body::empty(),
+    };
+    send(app, builder.body(body).expect("valid request")).await
 }

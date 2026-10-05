@@ -6,7 +6,7 @@ export DATABASE_URL
 
 COMPOSE = docker compose -f infra/docker-compose.yml
 
-.PHONY: up down logs run fmt lint boundaries test deny ci image http
+.PHONY: up down logs run seed fmt lint boundaries test deny ci image http
 
 up:          ## Поднять dev-окружение
 	$(COMPOSE) up -d --build
@@ -19,6 +19,9 @@ logs:        ## Логи приложения
 
 run:         ## Запустить приложение локально (без Docker)
 	cargo run -p nexus
+
+seed:        ## Загрузить тестовых пользователей (seeds/dev.sql) в dev-базу
+	$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -q -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < seeds/dev.sql
 
 fmt:         ## Отформатировать код
 	cargo fmt --all
@@ -40,8 +43,8 @@ image:       ## Собрать production-образ
 	docker build -f infra/Dockerfile -t nexus:local .
 
 # Нужна сеть хоста, чтобы контейнер видел localhost:80 (nginx из make up).
-http:        ## HTTP smoke-проверки из http/*.http против поднятого окружения
+http:        ## HTTP-проверки из http/*.http против поднятого окружения (нужен make seed)
 	docker run --rm --network host -v $(CURDIR)/http:/workdir jetbrains/intellij-http-client \
-		--env-file http-client.env.json --env dev health.http
+		--env-file http-client.env.json --env dev health.http auth.http
 
 ci: lint boundaries test deny  ## Всё, что проверяет CI (кроме сборки образа)

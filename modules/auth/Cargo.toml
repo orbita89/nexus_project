@@ -17,3 +17,6 @@ sqlx = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+argon2 = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }

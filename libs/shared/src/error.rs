@@ -25,6 +25,10 @@ pub enum AppError {
 
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+
+    /// Непредвиденная ошибка (хеширование, подпись токена, ...). Детали — только в лог.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl IntoResponse for AppError {
@@ -35,9 +39,16 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             AppError::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
-            // Детали ошибки БД наружу не отдаём — только в лог.
+            // Детали внутренних ошибок наружу не отдаём — только в лог.
             AppError::Database(e) => {
                 tracing::error!(error = %e, "database error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                )
+            }
+            AppError::Internal(e) => {
+                tracing::error!(error = %e, "internal error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal server error".to_string(),
