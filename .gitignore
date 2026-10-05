@@ -1,0 +1,9 @@
+/target
+**/target
+**/*.rs.bk
+.env
+infra/.env
+.DS_Store
+.idea/
+.vscode/
+http/http-client.private.env.json

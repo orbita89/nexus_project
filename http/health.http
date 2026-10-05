@@ -1,0 +1,23 @@
+# Smoke-проверки: приложение поднялось и маршрутизация через nginx работает.
+# Запуск: в IDE (окружение "dev") или `make http`.
+
+### Health через nginx
+GET {{host}}/health
+
+> {%
+    client.test("status 200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+    });
+    client.test("body.status = ok", () => {
+        client.assert(response.body.status === "ok", JSON.stringify(response.body));
+    });
+%}
+
+### Модуль смонтирован: неизвестный путь под /api/auth отдаёт 404 от приложения, а не от nginx
+GET {{host}}/api/auth/does-not-exist
+
+> {%
+    client.test("status 404", () => {
+        client.assert(response.status === 404, `got ${response.status}`);
+    });
+%}

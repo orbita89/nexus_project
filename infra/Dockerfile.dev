@@ -1,0 +1,24 @@
+# Dev-образ приложения: тулчейн + cargo-watch.
+# Исходники не копируются — они монтируются volume'ом из compose, чтобы работал hot-reload.
+# Версия совпадает с rust-toolchain.toml, иначе rustup докачивает тулчейн при каждом старте контейнера.
+FROM rust:1.98-bookworm
+
+# Пакеты для линковки нативных зависимостей (pq/ssl подтягиваются транзитивно у части крейтов).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ставится один раз и кешируется слоем: пересборка образа не повторяет компиляцию.
+# --root /usr/local кладёт бинарник в /usr/local/bin (он в PATH и не перекрывается томом ниже).
+RUN cargo install cargo-watch --locked --root /usr/local
+
+# Кеш крейтов выносим на отдельный пустой путь. Монтировать том поверх /usr/local/cargo нельзя:
+# каталог непустой после cargo install, Docker копирует его содержимое в том при первом старте,
+# и при нескольких контейнерах на одном томе это приводит к "mkdir ...: file exists".
+ENV CARGO_HOME=/cargo-cache
+RUN mkdir -p /cargo-cache
+
+WORKDIR /app
+
+# Конкретная команда задаётся в docker-compose.yml (cargo watch -x 'run -p nexus').
+CMD ["cargo", "watch", "-x", "run"]

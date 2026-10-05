@@ -1,0 +1,9 @@
+target/
+**/target/
+.git/
+.gitignore
+infra/data/
+**/*.mkv
+**/*.log
+.idea/
+.vscode/

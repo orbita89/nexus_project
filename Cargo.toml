@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "app",
+    "modules/auth",
+    "modules/catalog",
+    "modules/social",
+    "modules/realtime",
+    "libs/shared",
+    "libs/test-utils",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "proprietary"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+shared = { path = "libs/shared" }
+test-utils = { path = "libs/test-utils" }
+auth = { path = "modules/auth" }
+catalog = { path = "modules/catalog" }
+social = { path = "modules/social" }
+realtime = { path = "modules/realtime" }
+
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+    "macros",
+    "migrate",
+] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.dev]
+# Меньше отладочной информации -> заметно быстрее линковка и меньше target/ при hot-reload.
+debug = 1
