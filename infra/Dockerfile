@@ -3,7 +3,7 @@
 
 # cargo-chef отделяет сборку зависимостей от сборки нашего кода: пока Cargo.lock не менялся,
 # слой с зависимостями берётся из кеша и пересобирается только workspace.
-FROM rust:1.98-bookworm AS chef
+FROM rust:1.99-bookworm AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
