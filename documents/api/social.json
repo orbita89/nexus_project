@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Nexus API: социальное",
-    "description": "Рецензии и оценки, подписки на пользователей, коллекции.\n\nСущности адресуются по `slug` (как в каталоге), пользователи — по `username`, коллекции — по `id`. Ошибки — всегда `{\"error\": \"...\"}`. Чтение публичного — без авторизации; рецензии, подписки и свои коллекции — любой вошедший; модерация (`/admin/...`) — только роль `admin`. Токен: во вкладке **Nexus API** выполните `POST /api/v1/auth/login` (`user` / `admin`, пароль `password123`) и вставьте `access_token` в **Authorize**.",
+    "description": "Рецензии и оценки, подписки на пользователей, коллекции, форум.\n\nСущности адресуются по `slug` (как в каталоге), пользователи — по `username`, коллекции, темы и сообщения — по `id`. Ошибки — всегда `{\"error\": \"...\"}`. Чтение публичного — без авторизации; рецензии, подписки, свои коллекции и ответы на форуме — любой вошедший; темы форума — роль `author` и выше; модерация (`/admin/...`) — только роль `admin`. Токен: во вкладке **Nexus API** выполните `POST /api/v1/auth/login` (`user` / `author` / `admin`, пароль `password123`) и вставьте `access_token` в **Authorize**.",
     "license": {
       "name": "proprietary",
       "identifier": "proprietary"
@@ -71,6 +71,67 @@
         ]
       }
     },
+    "/api/v1/social/admin/posts/{id}": {
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Удалить любое сообщение. Если на него есть ответы, остаётся заглушка «сообщение удалено».",
+        "operationId": "delete_post",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сообщения",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалено"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или уже удалено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/admin/reviews/{id}": {
       "delete": {
         "tags": [
@@ -93,6 +154,187 @@
         "responses": {
           "204": {
             "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/admin/threads/{id}": {
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Удалить любую тему вместе с сообщениями.",
+        "operationId": "delete_thread",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id темы",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/admin/threads/{id}/lock": {
+      "put": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Закрыть тему для ответов (повторно — тоже 204). Править и удалять свои сообщения можно.",
+        "operationId": "lock_thread",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id темы",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Закрыта"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Открыть тему для ответов (повторно — тоже 204).",
+        "operationId": "unlock_thread",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id темы",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Открыта"
           },
           "401": {
             "description": "Нет токена",
@@ -1089,12 +1331,673 @@
         }
       }
     },
+    "/api/v1/social/entities/{slug}/threads": {
+      "get": {
+        "tags": [
+          "forum"
+        ],
+        "summary": "Темы, к которым привязана сущность (в том числе вместе с другими).",
+        "operationId": "list_for_entity",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "По умолчанию `active`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ThreadSort"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница тем",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Thread"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/social/posts/{id}": {
+      "delete": {
+        "tags": [
+          "forum"
+        ],
+        "summary": "Удалить своё сообщение. Если на него есть ответы, остаётся заглушка «сообщение удалено».",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сообщения",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалено"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужое сообщение",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или уже удалено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "forum"
+        ],
+        "summary": "Изменить своё сообщение. Ставит `edited_at`; в закрытой теме тоже можно.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сообщения",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Post"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужое сообщение",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или удалено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/threads": {
+      "get": {
+        "tags": [
+          "forum"
+        ],
+        "summary": "Свежие или активные темы всего форума.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "По умолчанию `active`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ThreadSort"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница тем",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Thread"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "forum"
+        ],
+        "summary": "Создать тему. Нужна роль author или admin.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateThread"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля или неизвестная сущность",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль author",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/threads/{id}": {
+      "get": {
+        "tags": [
+          "forum"
+        ],
+        "summary": "Тема с текстом и страницей сообщений по времени.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id темы",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Сообщений на странице: 1–100, по умолчанию 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Тема",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Тема не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "forum"
+        ],
+        "summary": "Удалить свою тему вместе со всеми сообщениями.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id темы",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужая тема",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Тема не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "forum"
+        ],
+        "summary": "Изменить свою тему: заголовок, текст, набор сущностей. Ставит `edited_at`.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id темы",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateThread"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля или неизвестная сущность",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужая тема",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Тема не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/threads/{id}/posts": {
+      "post": {
+        "tags": [
+          "forum"
+        ],
+        "summary": "Ответить в теме или на сообщение (`parent_id`).",
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id темы",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Post"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля, родителя нет в теме или он удалён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Тема закрыта",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Тема не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/users/{username}": {
       "get": {
         "tags": [
           "users"
         ],
-        "summary": "Профиль: сколько подписчиков, подписок, рецензий и коллекций; вошедшему — подписан ли он\nи подписан ли пользователь на него. Шапка профиля и кнопка «Подписаться» — одним запросом.",
+        "summary": "Профиль: сколько подписчиков, подписок, рецензий, коллекций, тем и сообщений форума; вошедшему — подписан ли он\nи подписан ли пользователь на него. Шапка профиля и кнопка «Подписаться» — одним запросом.",
         "operationId": "get",
         "parameters": [
           {
@@ -1525,6 +2428,69 @@
           }
         }
       }
+    },
+    "/api/v1/social/users/{username}/threads": {
+      "get": {
+        "tags": [
+          "forum"
+        ],
+        "summary": "Темы пользователя, новые сверху.",
+        "operationId": "list_for_user",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "author"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница тем",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Thread"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1655,6 +2621,62 @@
             "type": "string",
             "description": "1–200 символов.",
             "example": "Лучшая фантастика"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreatePost": {
+        "type": "object",
+        "description": "Новое сообщение в теме.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "1–10 000 символов.",
+            "example": "У Херберта Пол куда мрачнее."
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Ответ на сообщение этой темы; не передан — ответ на тему."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateThread": {
+        "type": "object",
+        "description": "Новая тема.",
+        "required": [
+          "title",
+          "body",
+          "entities"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "1–20 000 символов.",
+            "example": "Сравниваем роман Херберта и фильм Вильнёва."
+          },
+          "entities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "slug'и сущностей, 1–10 без повторов. Первая — главная.",
+            "example": [
+              "dune-novel",
+              "dune-2021"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "description": "1–200 символов.",
+            "example": "Дюна: книга против фильма"
           }
         },
         "additionalProperties": false
@@ -1856,6 +2878,111 @@
           }
         }
       },
+      "Page_Post": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Сообщение в теме. Ветки — через `parent_id`: список плоский, по времени.",
+              "required": [
+                "id",
+                "thread_id",
+                "deleted",
+                "created_at"
+              ],
+              "properties": {
+                "author": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/UserRef",
+                      "description": "`null` у удалённого."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "body": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "`null` у удалённого.",
+                  "example": "У Херберта Пол куда мрачнее."
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "deleted": {
+                  "type": "boolean",
+                  "description": "Сообщение удалено, но на него есть ответы: показывается как «сообщение удалено»."
+                },
+                "edited_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "description": "Когда автор правил сообщение; `null` — не правил."
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "parent_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "На какое сообщение ответ; `null` — ответ на тему."
+                },
+                "reply_to": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/UserRef",
+                      "description": "Автор сообщения, на которое ответ; `null` — ответ на тему или то сообщение удалено."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "thread_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "Page_Review": {
         "type": "object",
         "description": "Страница списка.",
@@ -1930,6 +3057,172 @@
             "format": "int64",
             "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
             "example": 137
+          }
+        }
+      },
+      "Page_Thread": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Тема в списке: без текста и сообщений.",
+              "required": [
+                "id",
+                "author",
+                "title",
+                "entities",
+                "posts_count",
+                "last_post_at",
+                "is_locked",
+                "created_at"
+              ],
+              "properties": {
+                "author": {
+                  "$ref": "#/components/schemas/UserRef"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "edited_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "description": "Когда автор правил тему; `null` — не правил."
+                },
+                "entities": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EntityRef"
+                  },
+                  "description": "Сущности темы по порядку: первая — главная."
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "is_locked": {
+                  "type": "boolean",
+                  "description": "Закрыта для ответов."
+                },
+                "last_post_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Последнее сообщение; у темы без ответов — время создания."
+                },
+                "posts_count": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "Сообщений в теме, без удалённых.",
+                  "example": 14
+                },
+                "title": {
+                  "type": "string",
+                  "example": "Дюна: книга против фильма"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Post": {
+        "type": "object",
+        "description": "Сообщение в теме. Ветки — через `parent_id`: список плоский, по времени.",
+        "required": [
+          "id",
+          "thread_id",
+          "deleted",
+          "created_at"
+        ],
+        "properties": {
+          "author": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UserRef",
+                "description": "`null` у удалённого."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` у удалённого.",
+            "example": "У Херберта Пол куда мрачнее."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deleted": {
+            "type": "boolean",
+            "description": "Сообщение удалено, но на него есть ответы: показывается как «сообщение удалено»."
+          },
+          "edited_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Когда автор правил сообщение; `null` — не правил."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "На какое сообщение ответ; `null` — ответ на тему."
+          },
+          "reply_to": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UserRef",
+                "description": "Автор сообщения, на которое ответ; `null` — ответ на тему или то сообщение удалено."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "thread_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -2117,7 +3410,9 @@
           "followers_count",
           "following_count",
           "reviews_count",
-          "collections_count"
+          "collections_count",
+          "threads_count",
+          "posts_count"
         ],
         "properties": {
           "collections_count": {
@@ -2136,6 +3431,12 @@
             "format": "int64",
             "example": 3
           },
+          "posts_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сообщения на форуме, без удалённых.",
+            "example": 25
+          },
           "relation": {
             "oneOf": [
               {
@@ -2153,10 +3454,102 @@
             "description": "Все рецензии, включая оценки без текста.",
             "example": 40
           },
+          "threads_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Темы форума.",
+            "example": 3
+          },
           "user": {
             "$ref": "#/components/schemas/UserRef"
           }
         }
+      },
+      "Thread": {
+        "type": "object",
+        "description": "Тема в списке: без текста и сообщений.",
+        "required": [
+          "id",
+          "author",
+          "title",
+          "entities",
+          "posts_count",
+          "last_post_at",
+          "is_locked",
+          "created_at"
+        ],
+        "properties": {
+          "author": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "edited_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Когда автор правил тему; `null` — не правил."
+          },
+          "entities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntityRef"
+            },
+            "description": "Сущности темы по порядку: первая — главная."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_locked": {
+            "type": "boolean",
+            "description": "Закрыта для ответов."
+          },
+          "last_post_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Последнее сообщение; у темы без ответов — время создания."
+          },
+          "posts_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Сообщений в теме, без удалённых.",
+            "example": 14
+          },
+          "title": {
+            "type": "string",
+            "example": "Дюна: книга против фильма"
+          }
+        }
+      },
+      "ThreadDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Thread"
+          },
+          {
+            "type": "object",
+            "required": [
+              "body",
+              "posts"
+            ],
+            "properties": {
+              "body": {
+                "type": "string",
+                "example": "Сравниваем роман Херберта и фильм Вильнёва."
+              },
+              "posts": {
+                "$ref": "#/components/schemas/Page_Post",
+                "description": "Сообщения по времени, включая заглушки удалённых, на которые есть ответы."
+              }
+            }
+          }
+        ],
+        "description": "Тема с текстом и страницей сообщений."
       },
       "UpdateCollection": {
         "type": "object",
@@ -2172,6 +3565,53 @@
             "type": [
               "boolean",
               "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdatePost": {
+        "type": "object",
+        "description": "Изменение своего сообщения.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "1–10 000 символов."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateThread": {
+        "type": "object",
+        "description": "Изменение темы: переданные поля заменяются, `entities` — набор целиком.",
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entities": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "dune-novel",
+              "dune-2021",
+              "dune-part-two-2024"
             ]
           },
           "title": {
@@ -2239,6 +3679,10 @@
     {
       "name": "collections",
       "description": "Коллекции: приватные видит только владелец"
+    },
+    {
+      "name": "forum",
+      "description": "Форум: темы, привязанные к нескольким сущностям, и сообщения с ветками. Темы создаёт роль author и выше, отвечает любой вошедший"
     },
     {
       "name": "social-admin",

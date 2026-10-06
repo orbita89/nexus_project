@@ -1,0 +1,478 @@
+# Форум: темы на несколько сущностей, сообщения с ветками, закрытие и модерация против живого окружения.
+# Нужно: make up, make seed (пользователи, каталог и social из seeds/*.sql).
+# Запросы зависят друг от друга (значения сохраняются в client.global) — запускайте файл целиком.
+# Всё, что файл создаёт, он же и удаляет: темы с заголовком «Проверка из http/forum.http…»
+# (сообщения удаляются вместе с ними). Остатки прерванного прогона (например, после 429 на
+# входе) следующий прогон удаляет первым делом, до своих проверок.
+# Из консоли: make http
+
+### Вход обычным пользователем
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "user", "password": "password123" }
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+    client.global.set("user_token", response.body.access_token);
+%}
+
+### Вход автором
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "author", "password": "password123" }
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+    client.global.set("author_token", response.body.access_token);
+%}
+
+### Вход админом
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "admin", "password": "password123" }
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+    client.global.set("admin_token", response.body.access_token);
+%}
+
+# ------------------------------------------------------------------ уборка остатков
+
+### Темы автора: остатки прошлого прогона
+GET {{host}}/api/v1/social/users/author/threads?limit=100
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+    const stale = response.body.items
+        .filter(t => t.title.startsWith("Проверка из http/forum.http"))
+        .map(t => t.id);
+    // Нет остатка — несуществующий id, удаление ниже вернёт 404.
+    for (let i = 0; i < 3; i++) {
+        client.global.set(`stale_${i}`, stale[i] || "00000000-0000-4000-8000-000000000000");
+    }
+%}
+
+### Удалить остаток 1
+DELETE {{host}}/api/v1/social/admin/threads/{{stale_0}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204 или 404", () => client.assert(response.status === 204 || response.status === 404, `got ${response.status}`));
+%}
+
+### Удалить остаток 2
+DELETE {{host}}/api/v1/social/admin/threads/{{stale_1}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204 или 404", () => client.assert(response.status === 204 || response.status === 404, `got ${response.status}`));
+%}
+
+### Удалить остаток 3
+DELETE {{host}}/api/v1/social/admin/threads/{{stale_2}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204 или 404", () => client.assert(response.status === 204 || response.status === 404, `got ${response.status}`));
+%}
+
+# ------------------------------------------------------------------ чтение (seeds/social.sql)
+
+### Активные темы без токена
+GET {{host}}/api/v1/social/threads
+
+> {%
+    client.test("200, у тем есть сущности, без текста", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.total >= 4, JSON.stringify(response.body));
+        client.assert(response.body.items.every(t => t.entities.length > 0 && t.body === undefined));
+        const times = response.body.items.map(t => t.last_post_at);
+        client.assert(times.every((t, i) => i === 0 || Date.parse(times[i - 1]) >= Date.parse(t)), "по last_post_at");
+    });
+%}
+
+### Свежие темы
+GET {{host}}/api/v1/social/threads?sort=new&limit=2
+
+> {%
+    client.test("200, по созданию", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.length === 2 && response.body.limit === 2);
+        const [a, b] = response.body.items.map(t => Date.parse(t.created_at));
+        client.assert(a >= b);
+    });
+%}
+
+### Темы книги «Дюна»: общая тема с фильмами
+GET {{host}}/api/v1/social/entities/dune-novel/threads
+
+> {%
+    client.test("200, тема привязана и к фильму", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const dune = response.body.items.find(t => t.title === "Дюна: книга против экранизаций");
+        client.assert(dune, JSON.stringify(response.body));
+        client.assert(dune.entities.some(e => e.slug === "dune-2021" && e.kind === "movie"));
+        client.global.set("dune_thread_id", dune.id);
+    });
+%}
+
+### Та же тема у фильма
+GET {{host}}/api/v1/social/entities/dune-2021/threads
+
+> {%
+    client.test("200, та же тема", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.some(t => t.id === client.global.get("dune_thread_id")));
+    });
+%}
+
+### Тема с сообщениями: ветки и заглушка удалённого
+GET {{host}}/api/v1/social/threads/{{dune_thread_id}}
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(typeof response.body.body === "string");
+        const posts = response.body.posts.items;
+        client.assert(posts.some(p => p.deleted && p.author === null && p.body === null), "заглушка");
+        client.assert(posts.some(p => p.parent_id !== null && p.reply_to && p.reply_to.username === "author"), "ответ автору");
+        client.assert(response.body.posts_count === posts.filter(p => !p.deleted).length);
+    });
+%}
+
+### Страница сообщений
+GET {{host}}/api/v1/social/threads/{{dune_thread_id}}?limit=2&offset=2
+
+> {%
+    client.test("200, два сообщения", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.posts.items.length === 2 && response.body.posts.offset === 2);
+    });
+%}
+
+### Темы автора
+GET {{host}}/api/v1/social/users/author/threads
+
+> {%
+    client.test("200, новые сверху", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.total >= 3 && response.body.items.every(t => t.author.username === "author"));
+    });
+%}
+
+### Счётчики форума в профиле
+GET {{host}}/api/v1/social/users/author
+
+> {%
+    client.test("200, threads_count и posts_count", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.threads_count >= 3 && response.body.posts_count >= 2, JSON.stringify(response.body));
+    });
+%}
+
+### Неизвестная сущность — 404
+GET {{host}}/api/v1/social/entities/no-such-entity/threads
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}
+
+### Неверный порядок — 400
+GET {{host}}/api/v1/social/threads?sort=popular
+
+> {%
+    client.test("400 с {error}", () => {
+        client.assert(response.status === 400, `got ${response.status}`);
+        client.assert(typeof response.body.error === "string");
+    });
+%}
+
+# ------------------------------------------------------------------ темы
+
+### Создать тему без токена — 401
+POST {{host}}/api/v1/social/threads
+Content-Type: application/json
+
+{ "title": "Проверка из http/forum.http", "body": "Текст", "entities": ["elden-ring"] }
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}
+
+### Обычный пользователь тему не создаёт — 403
+POST {{host}}/api/v1/social/threads
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "title": "Проверка из http/forum.http", "body": "Текст", "entities": ["elden-ring"] }
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Неизвестная сущность — 400
+POST {{host}}/api/v1/social/threads
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{ "title": "Проверка из http/forum.http", "body": "Текст", "entities": ["elden-ring", "no-such-entity"] }
+
+> {%
+    client.test("400", () => client.assert(response.status === 400, `got ${response.status}`));
+%}
+
+### Автор создаёт тему про игру и сериал
+POST {{host}}/api/v1/social/threads
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{
+  "title": "Проверка из http/forum.http",
+  "body": "Cyberpunk 2077 и Edgerunners: один мир, разные истории.",
+  "entities": ["cyberpunk-2077", "cyberpunk-edgerunners"]
+}
+
+> {%
+    client.test("201", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.entities.map(e => e.slug).join() === "cyberpunk-2077,cyberpunk-edgerunners");
+        client.assert(response.body.posts_count === 0 && response.body.posts.total === 0);
+        client.assert(response.body.edited_at === null && response.body.is_locked === false);
+    });
+    client.global.set("thread_id", response.body.id);
+%}
+
+### Новая тема первой у сериала
+GET {{host}}/api/v1/social/entities/cyberpunk-edgerunners/threads?sort=new
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items[0].id === client.global.get("thread_id"));
+    });
+%}
+
+### Чужую тему менять нельзя — 403
+PATCH {{host}}/api/v1/social/threads/{{thread_id}}
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "title": "Чужая правка" }
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Автор меняет заголовок и набор сущностей
+PATCH {{host}}/api/v1/social/threads/{{thread_id}}
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{ "title": "Проверка из http/forum.http (изменено)", "entities": ["cyberpunk-edgerunners", "cyberpunk-2077", "elden-ring"] }
+
+> {%
+    client.test("200, пометка «изменено»", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.title === "Проверка из http/forum.http (изменено)");
+        client.assert(response.body.entities.map(e => e.slug).join() === "cyberpunk-edgerunners,cyberpunk-2077,elden-ring");
+        client.assert(typeof response.body.edited_at === "string");
+    });
+%}
+
+# ------------------------------------------------------------------ сообщения
+
+### Ответ в теме без токена — 401
+POST {{host}}/api/v1/social/threads/{{thread_id}}/posts
+Content-Type: application/json
+
+{ "body": "Гость" }
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}
+
+### Пользователь отвечает в теме
+POST {{host}}/api/v1/social/threads/{{thread_id}}/posts
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "body": "Edgerunners лучше объясняет, почему Найт-Сити ломает людей." }
+
+> {%
+    client.test("201", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.author.username === "user" && response.body.parent_id === null);
+    });
+    client.global.set("post_id", response.body.id);
+%}
+
+### Автор отвечает на сообщение — ветка
+POST {{host}}/api/v1/social/threads/{{thread_id}}/posts
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{ "body": "А игра даёт прожить это самому.", "parent_id": "{{post_id}}" }
+
+> {%
+    client.test("201, ответ пользователю", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.parent_id === client.global.get("post_id"));
+        client.assert(response.body.reply_to.username === "user");
+    });
+    client.global.set("reply_id", response.body.id);
+%}
+
+### Чужое сообщение менять нельзя — 403
+PATCH {{host}}/api/v1/social/posts/{{post_id}}
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{ "body": "Чужая правка" }
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Своё сообщение — можно
+PATCH {{host}}/api/v1/social/posts/{{post_id}}
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "body": "Edgerunners лучше объясняет Найт-Сити (исправлено)." }
+
+> {%
+    client.test("200, пометка «изменено»", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(typeof response.body.edited_at === "string");
+    });
+%}
+
+### Удалить своё сообщение, на которое ответили
+DELETE {{host}}/api/v1/social/posts/{{post_id}}
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Осталась заглушка «сообщение удалено»
+GET {{host}}/api/v1/social/threads/{{thread_id}}
+
+> {%
+    client.test("200, заглушка и ответ", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const [deleted, reply] = response.body.posts.items;
+        client.assert(deleted.deleted === true && deleted.body === null && deleted.author === null);
+        client.assert(reply.parent_id === deleted.id && reply.reply_to === null);
+        client.assert(response.body.posts_count === 1);
+    });
+%}
+
+# ------------------------------------------------------------------ модерация
+
+### Закрывать темы может только admin
+PUT {{host}}/api/v1/social/admin/threads/{{thread_id}}/lock
+Authorization: Bearer {{author_token}}
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Админ закрывает тему
+PUT {{host}}/api/v1/social/admin/threads/{{thread_id}}/lock
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### В закрытую тему не ответить
+POST {{host}}/api/v1/social/threads/{{thread_id}}/posts
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "body": "Поздно" }
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Админ открывает тему
+DELETE {{host}}/api/v1/social/admin/threads/{{thread_id}}/lock
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Админ удаляет ответ — заглушка уходит следом
+DELETE {{host}}/api/v1/social/admin/posts/{{reply_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### В теме не осталось сообщений
+GET {{host}}/api/v1/social/threads/{{thread_id}}
+
+> {%
+    client.test("200, пусто", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.posts.total === 0 && response.body.posts_count === 0 && response.body.is_locked === false);
+    });
+%}
+
+### Чужую тему удалить нельзя
+DELETE {{host}}/api/v1/social/threads/{{thread_id}}
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Автор удаляет свою тему
+DELETE {{host}}/api/v1/social/threads/{{thread_id}}
+Authorization: Bearer {{author_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Темы больше нет
+GET {{host}}/api/v1/social/threads/{{thread_id}}
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}
+
+### Тема для модерации
+POST {{host}}/api/v1/social/threads
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{ "title": "Проверка из http/forum.http: спам", "body": "Спам", "entities": ["elden-ring"] }
+
+> {%
+    client.test("201", () => client.assert(response.status === 201, `got ${response.status}`));
+    client.global.set("spam_thread_id", response.body.id);
+%}
+
+### Админ удаляет чужую тему
+DELETE {{host}}/api/v1/social/admin/threads/{{spam_thread_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Повторно — 404
+DELETE {{host}}/api/v1/social/admin/threads/{{spam_thread_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}

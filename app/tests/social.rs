@@ -1,4 +1,4 @@
-//! Социальный модуль: рецензии и оценки, подписки, коллекции, модерация.
+//! Социальный модуль: рецензии и оценки, подписки, коллекции, модерация. Форум — `forum.rs`.
 //!
 //! Сущности — `fixtures/catalog.sql`, пользователи создаются через dev login.
 
@@ -1390,4 +1390,35 @@ async fn seed_social_is_valid(pool: PgPool) {
     let own = ctx.get_ok("/users/user/collections", Some(&user)).await;
     let public = ctx.get_ok("/users/user/collections", None).await;
     assert!(own["total"].as_i64().unwrap() > public["total"].as_i64().unwrap());
+
+    // Форум: тема про «Дюну» видна у книги и у фильма, у каждой темы есть сущности.
+    let threads = ctx.get_ok("/threads", None).await;
+    assert!(threads["total"].as_i64().unwrap() >= 4, "{threads}");
+    for thread in items(&threads) {
+        assert!(
+            !thread["entities"].as_array().unwrap().is_empty(),
+            "{thread}"
+        );
+    }
+    let book = ctx.get_ok("/entities/dune-novel/threads", None).await;
+    let movie = ctx.get_ok("/entities/dune-2021/threads", None).await;
+    let dune = &items(&book)[0];
+    assert_eq!(dune["id"], items(&movie)[0]["id"]);
+    assert_eq!(dune["posts_count"], 5);
+
+    // Ветки и заглушка удалённого сообщения, на которое ответили.
+    let id = dune["id"].as_str().unwrap();
+    let detail = ctx.get_ok(&format!("/threads/{id}"), None).await;
+    let posts = items(&detail["posts"]);
+    assert_eq!(detail["posts"]["total"], 6);
+    assert!(posts
+        .iter()
+        .any(|p| p["deleted"] == true && p["author"].is_null()));
+    assert!(posts.iter().any(|p| p["reply_to"]["username"] == "author"));
+    assert_eq!(detail["last_post_at"], posts.last().unwrap()["created_at"]);
+    assert!(items(&threads).iter().any(|t| t["is_locked"] == true));
+
+    let profile = ctx.get_ok("/users/author", None).await;
+    assert_eq!(profile["threads_count"], 3);
+    assert_eq!(profile["posts_count"], 2);
 }

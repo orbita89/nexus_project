@@ -52,7 +52,7 @@ image:       ## Собрать production-образ
 # Нужна сеть хоста, чтобы контейнер видел localhost:80 (nginx из make up).
 http:        ## HTTP-проверки из http/*.http против поднятого окружения (нужен make seed)
 	docker run --rm --network host -v $(CURDIR)/http:/workdir jetbrains/intellij-http-client \
-		--env-file http-client.env.json --env dev health.http auth.http catalog.http social.http
+		--env-file http-client.env.json --env dev health.http auth.http catalog.http social.http forum.http
 
 ci: lint boundaries test deny  ## Всё, что проверяет CI (кроме сборки образа)
 

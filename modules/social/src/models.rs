@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use shared::directory::{EntityRef, UserRef};
+use shared::pagination::Page;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -122,6 +123,12 @@ pub struct SocialProfile {
     /// Публичные коллекции; владельцу — вместе с приватными.
     #[schema(example = 2)]
     pub collections_count: i64,
+    /// Темы форума.
+    #[schema(example = 3)]
+    pub threads_count: i64,
+    /// Сообщения на форуме, без удалённых.
+    #[schema(example = 25)]
+    pub posts_count: i64,
     /// Отношение вошедшего к пользователю. `null` — гость или свой профиль.
     pub relation: Option<Relation>,
 }
@@ -241,6 +248,172 @@ pub struct PutCollectionItem {
 pub struct ReorderItems {
     #[schema(example = json!(["dune-novel", "dune-2021", "dune-part-two-2024"]))]
     pub entities: Vec<String>,
+}
+
+// ---------------------------------------------------------------- форум
+
+/// Тема в списке: без текста и сообщений.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Thread {
+    pub id: Uuid,
+    pub author: UserRef,
+    #[schema(example = "Дюна: книга против фильма")]
+    pub title: String,
+    /// Сущности темы по порядку: первая — главная.
+    pub entities: Vec<EntityRef>,
+    /// Сообщений в теме, без удалённых.
+    #[schema(example = 14)]
+    pub posts_count: i32,
+    /// Последнее сообщение; у темы без ответов — время создания.
+    pub last_post_at: DateTime<Utc>,
+    /// Закрыта для ответов.
+    pub is_locked: bool,
+    /// Когда автор правил тему; `null` — не правил.
+    pub edited_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ThreadRow {
+    pub id: Uuid,
+    pub author_id: Uuid,
+    pub title: String,
+    pub body: String,
+    pub posts_count: i32,
+    pub last_post_at: DateTime<Utc>,
+    pub is_locked: bool,
+    pub edited_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Колонки [`ThreadRow`] для `FROM forum_threads t`.
+pub const THREAD_COLUMNS: &str = "t.id, t.author_id, t.title, t.body, t.posts_count,
+    t.last_post_at, t.is_locked, t.edited_at, t.created_at";
+
+/// Тема с текстом и страницей сообщений.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ThreadDetail {
+    #[serde(flatten)]
+    pub thread: Thread,
+    #[schema(example = "Сравниваем роман Херберта и фильм Вильнёва.")]
+    pub body: String,
+    /// Сообщения по времени, включая заглушки удалённых, на которые есть ответы.
+    pub posts: Page<Post>,
+}
+
+/// Сообщение в теме. Ветки — через `parent_id`: список плоский, по времени.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Post {
+    pub id: Uuid,
+    pub thread_id: Uuid,
+    /// На какое сообщение ответ; `null` — ответ на тему.
+    pub parent_id: Option<Uuid>,
+    /// Автор сообщения, на которое ответ; `null` — ответ на тему или то сообщение удалено.
+    pub reply_to: Option<UserRef>,
+    /// `null` у удалённого.
+    pub author: Option<UserRef>,
+    /// `null` у удалённого.
+    #[schema(example = "У Херберта Пол куда мрачнее.")]
+    pub body: Option<String>,
+    /// Сообщение удалено, но на него есть ответы: показывается как «сообщение удалено».
+    pub deleted: bool,
+    /// Когда автор правил сообщение; `null` — не правил.
+    pub edited_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct PostRow {
+    pub id: Uuid,
+    pub thread_id: Uuid,
+    pub author_id: Uuid,
+    pub parent_id: Option<Uuid>,
+    /// Автор родителя, если тот не удалён.
+    pub parent_author_id: Option<Uuid>,
+    pub body: Option<String>,
+    pub edited_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Колонки [`PostRow`] для `FROM forum_posts p`.
+pub const POST_COLUMNS: &str = "p.id, p.thread_id, p.author_id, p.parent_id,
+    (SELECT parent.author_id FROM forum_posts parent
+     WHERE parent.id = p.parent_id AND parent.deleted_at IS NULL) AS parent_author_id,
+    p.body, p.edited_at, p.created_at";
+
+/// Порядок тем.
+#[derive(Debug, Clone, Copy, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadSort {
+    /// Недавние сообщения сверху.
+    #[default]
+    Active,
+    /// Новые темы сверху.
+    New,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListThreadsQuery {
+    /// По умолчанию `active`.
+    pub sort: Option<ThreadSort>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PostsQuery {
+    /// Сообщений на странице: 1–100, по умолчанию 50.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
+/// Новая тема.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateThread {
+    /// 1–200 символов.
+    #[schema(example = "Дюна: книга против фильма")]
+    pub title: String,
+    /// 1–20 000 символов.
+    #[schema(example = "Сравниваем роман Херберта и фильм Вильнёва.")]
+    pub body: String,
+    /// slug'и сущностей, 1–10 без повторов. Первая — главная.
+    #[schema(example = json!(["dune-novel", "dune-2021"]))]
+    pub entities: Vec<String>,
+}
+
+/// Изменение темы: переданные поля заменяются, `entities` — набор целиком.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateThread {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    #[schema(example = json!(["dune-novel", "dune-2021", "dune-part-two-2024"]))]
+    pub entities: Option<Vec<String>>,
+}
+
+/// Новое сообщение в теме.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePost {
+    /// 1–10 000 символов.
+    #[schema(example = "У Херберта Пол куда мрачнее.")]
+    pub body: String,
+    /// Ответ на сообщение этой темы; не передан — ответ на тему.
+    pub parent_id: Option<Uuid>,
+}
+
+/// Изменение своего сообщения.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatePost {
+    /// 1–10 000 символов.
+    pub body: String,
 }
 
 /// Отличает «поле не передано» (`None`) от `null` (`Some(None)`).

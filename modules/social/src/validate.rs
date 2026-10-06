@@ -7,6 +7,10 @@ pub const MAX_COLLECTION_TITLE: usize = 200;
 pub const MAX_COLLECTION_DESCRIPTION: usize = 2_000;
 pub const MAX_NOTE: usize = 1_000;
 pub const MAX_COLLECTION_ITEMS: i64 = 500;
+pub const MAX_THREAD_TITLE: usize = 200;
+pub const MAX_THREAD_BODY: usize = 20_000;
+pub const MAX_POST_BODY: usize = 10_000;
+pub const MAX_THREAD_ENTITIES: usize = 10;
 
 fn bad(message: String) -> AppError {
     AppError::BadRequest(message)

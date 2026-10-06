@@ -111,7 +111,7 @@ let authors = state.users.by_ids(&ids).await?;                                  
 
 Скопируйте в новую сессию Claude Code, открытую в `/home/dev/nexus_project`.
 
-### social: форум (следующий)
+### social: форум (готов, для истории)
 
 ```
 Проект Nexus — модульный монолит на Rust (axum 0.8, sqlx 0.8, PostgreSQL 17, utoipa, Meilisearch).

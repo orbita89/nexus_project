@@ -5,7 +5,8 @@
 //! удалены прямо сейчас, каскад ещё не дошёл), пропускается.
 
 use crate::models::{
-    Collection, CollectionItem, CollectionItemRow, CollectionRow, Review, ReviewRow,
+    Collection, CollectionItem, CollectionItemRow, CollectionRow, Post, PostRow, Review, ReviewRow,
+    Thread, ThreadRow,
 };
 use shared::directory::{EntityRef, UserRef};
 use shared::{AppError, AppResult, AppState};
@@ -112,4 +113,75 @@ pub async fn items(
             })
         })
         .collect())
+}
+
+/// Темы. `links` — пары (тема, сущность) по порядку показа. Сущность, которой нет в справочнике,
+/// из темы пропадает, а сама тема остаётся.
+pub async fn threads(
+    state: &AppState,
+    rows: Vec<ThreadRow>,
+    links: Vec<(Uuid, Uuid)>,
+) -> AppResult<Vec<Thread>> {
+    let users = users(state, rows.iter().map(|r| r.author_id).collect()).await?;
+    let entities = entities(state, links.iter().map(|&(_, e)| e).collect()).await?;
+    let mut by_thread: HashMap<Uuid, Vec<EntityRef>> = HashMap::new();
+    for (thread, entity) in links {
+        if let Some(entity) = entities.get(&entity) {
+            by_thread.entry(thread).or_default().push(entity.clone());
+        }
+    }
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(Thread {
+                author: users.get(&row.author_id)?.clone(),
+                entities: by_thread.remove(&row.id).unwrap_or_default(),
+                id: row.id,
+                title: row.title,
+                posts_count: row.posts_count,
+                last_post_at: row.last_post_at,
+                is_locked: row.is_locked,
+                edited_at: row.edited_at,
+                created_at: row.created_at,
+            })
+        })
+        .collect())
+}
+
+/// Сообщения. У заглушки удалённого (`body` = `NULL`) автор не показывается.
+pub async fn posts(state: &AppState, rows: Vec<PostRow>) -> AppResult<Vec<Post>> {
+    let ids = rows
+        .iter()
+        .filter(|r| r.body.is_some())
+        .map(|r| r.author_id)
+        .chain(rows.iter().filter_map(|r| r.parent_author_id))
+        .collect();
+    let users = users(state, ids).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let author = match row.body {
+                Some(_) => Some(users.get(&row.author_id)?.clone()),
+                None => None,
+            };
+            Some(Post {
+                deleted: row.body.is_none(),
+                reply_to: row.parent_author_id.and_then(|id| users.get(&id).cloned()),
+                author,
+                id: row.id,
+                thread_id: row.thread_id,
+                parent_id: row.parent_id,
+                body: row.body,
+                edited_at: row.edited_at,
+                created_at: row.created_at,
+            })
+        })
+        .collect())
+}
+
+pub async fn post(state: &AppState, row: PostRow) -> AppResult<Post> {
+    posts(state, vec![row])
+        .await?
+        .pop()
+        .ok_or(AppError::NotFound)
 }
