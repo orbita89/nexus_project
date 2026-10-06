@@ -9,6 +9,7 @@ use axum::http::HeaderMap;
 use axum::Json;
 use serde::Deserialize;
 use shared::error::ErrorBody;
+use shared::extract::JsonBody;
 use shared::{AppError, AppResult, AppState, Role};
 use utoipa::ToSchema;
 
@@ -36,7 +37,7 @@ pub struct DevLoginRequest {
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<DevLoginRequest>,
+    JsonBody(req): JsonBody<DevLoginRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     if !state.config.dev_login {
         return Err(AppError::NotFound);

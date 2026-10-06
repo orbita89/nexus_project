@@ -252,6 +252,13 @@ async fn register_validates_input(pool: PgPool) {
         )
         .await;
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
+
+    // Неразобранное тело — 400 {"error": "..."}, а не 422 с текстом.
+    for body in [json!({ "email": "neo@example.com" }), json!({ "email": 1 })] {
+        let response = ctx.post("/register", body.clone()).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(response.json()["error"].is_string(), "{body}");
+    }
 }
 
 // ------------------------------------------------------------ вход по паролю

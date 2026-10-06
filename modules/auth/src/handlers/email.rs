@@ -12,6 +12,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::{Extension, Json};
 use shared::error::ErrorBody;
+use shared::extract::JsonBody;
 use shared::{AppError, AppResult, AppState};
 use std::sync::Arc;
 
@@ -28,7 +29,7 @@ use std::sync::Arc;
 pub async fn verify_email(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<EmailTokenRequest>,
+    JsonBody(req): JsonBody<EmailTokenRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     let mut tx = state.db.begin().await?;
     let consumed = email_tokens::consume(&mut tx, Purpose::VerifyEmail, &req.token).await?;
@@ -55,7 +56,7 @@ pub async fn resend_verification(
     State(state): State<AppState>,
     Extension(limits): Extension<Arc<RateLimits>>,
     headers: HeaderMap,
-    Json(req): Json<EmailRequest>,
+    JsonBody(req): JsonBody<EmailRequest>,
 ) -> AppResult<StatusCode> {
     limits.check_ip(&headers)?;
     let email = req.email.trim();
@@ -98,7 +99,7 @@ pub async fn email_login_start(
     State(state): State<AppState>,
     Extension(limits): Extension<Arc<RateLimits>>,
     headers: HeaderMap,
-    Json(req): Json<EmailRequest>,
+    JsonBody(req): JsonBody<EmailRequest>,
 ) -> AppResult<StatusCode> {
     limits.check_ip(&headers)?;
     let email = req.email.trim();
@@ -136,7 +137,7 @@ pub async fn email_login_start(
 pub async fn email_login_confirm(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<EmailTokenRequest>,
+    JsonBody(req): JsonBody<EmailTokenRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     let mut tx = state.db.begin().await?;
     let consumed = email_tokens::consume(&mut tx, Purpose::Login, &req.token).await?;

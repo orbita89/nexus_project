@@ -4,9 +4,10 @@ use crate::models::{
     page_bounds, Entity, EntityCredit, EntityCreditRow, EntityDetail, EntitySummary,
     ListEntitiesQuery, Page, Tag, ENTITY_COLUMNS, ENTITY_SUMMARY_COLUMNS,
 };
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::Json;
 use shared::error::ErrorBody;
+use shared::extract::{Path, Query};
 use shared::{AppError, AppResult, AppState};
 use sqlx::PgExecutor;
 use uuid::Uuid;

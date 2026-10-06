@@ -4,7 +4,7 @@
 //! (вход, refresh, выход) — в модуле `auth`.
 
 use crate::{AppError, AppResult, AppState};
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, OptionalFromRequestParts};
 use axum::http::{header, request::Parts};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
@@ -134,6 +134,22 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
+/// `Option<AuthUser>` — для эндпоинтов, открытых гостям, но показывающих владельцу больше
+/// (например, его приватные коллекции). Нет заголовка — `None`; неверный токен — всё равно 401,
+/// чтобы клиент с протухшим токеном не получал молча «гостевой» ответ.
+impl OptionalFromRequestParts<AppState> for AuthUser {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> AppResult<Option<Self>> {
+        if !parts.headers.contains_key(header::AUTHORIZATION) {
+            return Ok(None);
+        }
+        <Self as FromRequestParts<AppState>>::from_request_parts(parts, state)
+            .await
+            .map(Some)
+    }
+}
+
 /// Пользователь с ролью `admin`. Для админских эндпоинтов: остальные получают 403.
 #[derive(Debug, Clone, Copy)]
 pub struct AdminUser(pub AuthUser);
@@ -142,7 +158,8 @@ impl FromRequestParts<AppState> for AdminUser {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> AppResult<Self> {
-        let user = AuthUser::from_request_parts(parts, state).await?;
+        let user =
+            <AuthUser as FromRequestParts<AppState>>::from_request_parts(parts, state).await?;
         user.require(Role::Admin)?;
         Ok(Self(user))
     }

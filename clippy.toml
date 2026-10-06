@@ -1,0 +1,7 @@
+# Ошибки разбора запроса — тоже `{"error": "..."}` (documents/for-other-modules.md):
+# вместо axum-экстракторов — обёртки из shared::extract. axum::Json здесь не запретить: он же тип
+# ответа; для тела запроса — shared::extract::JsonBody.
+disallowed-types = [
+    { path = "axum::extract::Path", reason = "используйте shared::extract::Path: ошибка разбора будет {\"error\"}" },
+    { path = "axum::extract::Query", reason = "используйте shared::extract::Query: ошибка разбора будет {\"error\"}" },
+]

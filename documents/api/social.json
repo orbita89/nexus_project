@@ -1,0 +1,2248 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Nexus API: социальное",
+    "description": "Рецензии и оценки, подписки на пользователей, коллекции.\n\nСущности адресуются по `slug` (как в каталоге), пользователи — по `username`, коллекции — по `id`. Ошибки — всегда `{\"error\": \"...\"}`. Чтение публичного — без авторизации; рецензии, подписки и свои коллекции — любой вошедший; модерация (`/admin/...`) — только роль `admin`. Токен: во вкладке **Nexus API** выполните `POST /api/v1/auth/login` (`user` / `admin`, пароль `password123`) и вставьте `access_token` в **Authorize**.",
+    "license": {
+      "name": "proprietary",
+      "identifier": "proprietary"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/social/admin/collections/{id}": {
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Удалить любую коллекцию, в том числе приватную.",
+        "operationId": "delete_collection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/admin/reviews/{id}": {
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Удалить любую рецензию.",
+        "operationId": "delete_review",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id рецензии",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/collections": {
+      "get": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Новые публичные коллекции.",
+        "operationId": "list_public",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница коллекций",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Collection"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Создать коллекцию.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCollection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/collections/{id}": {
+      "get": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Коллекция с содержимым по порядку.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Коллекция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Токен передан, но недействителен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или приватная чужая",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Удалить свою коллекцию.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужая публичная коллекция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или приватная чужая",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Изменить название, описание или видимость своей коллекции.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCollection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужая публичная коллекция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или приватная чужая",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/collections/{id}/items": {
+      "put": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Задать порядок всех произведений своей коллекции: позиции становятся 0, 1, 2, ...",
+        "operationId": "reorder",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderItems"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Коллекция в новом порядке",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Список не совпадает с содержимым коллекции",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужая публичная коллекция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или приватная чужая",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/collections/{id}/items/{slug}": {
+      "put": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Добавить произведение в свою коллекцию или изменить его позицию и заметку.",
+        "operationId": "put_item",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "requestBody": {
+          "description": "Можно не передавать тело: добавить в конец без заметки",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutCollectionItem"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionItem"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Добавлено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля или в коллекции уже 500 произведений",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужая публичная коллекция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции или сущности",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Убрать произведение из своей коллекции.",
+        "operationId": "delete_item",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Убрано"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужая публичная коллекция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции, сущности или её нет в коллекции",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/entities/{slug}/collections": {
+      "get": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Публичные коллекции, в которых есть сущность.",
+        "operationId": "list_for_entity",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница коллекций",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Collection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/social/entities/{slug}/rating": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Сводка оценок сущности: средняя, количество, распределение.",
+        "operationId": "rating",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сводка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RatingSummary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/social/entities/{slug}/review": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Своя рецензия на сущность.",
+        "operationId": "get_own",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Рецензия",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена или рецензии нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Поставить оценку и/или написать рецензию. Повторный вызов заменяет рецензию целиком.",
+        "operationId": "put_own",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutReview"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Заменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля или нет ни оценки, ни текста",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Удалить свою рецензию (вместе с оценкой).",
+        "operationId": "delete_own",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена или рецензии нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/entities/{slug}/reviews": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Рецензии на сущность. По умолчанию только с текстом и новые сверху.",
+        "operationId": "list_for_entity",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "По умолчанию `new`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ReviewSort"
+            }
+          },
+          {
+            "name": "all",
+            "in": "query",
+            "description": "`true` — включая оценки без текста. По умолчанию только рецензии с текстом.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница рецензий",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Review"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/social/users/{username}": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Профиль: сколько подписчиков, подписок, рецензий и коллекций; вошедшему — подписан ли он\nи подписан ли пользователь на него. Шапка профиля и кнопка «Подписаться» — одним запросом.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "author"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Профиль",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SocialProfile"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Токен передан, но недействителен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/users/{username}/collections": {
+      "get": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Коллекции пользователя, новые сверху. Владелец видит и свои приватные.",
+        "operationId": "list_for_user",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "user"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница коллекций",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Collection"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Токен передан, но недействителен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/users/{username}/follow": {
+      "put": {
+        "tags": [
+          "follows"
+        ],
+        "summary": "Подписаться на пользователя. Повторная подписка ничего не меняет.",
+        "operationId": "follow",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "На кого подписаться",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "author"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Подписан"
+          },
+          "400": {
+            "description": "Подписка на себя",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "follows"
+        ],
+        "summary": "Отписаться. Если подписки не было — тоже 204.",
+        "operationId": "unfollow",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "От кого отписаться",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "author"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Не подписан"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/users/{username}/followers": {
+      "get": {
+        "tags": [
+          "follows"
+        ],
+        "summary": "Подписчики пользователя, новые сверху.",
+        "operationId": "followers",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "author"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница подписчиков",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Follow"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/social/users/{username}/following": {
+      "get": {
+        "tags": [
+          "follows"
+        ],
+        "summary": "На кого подписан пользователь, новые сверху.",
+        "operationId": "following",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "user"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница подписок",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Follow"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/social/users/{username}/reviews": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Рецензии и оценки пользователя, новые сверху (включая оценки без текста).",
+        "operationId": "list_for_user",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "user"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница рецензий",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Review"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Collection": {
+        "type": "object",
+        "description": "Коллекция в списке.",
+        "required": [
+          "id",
+          "owner",
+          "title",
+          "is_public",
+          "items_count",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_public": {
+            "type": "boolean",
+            "description": "`false` — видна только владельцу."
+          },
+          "items_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько произведений.",
+            "example": 7
+          },
+          "owner": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "title": {
+            "type": "string",
+            "example": "Лучшая фантастика"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CollectionDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Collection"
+          },
+          {
+            "type": "object",
+            "required": [
+              "items"
+            ],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CollectionItem"
+                }
+              }
+            }
+          }
+        ],
+        "description": "Коллекция с содержимым по порядку."
+      },
+      "CollectionItem": {
+        "type": "object",
+        "description": "Произведение в коллекции.",
+        "required": [
+          "entity",
+          "position",
+          "added_at"
+        ],
+        "properties": {
+          "added_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entity": {
+            "$ref": "#/components/schemas/EntityRef"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Комментарий владельца."
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Порядок: по возрастанию, при равенстве — по времени добавления."
+          }
+        }
+      },
+      "CreateCollection": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "До 2000 символов."
+          },
+          "is_public": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "По умолчанию `true`."
+          },
+          "title": {
+            "type": "string",
+            "description": "1–200 символов.",
+            "example": "Лучшая фантастика"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EntityRef": {
+        "type": "object",
+        "description": "Сущность каталога в чужих ответах: ровно столько, сколько нужно для ссылки на карточку.",
+        "required": [
+          "id",
+          "kind",
+          "slug",
+          "title"
+        ],
+        "properties": {
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`movie`, `series`, `book`, `game`.",
+            "example": "movie"
+          },
+          "slug": {
+            "type": "string",
+            "example": "dune-2021"
+          },
+          "title": {
+            "type": "string",
+            "example": "Дюна"
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "Тело любого ответа с ошибкой. Нужно для документации API.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Описание ошибки.",
+            "example": "unauthorized"
+          }
+        }
+      },
+      "Follow": {
+        "type": "object",
+        "description": "Подписчик или подписка.",
+        "required": [
+          "user",
+          "since"
+        ],
+        "properties": {
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Когда подписался."
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserRef"
+          }
+        }
+      },
+      "Page_Collection": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Коллекция в списке.",
+              "required": [
+                "id",
+                "owner",
+                "title",
+                "is_public",
+                "items_count",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "is_public": {
+                  "type": "boolean",
+                  "description": "`false` — видна только владельцу."
+                },
+                "items_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Сколько произведений.",
+                  "example": 7
+                },
+                "owner": {
+                  "$ref": "#/components/schemas/UserRef"
+                },
+                "title": {
+                  "type": "string",
+                  "example": "Лучшая фантастика"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_Follow": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Подписчик или подписка.",
+              "required": [
+                "user",
+                "since"
+              ],
+              "properties": {
+                "since": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Когда подписался."
+                },
+                "user": {
+                  "$ref": "#/components/schemas/UserRef"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_Review": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Рецензия: оценка, текст или и то и другое.",
+              "required": [
+                "id",
+                "author",
+                "entity",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "author": {
+                  "$ref": "#/components/schemas/UserRef"
+                },
+                "body": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "entity": {
+                  "$ref": "#/components/schemas/EntityRef"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "rating": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "1–10.",
+                  "example": 8
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "PutCollectionItem": {
+        "type": "object",
+        "description": "Добавить произведение в коллекцию или изменить пункт.",
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "До 1000 символов. Не передан — не меняется, `null` — очищается."
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Новый пункт без `position` встаёт в конец; у существующего без `position` порядок не меняется."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PutReview": {
+        "type": "object",
+        "description": "Своя рецензия: заменяется целиком. Нужна хотя бы оценка или текст.",
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "До 10 000 символов. Пустой — без текста.",
+            "example": "Визуально — шедевр."
+          },
+          "rating": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1–10.",
+            "example": 9
+          }
+        },
+        "additionalProperties": false
+      },
+      "RatingSummary": {
+        "type": "object",
+        "description": "Сводка оценок сущности. Учитываются все рецензии с оценкой, в том числе без текста.",
+        "required": [
+          "count",
+          "distribution"
+        ],
+        "properties": {
+          "average": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Средняя оценка, округлена до 0.1. `null` — оценок нет.",
+            "example": 8.3
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько оценок.",
+            "example": 12
+          },
+          "distribution": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Число оценок 1, 2, ..., 10: всегда 10 элементов.",
+            "example": [
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              2,
+              3,
+              4,
+              2
+            ]
+          }
+        }
+      },
+      "Relation": {
+        "type": "object",
+        "description": "Подписки между вошедшим и пользователем профиля.",
+        "required": [
+          "following",
+          "followed_by"
+        ],
+        "properties": {
+          "followed_by": {
+            "type": "boolean",
+            "description": "Пользователь подписан на вошедшего."
+          },
+          "following": {
+            "type": "boolean",
+            "description": "Вошедший подписан на пользователя."
+          }
+        }
+      },
+      "ReorderItems": {
+        "type": "object",
+        "description": "Новый порядок: slug'и всех произведений коллекции, каждое ровно один раз.",
+        "required": [
+          "entities"
+        ],
+        "properties": {
+          "entities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "dune-novel",
+              "dune-2021",
+              "dune-part-two-2024"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "Review": {
+        "type": "object",
+        "description": "Рецензия: оценка, текст или и то и другое.",
+        "required": [
+          "id",
+          "author",
+          "entity",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "author": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entity": {
+            "$ref": "#/components/schemas/EntityRef"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "rating": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1–10.",
+            "example": 8
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SocialProfile": {
+        "type": "object",
+        "description": "Социальный профиль пользователя.",
+        "required": [
+          "user",
+          "followers_count",
+          "following_count",
+          "reviews_count",
+          "collections_count"
+        ],
+        "properties": {
+          "collections_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Публичные коллекции; владельцу — вместе с приватными.",
+            "example": 2
+          },
+          "followers_count": {
+            "type": "integer",
+            "format": "int64",
+            "example": 12
+          },
+          "following_count": {
+            "type": "integer",
+            "format": "int64",
+            "example": 3
+          },
+          "relation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Relation",
+                "description": "Отношение вошедшего к пользователю. `null` — гость или свой профиль."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reviews_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Все рецензии, включая оценки без текста.",
+            "example": 40
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserRef"
+          }
+        }
+      },
+      "UpdateCollection": {
+        "type": "object",
+        "description": "Изменение коллекции: переданные поля заменяются, `null` очищает описание.",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_public": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "UserRef": {
+        "type": "object",
+        "description": "Пользователь в чужих ответах (автор рецензии, владелец коллекции, подписчик).",
+        "required": [
+          "id",
+          "username"
+        ],
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Обычный пользователь"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "username": {
+            "type": "string",
+            "example": "user"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "users",
+      "description": "Социальный профиль: счётчики и подписан ли вошедший"
+    },
+    {
+      "name": "reviews",
+      "description": "Рецензии и оценки"
+    },
+    {
+      "name": "follows",
+      "description": "Подписки на пользователей"
+    },
+    {
+      "name": "collections",
+      "description": "Коллекции: приватные видит только владелец"
+    },
+    {
+      "name": "social-admin",
+      "description": "Модерация. Только роль admin"
+    }
+  ]
+}

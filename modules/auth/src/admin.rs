@@ -2,9 +2,10 @@
 
 use crate::models::{ListUsersQuery, SetRoleRequest, SetStatusRequest, UserView, USER_COLUMNS};
 use crate::session;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::Json;
 use shared::error::ErrorBody;
+use shared::extract::{JsonBody, Path, Query};
 use shared::{AdminUser, AppError, AppResult, AppState, Role};
 use uuid::Uuid;
 
@@ -56,7 +57,7 @@ pub async fn set_role(
     State(state): State<AppState>,
     AdminUser(admin): AdminUser,
     Path(user_id): Path<Uuid>,
-    Json(req): Json<SetRoleRequest>,
+    JsonBody(req): JsonBody<SetRoleRequest>,
 ) -> AppResult<Json<UserView>> {
     // Защита от ситуации «последний админ разжаловал сам себя».
     if user_id == admin.id && req.role != Role::Admin {
@@ -98,7 +99,7 @@ pub async fn set_status(
     State(state): State<AppState>,
     AdminUser(admin): AdminUser,
     Path(user_id): Path<Uuid>,
-    Json(req): Json<SetStatusRequest>,
+    JsonBody(req): JsonBody<SetStatusRequest>,
 ) -> AppResult<Json<UserView>> {
     if user_id == admin.id && !req.is_active {
         return Err(AppError::BadRequest(

@@ -5,9 +5,10 @@ use crate::models::{
     page_bounds, ListPeopleQuery, Page, Person, PersonCreditRow, PersonDetail, PersonSummary,
     ENTITY_SUMMARY_COLUMNS, PERSON_COLUMNS,
 };
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::Json;
 use shared::error::ErrorBody;
+use shared::extract::{Path, Query};
 use shared::{AppError, AppResult, AppState};
 
 /// Список людей по алфавиту.

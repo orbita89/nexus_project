@@ -15,7 +15,7 @@ use crate::models::{TokenResponse, UserView};
 use crate::rate_limit::RateLimits;
 use crate::session::{self, ClientInfo};
 use crate::{crypto, users};
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Redirect;
 use axum::{Extension, Json};
@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use shared::config::OAuthProviderConfig;
 use shared::error::ErrorBody;
+use shared::extract::{JsonBody, Path, Query};
 use shared::{AppError, AppResult, AppState, API_PREFIX};
 use sqlx::PgConnection;
 use std::sync::Arc;
@@ -190,7 +191,7 @@ pub async fn callback(
 pub async fn exchange(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<ExchangeRequest>,
+    JsonBody(req): JsonBody<ExchangeRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     let mut tx = state.db.begin().await?;
     let consumed = email_tokens::consume(&mut tx, Purpose::OAuthLogin, &req.code).await?;

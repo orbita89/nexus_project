@@ -9,7 +9,7 @@
 - **Модули не зависят друг от друга**, только от `libs/shared` (CI проверяет). Даже от `auth` зависеть нельзя:
   всё нужное для авторизации лежит в `shared`.
 - Пользователь — это `users.id` (`uuid`). Ссылайтесь на него внешним ключом, данные пользователя
-  (email, имя) берите не JOIN'ом в чужую таблицу, а через публичный интерфейс, когда он понадобится.
+  (username, имя) берите не JOIN'ом в чужую таблицу, а через справочник (см. ниже).
 
 ## Авторизация в хендлере
 
@@ -26,7 +26,8 @@ async fn create_thread(user: AuthUser, ...) -> AppResult<...> {
 async fn admin_only(AdminUser(admin): AdminUser, ...) -> AppResult<...>     // только admin
 ```
 
-`AuthUser { id, role, session_id }`. Роли: `user < author < admin`.
+`AuthUser { id, role, session_id }`. Роли: `user < author < admin`. Для «гостю — публичное, владельцу —
+ещё и своё» есть `Option<AuthUser>`: без заголовка — `None`, с недействительным токеном — 401.
 
 | Роль | Права |
 |---|---|
@@ -37,8 +38,26 @@ async fn admin_only(AdminUser(admin): AdminUser, ...) -> AppResult<...>     // �
 
 Ошибки — `AppError` (`NotFound`, `BadRequest(msg)`, `Unauthorized`, `Forbidden`, `Conflict(msg)`,
 `Unavailable(msg)` → 503, ...), тело ответа всегда `{"error": "..."}`. Ошибки БД наружу не уходят, только в лог.
-JSON-тело запроса принимайте через `shared::extract::JsonBody<T>` вместо `axum::Json<T>`: неразобранное
-тело тогда тоже даёт `400 {"error": "..."}`, а не текст с 422.
+Параметры запроса — через `shared::extract`, а не axum: JSON-тело — `JsonBody<T>` вместо `axum::Json<T>`,
+путь — `Path<T>`, query — `Query<T>`. Тогда и неразобранный запрос (`/x/not-a-uuid`, `?year=abc`, тело
+без поля) даёт `400 {"error": "..."}`, а не текст или 422. `axum::extract::{Path, Query}` в модулях
+запрещены через `clippy.toml` (`make lint` упадёт); `axum::Json` запретить нельзя — он же тип ответа.
+
+## Чужие данные: справочники
+
+Нужны название сущности или имя пользователя — не JOIN в чужую таблицу, а трейты из
+`shared::directory`, которые реализуют модули-владельцы и которые лежат в `AppState`:
+
+```rust
+let entity = state.entities.by_slug("dune-2021").await?.ok_or(AppError::NotFound)?; // EntityRef
+let authors = state.users.by_ids(&ids).await?;                                       // HashMap<Uuid, UserRef>
+```
+
+`by_ids` пакетный: соберите id со страницы и сделайте один вызов. Нужен новый метод — добавьте его в
+трейт и в реализацию у владельца (`catalog/src/directory.rs`, `auth/src/directory.rs`). В тестах
+справочник подменяется: `state.entities = Arc::new(Fake)`. Образец — модуль `social` (`refs.rs`).
+
+Пагинация: `shared::pagination::{Page, page_bounds}` — `{items, total, limit, offset}`.
 
 ## Как встроить модуль
 
@@ -75,7 +94,7 @@ JSON-тело запроса принимайте через `shared::extract::J
 
 | | |
 |---|---|
-| Запуск | `make up`, `make seed` (admin / author / user, пароль `password123`, и мини-каталог) |
+| Запуск | `make up`, `make seed` (admin / author / user, пароль `password123`, мини-каталог и social) |
 | Swagger | http://localhost/docs |
 | Письма | http://localhost:8025 (Mailpit) |
 | БД | `postgres://nexus_user:nexus_password@localhost:5432/nexus_db` |
@@ -92,7 +111,7 @@ JSON-тело запроса принимайте через `shared::extract::J
 
 Скопируйте в новую сессию Claude Code, открытую в `/home/dev/nexus_project`.
 
-### social (следующий)
+### social, первая часть (готов, для истории)
 
 ```
 Проект Nexus — модульный монолит на Rust (axum 0.8, sqlx 0.8, PostgreSQL 17, utoipa, Meilisearch).

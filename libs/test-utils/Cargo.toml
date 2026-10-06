@@ -10,6 +10,10 @@ workspace = true
 
 [dependencies]
 shared = { workspace = true }
+# Настоящие справочники (shared::directory) для AppState в тестах. Граница модулей
+# проверяется только для modules/*, хелпер тестов может зависеть от них.
+auth = { workspace = true }
+catalog = { workspace = true }
 axum = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

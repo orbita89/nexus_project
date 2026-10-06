@@ -4,7 +4,10 @@
 //! Модули друг от друга не зависят: всё общее приходит через `shared::AppState`.
 
 use axum::{Json, Router};
+use shared::directory::Directories;
 use shared::{AppState, API_PREFIX};
+use sqlx::PgPool;
+use std::sync::Arc;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::openapi::OpenApi as OpenApiSpec;
 use utoipa::{Modify, OpenApi};
@@ -56,6 +59,38 @@ struct ApiDoc;
 )]
 struct CatalogDoc;
 
+/// Отдельная вкладка Swagger UI для социального модуля.
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Nexus API: социальное",
+        description = "Рецензии и оценки, подписки на пользователей, коллекции.\n\n\
+            Сущности адресуются по `slug` (как в каталоге), пользователи — по `username`, коллекции — \
+            по `id`. Ошибки — всегда `{\"error\": \"...\"}`. Чтение публичного — без авторизации; рецензии, подписки и свои коллекции — любой \
+            вошедший; модерация (`/admin/...`) — только роль `admin`. Токен: во вкладке **Nexus API** \
+            выполните `POST /api/v1/auth/login` (`user` / `admin`, пароль `password123`) и вставьте \
+            `access_token` в **Authorize**."
+    ),
+    modifiers(&BearerAuth),
+    tags(
+        (name = "users", description = "Социальный профиль: счётчики и подписан ли вошедший"),
+        (name = "reviews", description = "Рецензии и оценки"),
+        (name = "follows", description = "Подписки на пользователей"),
+        (name = "collections", description = "Коллекции: приватные видит только владелец"),
+        (name = "social-admin", description = "Модерация. Только роль admin"),
+    )
+)]
+struct SocialDoc;
+
+/// Справочники модулей-владельцев данных (`shared::directory`): через них модули читают чужие
+/// данные, не зная друг о друге.
+pub fn directories(db: PgPool) -> Directories {
+    Directories {
+        entities: Arc::new(catalog::directory::PgEntityDirectory::new(db.clone())),
+        users: Arc::new(auth::directory::PgUserDirectory::new(db)),
+    }
+}
+
 /// OpenAPI-документ: вкладка в Swagger UI (список «Select a definition») и файл в `documents/api/`.
 pub struct ApiDocument {
     /// Название в списке Swagger UI.
@@ -90,10 +125,12 @@ fn api() -> (Router<AppState>, Vec<ApiDocument>) {
     let (router, main) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(health))
         .nest(&format!("{API_PREFIX}/auth"), auth::router())
-        .nest(&format!("{API_PREFIX}/social"), social::router())
         .split_for_parts();
     let (catalog_router, catalog) = OpenApiRouter::with_openapi(CatalogDoc::openapi())
         .nest(&format!("{API_PREFIX}/catalog"), catalog::router())
+        .split_for_parts();
+    let (social_router, social) = OpenApiRouter::with_openapi(SocialDoc::openapi())
+        .nest(&format!("{API_PREFIX}/social"), social::router())
         .split_for_parts();
 
     let docs = vec![
@@ -109,8 +146,14 @@ fn api() -> (Router<AppState>, Vec<ApiDocument>) {
             file: "catalog.json",
             spec: catalog,
         },
+        ApiDocument {
+            name: "Социальное",
+            url: "/api-docs/social.json",
+            file: "social.json",
+            spec: social,
+        },
     ];
-    (router.merge(catalog_router), docs)
+    (router.merge(catalog_router).merge(social_router), docs)
 }
 
 /// OpenAPI-документы приложения (то же, что отдаётся на `/api-docs/*.json`).

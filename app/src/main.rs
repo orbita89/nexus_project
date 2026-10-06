@@ -25,7 +25,8 @@ async fn main() -> anyhow::Result<()> {
 
     auth::cleanup::spawn(pool.clone());
 
-    let state = AppState::new(config.clone(), pool, mailer);
+    let directories = nexus::directories(pool.clone());
+    let state = AppState::new(config.clone(), pool, mailer, directories);
     catalog::search::spawn_reindex(state.clone());
     let app = nexus::build_app(state);
 

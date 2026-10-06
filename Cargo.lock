@@ -1437,6 +1437,7 @@ dependencies = [
  "utoipa",
  "utoipa-axum",
  "utoipa-swagger-ui",
+ "uuid",
 ]
 
 [[package]]
@@ -2225,8 +2226,10 @@ dependencies = [
 name = "shared"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "chrono",
+ "http-body-util",
  "jsonwebtoken",
  "lettre",
  "reqwest",
@@ -2235,6 +2238,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "utoipa",
@@ -2299,6 +2303,7 @@ dependencies = [
  "shared",
  "sqlx",
  "tracing",
+ "utoipa",
  "utoipa-axum",
  "uuid",
 ]
@@ -2608,7 +2613,9 @@ dependencies = [
 name = "test-utils"
 version = "0.1.0"
 dependencies = [
+ "auth",
  "axum",
+ "catalog",
  "http-body-util",
  "serde_json",
  "shared",

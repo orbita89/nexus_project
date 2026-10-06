@@ -232,7 +232,8 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | Файл | Что внутри |
 |---|---|
 | `lib.rs` | Роутер |
-| `models.rs` | `EntityKind`, DTO, `Page<T>` |
+| `models.rs` | `EntityKind`, DTO; `Page<T>` реэкспортируется из `shared::pagination` |
+| `directory.rs` | `PgEntityDirectory`: справочник сущностей для других модулей (`shared::directory::EntityDirectory`) |
 | `metadata.rs` | Схемы `metadata` по типам и их проверка |
 | `validate.rs` | Проверка slug, строк, URL, ролей; UNIQUE → 409 |
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |

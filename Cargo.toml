@@ -70,6 +70,8 @@ http-body-util = "0.1"
 # OAuth: обмен кода на токен и запрос профиля у провайдера. rustls на ring, как у lettre.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
+# Трейты-справочники в shared::directory: async fn в dyn-трейтах пока нестабильны.
+async-trait = "0.1"
 
 [profile.dev]
 # Меньше отладочной информации -> заметно быстрее линковка и меньше target/ при hot-reload.

@@ -4,10 +4,12 @@ use axum::body::Body;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
+use shared::directory::Directories;
 use shared::mail::{Mailer, Outbox};
 use shared::search::Search;
 use shared::{AppState, Config};
 use sqlx::PgPool;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 /// Состояние приложения поверх тестовой БД (например, из `#[sqlx::test]`).
@@ -20,9 +22,19 @@ pub fn state(pool: PgPool) -> (AppState, Outbox) {
 /// Поиск выключен: тесты не пишут в Meilisearch. Включить — [`with_search`].
 pub fn state_with_config(pool: PgPool, config: Config) -> (AppState, Outbox) {
     let (mailer, outbox) = Mailer::memory();
-    let mut state = AppState::new(config, pool, mailer);
+    let directories = directories(pool.clone());
+    let mut state = AppState::new(config, pool, mailer, directories);
     state.search = Search::disabled();
     (state, outbox)
+}
+
+/// Настоящие справочники, как в `nexus::directories`. Подменить в тесте:
+/// `state.entities = Arc::new(Fake)`.
+pub fn directories(db: PgPool) -> Directories {
+    Directories {
+        entities: Arc::new(catalog::directory::PgEntityDirectory::new(db.clone())),
+        users: Arc::new(auth::directory::PgUserDirectory::new(db)),
+    }
 }
 
 /// Включает Meilisearch (`MEILI_URL`, `MEILI_MASTER_KEY`) со своим префиксом индексов,

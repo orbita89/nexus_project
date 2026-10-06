@@ -8,12 +8,12 @@ use crate::models::{
 };
 use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
 use crate::{metadata, search};
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde_json::json;
 use shared::error::ErrorBody;
-use shared::extract::JsonBody;
+use shared::extract::{JsonBody, Path};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use sqlx::PgConnection;
 use uuid::Uuid;

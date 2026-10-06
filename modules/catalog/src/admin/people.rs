@@ -4,11 +4,11 @@ use super::{affected_entities, nullable_param};
 use crate::models::{CreatePerson, Person, UpdatePerson, PERSON_COLUMNS};
 use crate::search;
 use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use shared::error::ErrorBody;
-use shared::extract::JsonBody;
+use shared::extract::{JsonBody, Path};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use uuid::Uuid;
 
