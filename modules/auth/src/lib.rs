@@ -12,6 +12,7 @@
 mod admin;
 pub mod cleanup;
 pub mod crypto;
+pub mod directory;
 mod email_tokens;
 mod emails;
 mod handlers;

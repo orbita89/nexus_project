@@ -2,10 +2,11 @@
 
 use crate::models::SessionView;
 use crate::session;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use shared::error::ErrorBody;
+use shared::extract::Path;
 use shared::{AppError, AppResult, AppState, AuthUser};
 use uuid::Uuid;
 

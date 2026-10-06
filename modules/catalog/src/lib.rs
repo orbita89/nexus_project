@@ -4,6 +4,7 @@
 //! Чтение — без авторизации, запись — `/admin/...`, только роль admin.
 
 pub mod admin;
+pub mod directory;
 pub mod entities;
 pub mod metadata;
 pub mod models;

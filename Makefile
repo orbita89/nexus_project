@@ -24,8 +24,8 @@ logs:        ## Логи приложения
 run:         ## Запустить приложение локально (без Docker)
 	cargo run -p nexus
 
-seed:        ## Загрузить тестовых пользователей и каталог (seeds/*.sql) в dev-базу, перестроить поиск
-	cat seeds/dev.sql seeds/catalog.sql | $(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -q -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+seed:        ## Загрузить тестовых пользователей, каталог и social (seeds/*.sql) в dev-базу, перестроить поиск
+	cat seeds/dev.sql seeds/catalog.sql seeds/social.sql | $(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -q -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 	scripts/reindex-search.sh
 
 fmt:         ## Отформатировать код
@@ -50,6 +50,6 @@ image:       ## Собрать production-образ
 # Нужна сеть хоста, чтобы контейнер видел localhost:80 (nginx из make up).
 http:        ## HTTP-проверки из http/*.http против поднятого окружения (нужен make seed)
 	docker run --rm --network host -v $(CURDIR)/http:/workdir jetbrains/intellij-http-client \
-		--env-file http-client.env.json --env dev health.http auth.http catalog.http
+		--env-file http-client.env.json --env dev health.http auth.http catalog.http social.http
 
 ci: lint boundaries test deny  ## Всё, что проверяет CI (кроме сборки образа)

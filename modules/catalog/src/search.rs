@@ -9,13 +9,14 @@
 use crate::entities::check_year;
 use crate::models::{page_bounds, EntityKind, EntitySummary, Page, ReindexResult, SearchQuery};
 use crate::validate;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::Method;
 use axum::Json;
 use chrono::NaiveDate;
 use serde::Serialize;
 use serde_json::{json, Value};
 use shared::error::ErrorBody;
+use shared::extract::Query;
 use shared::search::SearchError;
 use shared::{AdminUser, AppError, AppResult, AppState};
 use uuid::Uuid;

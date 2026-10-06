@@ -1,0 +1,461 @@
+# Социальное: рецензии и оценки, подписки, коллекции, модерация против живого окружения.
+# Нужно: make up, make seed (пользователи, каталог и social из seeds/*.sql).
+# Запросы зависят друг от друга (значения сохраняются в client.global) — запускайте файл целиком.
+# Всё, что файл создаёт, он же и удаляет: повторный запуск видит те же данные дампа. Остатки
+# прерванного прогона (например, после 429 на входе) не мешают: следующий прогон их уберёт.
+# Из консоли: make http
+
+### Вход обычным пользователем
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "user", "password": "password123" }
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+    client.global.set("user_token", response.body.access_token);
+%}
+
+### Вход автором
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "author", "password": "password123" }
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+    client.global.set("author_token", response.body.access_token);
+%}
+
+### Вход админом
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "admin", "password": "password123" }
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+    client.global.set("admin_token", response.body.access_token);
+%}
+
+# ------------------------------------------------------------------ профиль
+
+### Профиль автора гостем: счётчики, отношения нет
+GET {{host}}/api/v1/social/users/author
+
+> {%
+    client.test("200, relation = null", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.user.username === "author");
+        client.assert(response.body.followers_count >= 2 && response.body.reviews_count >= 4, JSON.stringify(response.body));
+        client.assert(response.body.relation === null);
+    });
+%}
+
+### Профиль автора глазами user: подписаны друг на друга (seeds/social.sql)
+GET {{host}}/api/v1/social/users/author
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200, following и followed_by", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.relation.following === true && response.body.relation.followed_by === true);
+    });
+%}
+
+### Ошибка разбора пути — тоже {error}
+GET {{host}}/api/v1/social/collections/not-a-uuid
+
+> {%
+    client.test("400 с {error}", () => {
+        client.assert(response.status === 400, `got ${response.status}`);
+        client.assert(typeof response.body.error === "string");
+    });
+%}
+
+# ------------------------------------------------------------------ рецензии
+
+### Рецензии на «Дюну» 2021 без токена: только с текстом, новые сверху
+GET {{host}}/api/v1/social/entities/dune-2021/reviews
+
+> {%
+    client.test("200, у всех есть текст, автор и сущность", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.total >= 2, JSON.stringify(response.body));
+        client.assert(response.body.items.every(r => r.body && r.author.username && r.entity.slug === "dune-2021"));
+    });
+%}
+
+### Все рецензии, включая оценки без текста, высокие оценки сверху
+GET {{host}}/api/v1/social/entities/dune-2021/reviews?all=true&sort=rating_desc
+
+> {%
+    client.test("200, оценки по убыванию", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const ratings = response.body.items.map(r => r.rating).filter(r => r !== null);
+        client.assert(ratings.every((r, i) => i === 0 || ratings[i - 1] >= r), JSON.stringify(ratings));
+        client.assert(response.body.items.some(r => r.body === null), "есть оценка без текста");
+    });
+%}
+
+### Сводка оценок
+GET {{host}}/api/v1/social/entities/dune-2021/rating
+
+> {%
+    client.test("200, среднее до 0.1 и 10 корзин", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.count >= 3, JSON.stringify(response.body));
+        client.assert(response.body.distribution.length === 10);
+        client.assert(Math.round(response.body.average * 10) === response.body.average * 10);
+    });
+%}
+
+### Неизвестная сущность — 404
+GET {{host}}/api/v1/social/entities/no-such-entity/rating
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}
+
+### Своя рецензия без токена — 401
+PUT {{host}}/api/v1/social/entities/elden-ring/review
+Content-Type: application/json
+
+{ "rating": 9 }
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}
+
+### Оценка вне 1–10 — 400
+PUT {{host}}/api/v1/social/entities/elden-ring/review
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "rating": 11 }
+
+> {%
+    client.test("400 с {error}", () => {
+        client.assert(response.status === 400, `got ${response.status}`);
+        client.assert(typeof response.body.error === "string");
+    });
+%}
+
+### Написать рецензию на Elden Ring
+PUT {{host}}/api/v1/social/entities/elden-ring/review
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "rating": 9, "body": "Проверка из http/social.http" }
+
+> {%
+    // 200 — рецензия осталась от прерванного прогона: PUT её заменяет.
+    client.test("201 или 200", () => {
+        client.assert(response.status === 201 || response.status === 200, `got ${response.status}`);
+        client.assert(response.body.author.username === "user");
+        client.assert(response.body.entity.slug === "elden-ring");
+    });
+    client.global.set("review_id", response.body.id);
+%}
+
+### Заменить: только оценка
+PUT {{host}}/api/v1/social/entities/elden-ring/review
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "rating": 10 }
+
+> {%
+    client.test("200, текст убран, id тот же", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.id === client.global.get("review_id"));
+        client.assert(response.body.rating === 10 && response.body.body === null);
+    });
+%}
+
+### Своя рецензия
+GET {{host}}/api/v1/social/entities/elden-ring/review
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.rating === 10);
+    });
+%}
+
+### Удалить свою рецензию
+DELETE {{host}}/api/v1/social/entities/elden-ring/review
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Рецензии пользователя
+GET {{host}}/api/v1/social/users/user/reviews?limit=3
+
+> {%
+    client.test("200, 3 из дампа, Elden Ring уже нет", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.length === 3 && response.body.total >= 5, JSON.stringify(response.body));
+        client.assert(response.body.items.every(r => r.author.username === "user" && r.entity.slug !== "elden-ring"));
+    });
+%}
+
+# ------------------------------------------------------------------ подписки
+
+### Подписчики автора
+GET {{host}}/api/v1/social/users/author/followers
+
+> {%
+    client.test("200, среди подписчиков user", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.some(f => f.user.username === "user" && f.since));
+    });
+%}
+
+### Автор подписывается на админа
+PUT {{host}}/api/v1/social/users/admin/follow
+Authorization: Bearer {{author_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Подписки автора: есть admin
+GET {{host}}/api/v1/social/users/author/following
+
+> {%
+    client.test("200, admin в подписках", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.some(f => f.user.username === "admin"));
+    });
+%}
+
+### Отписаться
+DELETE {{host}}/api/v1/social/users/admin/follow
+Authorization: Bearer {{author_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### На себя подписаться нельзя
+PUT {{host}}/api/v1/social/users/author/follow
+Authorization: Bearer {{author_token}}
+
+> {%
+    client.test("400", () => client.assert(response.status === 400, `got ${response.status}`));
+%}
+
+### На заблокированного — 404
+PUT {{host}}/api/v1/social/users/blocked/follow
+Authorization: Bearer {{author_token}}
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}
+
+# ------------------------------------------------------------------ коллекции
+
+### Новые публичные коллекции
+GET {{host}}/api/v1/social/collections
+
+> {%
+    client.test("200, только публичные", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.total >= 2, JSON.stringify(response.body));
+        client.assert(response.body.items.every(c => c.is_public && c.owner.username));
+    });
+%}
+
+### Коллекции user глазами гостя: без приватной
+GET {{host}}/api/v1/social/users/user/collections
+
+> {%
+    client.test("200, нет приватных", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.every(c => c.is_public));
+        client.global.set("guest_total", response.body.total);
+    });
+%}
+
+### Коллекции user глазами владельца: с приватной
+GET {{host}}/api/v1/social/users/user/collections
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200, есть приватная", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.some(c => !c.is_public));
+        client.assert(response.body.total > client.global.get("guest_total"));
+    });
+%}
+
+### В каких коллекциях есть «Дюна» 2021
+GET {{host}}/api/v1/social/entities/dune-2021/collections
+
+> {%
+    client.test("200, «Дюна во всех видах»", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.some(c => c.title === "Дюна во всех видах"));
+    });
+%}
+
+### Создать приватную коллекцию
+POST {{host}}/api/v1/social/collections
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "title": "Проверка из http/social.http", "is_public": false }
+
+> {%
+    client.test("201", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.is_public === false && response.body.items.length === 0);
+    });
+    client.global.set("collection_id", response.body.id);
+%}
+
+### Приватная коллекция гостю — 404
+GET {{host}}/api/v1/social/collections/{{collection_id}}
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}
+
+### Добавить книгу с заметкой
+PUT {{host}}/api/v1/social/collections/{{collection_id}}/items/neuromancer
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "note": "Начало киберпанка" }
+
+> {%
+    client.test("201, позиция 0", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.position === 0 && response.body.note === "Начало киберпанка");
+    });
+%}
+
+### Добавить игру без тела — в конец
+PUT {{host}}/api/v1/social/collections/{{collection_id}}/items/cyberpunk-2077
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("201, позиция 1", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.position === 1);
+    });
+%}
+
+### Переставить: игра первой
+PUT {{host}}/api/v1/social/collections/{{collection_id}}/items
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "entities": ["cyberpunk-2077", "neuromancer"] }
+
+> {%
+    client.test("200, новый порядок", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.map(i => i.entity.slug).join() === "cyberpunk-2077,neuromancer");
+    });
+%}
+
+### Сделать публичной и переименовать
+PATCH {{host}}/api/v1/social/collections/{{collection_id}}
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "title": "Киберпанк: с чего начать", "is_public": true }
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.is_public && response.body.items_count === 2);
+    });
+%}
+
+### Чужую коллекцию менять нельзя
+PATCH {{host}}/api/v1/social/collections/{{collection_id}}
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{ "title": "Взлом" }
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Убрать пункт
+DELETE {{host}}/api/v1/social/collections/{{collection_id}}/items/neuromancer
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Публичная карточка коллекции без токена
+GET {{host}}/api/v1/social/collections/{{collection_id}}
+
+> {%
+    client.test("200, один пункт", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.length === 1 && response.body.owner.username === "user");
+    });
+%}
+
+# ------------------------------------------------------------------ модерация
+
+### Модерация не для автора
+DELETE {{host}}/api/v1/social/admin/collections/{{collection_id}}
+Authorization: Bearer {{author_token}}
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Админ удаляет коллекцию
+DELETE {{host}}/api/v1/social/admin/collections/{{collection_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Коллекции больше нет
+GET {{host}}/api/v1/social/collections/{{collection_id}}
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}
+
+### Рецензия для модерации
+PUT {{host}}/api/v1/social/entities/elden-ring/review
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{ "body": "Спам из http/social.http" }
+
+> {%
+    client.test("201 или 200", () => client.assert(response.status === 201 || response.status === 200, `got ${response.status}`));
+    client.global.set("spam_review_id", response.body.id);
+%}
+
+### Админ удаляет рецензию
+DELETE {{host}}/api/v1/social/admin/reviews/{{spam_review_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Повторно — 404
+DELETE {{host}}/api/v1/social/admin/reviews/{{spam_review_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}

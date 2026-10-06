@@ -7,8 +7,9 @@ use crate::session;
 use crate::{crypto, emails, users, validate};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::{Extension, Json};
+use axum::Extension;
 use shared::error::ErrorBody;
+use shared::extract::JsonBody;
 use shared::{AppError, AppResult, AppState, AuthUser};
 use std::sync::Arc;
 
@@ -25,7 +26,7 @@ pub async fn forgot(
     State(state): State<AppState>,
     Extension(limits): Extension<Arc<RateLimits>>,
     headers: HeaderMap,
-    Json(req): Json<EmailRequest>,
+    JsonBody(req): JsonBody<EmailRequest>,
 ) -> AppResult<StatusCode> {
     limits.check_ip(&headers)?;
     let email = req.email.trim();
@@ -64,7 +65,7 @@ pub async fn forgot(
 )]
 pub async fn reset(
     State(state): State<AppState>,
-    Json(req): Json<ResetPasswordRequest>,
+    JsonBody(req): JsonBody<ResetPasswordRequest>,
 ) -> AppResult<StatusCode> {
     validate::password(&req.password)?;
     let password_hash = crypto::hash_password(req.password).await?;
@@ -104,7 +105,7 @@ pub async fn reset(
 pub async fn change(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(req): Json<ChangePasswordRequest>,
+    JsonBody(req): JsonBody<ChangePasswordRequest>,
 ) -> AppResult<StatusCode> {
     validate::password(&req.new_password)?;
 

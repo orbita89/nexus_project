@@ -85,6 +85,13 @@ async fn swagger_ui_and_openapi_spec_are_served() {
     assert!(catalog["paths"]["/api/v1/auth/login"].is_null());
     assert!(catalog["components"]["securitySchemes"]["bearer"].is_object());
 
+    let response = test_utils::get(app.clone(), "/api-docs/social.json").await;
+    assert_eq!(response.status, StatusCode::OK);
+    let social = response.json();
+    assert!(social["paths"]["/api/v1/social/entities/{slug}/reviews"].is_object());
+    assert!(main["paths"]["/api/v1/social/collections"].is_null());
+    assert!(social["components"]["securitySchemes"]["bearer"].is_object());
+
     let response = test_utils::get(app, "/docs/").await;
     assert_eq!(response.status, StatusCode::OK);
 }

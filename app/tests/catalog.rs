@@ -240,10 +240,12 @@ async fn list_entities_rejects_bad_filters(pool: PgPool) {
         ctx.get("/entities?year=0").await.status,
         StatusCode::BAD_REQUEST
     );
-    assert_eq!(
-        ctx.get("/entities?year=abc").await.status,
-        StatusCode::BAD_REQUEST
-    );
+    // Ошибка разбора query — тоже {"error": "..."}.
+    let response = ctx.get("/entities?year=abc").await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert!(response.json()["error"].is_string());
+    let response = ctx.get("/entities?kind=comic").await;
+    assert!(response.json()["error"].as_str().unwrap().contains("kind"));
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]

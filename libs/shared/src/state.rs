@@ -1,6 +1,7 @@
 //! Состояние приложения, общее для всех модулей.
 
 use crate::auth::Jwt;
+use crate::directory::{Directories, EntityDirectory, UserDirectory};
 use crate::mail::Mailer;
 use crate::search::Search;
 use crate::Config;
@@ -16,10 +17,14 @@ pub struct AppState {
     pub mailer: Mailer,
     /// Meilisearch. В тестах по умолчанию выключен (`Search::disabled`).
     pub search: Search,
+    /// Сущности каталога для других модулей (реализует `catalog`).
+    pub entities: Arc<dyn EntityDirectory>,
+    /// Пользователи для других модулей (реализует `auth`).
+    pub users: Arc<dyn UserDirectory>,
 }
 
 impl AppState {
-    pub fn new(config: Config, db: PgPool, mailer: Mailer) -> Self {
+    pub fn new(config: Config, db: PgPool, mailer: Mailer, directories: Directories) -> Self {
         let jwt = Jwt::new(config.jwt_secret.as_bytes());
         let search = Search::new(&config.meili_url, config.meili_master_key.clone(), "");
         Self {
@@ -28,6 +33,8 @@ impl AppState {
             jwt: Arc::new(jwt),
             mailer,
             search,
+            entities: directories.entities,
+            users: directories.users,
         }
     }
 }

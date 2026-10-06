@@ -264,6 +264,11 @@ Content-Type: application/json
 %}
 
 ### Новая сущность находится поиском (индекс обновляется с задержкой в доли секунды)
+# Meilisearch индексирует асинхронно: без паузы запрос иногда обгоняет индексацию.
+< {%
+    const start = Date.now();
+    while (Date.now() - start < 1000) {}
+%}
 GET {{host}}/api/v1/catalog/search?q=Zzhttpcheck
 
 > {%

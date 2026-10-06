@@ -18,3 +18,4 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 utoipa-axum = { workspace = true }
+utoipa = { workspace = true }

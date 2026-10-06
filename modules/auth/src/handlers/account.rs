@@ -12,6 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::{Extension, Json};
 use chrono::{DateTime, Utc};
 use shared::error::ErrorBody;
+use shared::extract::JsonBody;
 use shared::{AppError, AppResult, AppState, AuthUser};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -34,7 +35,7 @@ pub async fn register(
     State(state): State<AppState>,
     Extension(limits): Extension<Arc<RateLimits>>,
     headers: HeaderMap,
-    Json(req): Json<RegisterRequest>,
+    JsonBody(req): JsonBody<RegisterRequest>,
 ) -> AppResult<(StatusCode, Json<UserView>)> {
     limits.check_ip(&headers)?;
     let email = req.email.trim().to_string();
@@ -97,7 +98,7 @@ pub async fn login(
     State(state): State<AppState>,
     Extension(limits): Extension<Arc<RateLimits>>,
     headers: HeaderMap,
-    Json(req): Json<LoginRequest>,
+    JsonBody(req): JsonBody<LoginRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     limits.check_ip(&headers)?;
     limits.check_login(&req.login)?;
@@ -138,7 +139,7 @@ pub async fn login(
 pub async fn refresh(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<RefreshRequest>,
+    JsonBody(req): JsonBody<RefreshRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     let mut tx = state.db.begin().await?;
 
@@ -198,7 +199,7 @@ pub async fn refresh(
 )]
 pub async fn logout(
     State(state): State<AppState>,
-    Json(req): Json<RefreshRequest>,
+    JsonBody(req): JsonBody<RefreshRequest>,
 ) -> AppResult<StatusCode> {
     sqlx::query(
         "UPDATE refresh_tokens SET revoked_at = now()

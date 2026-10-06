@@ -4,9 +4,11 @@
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod directory;
 pub mod error;
 pub mod extract;
 pub mod mail;
+pub mod pagination;
 pub mod search;
 pub mod state;
 pub mod telemetry;
