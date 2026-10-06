@@ -138,6 +138,9 @@ impl fmt::Display for Report {
             self.checked,
             self.updated()
         )?;
+        for note in &self.notes {
+            writeln!(f, "  ⚠ {note}")?;
+        }
         for change in &self.changes {
             let mut line = String::new();
             if !change.actions.is_empty() {

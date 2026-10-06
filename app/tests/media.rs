@@ -252,3 +252,12 @@ async fn dry_run_writes_nothing_and_slug_limits_scope(pool: PgPool) {
     assert_eq!(media(&pool, "one").await.0, None);
     assert!(report.to_string().contains("dry run"));
 }
+
+#[test]
+fn report_shows_missing_key_notes() {
+    let report = catalog::media::Report {
+        notes: vec!["TMDB_API_KEY не задан".into()],
+        ..Default::default()
+    };
+    assert!(report.to_string().contains("⚠ TMDB_API_KEY не задан"));
+}
