@@ -1,0 +1,106 @@
+# Staging и прод: приложение из готового образа (infra/Dockerfile, публикует CI в GHCR),
+# без исходников, cargo watch, Mailpit и dev login. Одно и то же для staging и прода — разные
+# только значения в env-файле. Подробно — documents/deploy.md.
+#
+#   cp infra/.env.prod.example infra/.env.prod   # заполнить секреты, файл не коммитится
+#   docker compose -f infra/docker-compose.prod.yml --env-file infra/.env.prod up -d
+#
+# Обязательные переменные заданы как ${VAR:?...}: без них compose не стартует, а не поднимает
+# прод с паролем по умолчанию. Наружу открыт только nginx; Postgres, Redis и Meilisearch — нет.
+
+name: "nexus-${NEXUS_ENV:?NEXUS_ENV is required (staging or production)}"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nexus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-nexus}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.15
+    restart: always
+    environment:
+      # production: без веб-панели, ключ обязателен (не короче 16 байт).
+      MEILI_ENV: production
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?MEILI_MASTER_KEY is required}
+    volumes:
+      - meilidata:/meili_data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7700/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    # Тег — sha коммита из CI: на прод уходит ровно тот образ, что прошёл staging.
+    image: ${NEXUS_IMAGE:?NEXUS_IMAGE is required, e.g. ghcr.io/orbita89/nexus_project:<sha>}
+    restart: always
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexus}
+      REDIS_URL: redis://redis:6379
+      MEILI_URL: http://meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (openssl rand -base64 48)}
+      SMTP_URL: ${SMTP_URL:?SMTP_URL is required (smtps://user:pass@host:465)}
+      MAIL_FROM: ${MAIL_FROM:?MAIL_FROM is required}
+      APP_BASE_URL: ${APP_BASE_URL:?APP_BASE_URL is required (адрес фронтенда)}
+      PUBLIC_URL: ${PUBLIC_URL:?PUBLIC_URL is required (адрес API)}
+      # Swagger UI: на staging удобно, на проде можно выключить.
+      API_DOCS: ${API_DOCS:-false}
+      # Вход без пароля — никогда вне dev.
+      DEV_LOGIN: "false"
+      OAUTH_GOOGLE_CLIENT_ID: ${OAUTH_GOOGLE_CLIENT_ID:-}
+      OAUTH_GOOGLE_CLIENT_SECRET: ${OAUTH_GOOGLE_CLIENT_SECRET:-}
+      OAUTH_GITHUB_CLIENT_ID: ${OAUTH_GITHUB_CLIENT_ID:-}
+      OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
+      OAUTH_YANDEX_CLIENT_ID: ${OAUTH_YANDEX_CLIENT_ID:-}
+      OAUTH_YANDEX_CLIENT_SECRET: ${OAUTH_YANDEX_CLIENT_SECRET:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+
+  # Единственная точка входа. Тот же конфиг, что в dev. HTTPS добавляется, когда будут сервер
+  # и домен (documents/deploy.md, «HTTPS»).
+  nginx:
+    image: nginx:1.27-alpine
+    restart: always
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./proxy_common.conf:/etc/nginx/proxy_common.conf:ro
+    depends_on:
+      - app
+
+volumes:
+  pgdata:
+  redisdata:
+  meilidata:

@@ -61,7 +61,8 @@ services:
     volumes:
       - ..:/app
       - cargo-registry:/cargo-cache
-      - app-target:/app/target
+      # Сборка вне /app (CARGO_TARGET_DIR=/target в Dockerfile.dev): в проекте не появляется target/ от root.
+      - app-target:/target
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@postgres:5432/${POSTGRES_DB:-nexus_db}
       REDIS_URL: redis://redis:6379
@@ -100,6 +101,31 @@ services:
       mailpit:
         condition: service_started
 
+  # Инструменты разработчика без Rust на машине: make ci-docker, make test-docker, make shell.
+  # Не стартует с make up (profile tools), запускается через docker compose run. Свои тома для
+  # сборки и кеша крейтов: не мешает cargo watch в app. Запускается от пользователя хоста
+  # (--user в Makefile), чтобы созданные файлы (fmt, documents/api) не стали root'овыми.
+  tools:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.dev
+    profiles: ["tools"]
+    volumes:
+      - ..:/app
+      - tools-cargo:/cargo-cache
+      - tools-target:/target
+    environment:
+      HOME: /tmp
+      DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@postgres:5432/${POSTGRES_DB:-nexus_db}
+      MEILI_URL: http://meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-nexus_dev_master_key}
+      CARGO_BUILD_JOBS: "2"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+
   # Ловушка для писем в dev: всё, что отправляет приложение, видно на http://localhost:8025.
   mailpit:
     image: axllent/mailpit:v1.27
@@ -126,3 +152,5 @@ volumes:
   meilidata:
   cargo-registry:
   app-target:
+  tools-cargo:
+  tools-target:

@@ -9,8 +9,10 @@ MEILI_MASTER_KEY ?= nexus_dev_master_key
 export MEILI_URL MEILI_MASTER_KEY
 
 COMPOSE = docker compose -f infra/docker-compose.yml
+# Контейнер с тулчейном (сервис tools) от пользователя хоста: Rust на машине не нужен.
+TOOLS = $(COMPOSE) run --rm --user $(shell id -u):$(shell id -g) tools
 
-.PHONY: up down logs run seed fmt lint boundaries test deny ci image http
+.PHONY: up down logs run seed fmt lint boundaries test deny ci image http ci-docker test-docker shell
 
 up:          ## Поднять dev-окружение
 	$(COMPOSE) up -d --build
@@ -53,3 +55,13 @@ http:        ## HTTP-проверки из http/*.http против поднят
 		--env-file http-client.env.json --env dev health.http auth.http catalog.http social.http
 
 ci: lint boundaries test deny  ## Всё, что проверяет CI (кроме сборки образа)
+
+# Те же цели в Docker (сервис tools): нужен только make up, Rust ставить не надо.
+ci-docker:   ## make ci в контейнере
+	$(TOOLS) make ci
+
+test-docker: ## Тесты в контейнере
+	$(TOOLS) make test
+
+shell:       ## Shell в контейнере с тулчейном (cargo, clippy, cargo deny)
+	$(TOOLS) bash
