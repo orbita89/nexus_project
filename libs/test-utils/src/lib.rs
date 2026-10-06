@@ -5,6 +5,7 @@ use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use shared::mail::{Mailer, Outbox};
+use shared::search::Search;
 use shared::{AppState, Config};
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -16,9 +17,24 @@ pub fn state(pool: PgPool) -> (AppState, Outbox) {
 }
 
 /// То же, но с изменённой конфигурацией (включить dev login, добавить OAuth-провайдера, ...).
+/// Поиск выключен: тесты не пишут в Meilisearch. Включить — [`with_search`].
 pub fn state_with_config(pool: PgPool, config: Config) -> (AppState, Outbox) {
     let (mailer, outbox) = Mailer::memory();
-    (AppState::new(config, pool, mailer), outbox)
+    let mut state = AppState::new(config, pool, mailer);
+    state.search = Search::disabled();
+    (state, outbox)
+}
+
+/// Включает Meilisearch (`MEILI_URL`, `MEILI_MASTER_KEY`) со своим префиксом индексов,
+/// чтобы параллельные тесты не мешали друг другу и dev-индексу.
+pub fn with_search(mut state: AppState) -> AppState {
+    let prefix = format!("test_{}_", uuid::Uuid::new_v4().simple());
+    state.search = Search::new(
+        &state.config.meili_url,
+        state.config.meili_master_key.clone(),
+        &prefix,
+    );
+    state
 }
 
 /// Пул, который никогда не подключается. Для тестов, которым БД не нужна.

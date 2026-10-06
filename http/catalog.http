@@ -1,0 +1,365 @@
+# Каталог: чтение, поиск, админка против живого окружения.
+# Нужно: make up, make seed (пользователи и каталог из seeds/*.sql).
+# Запросы зависят друг от друга (значения сохраняются в client.global) — запускайте файл целиком.
+# Из консоли: make http
+
+### Вход админом
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "admin", "password": "password123" }
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+    client.global.set("admin_token", response.body.access_token);
+%}
+
+### Вход обычным пользователем
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "user", "password": "password123" }
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+    client.global.set("user_token", response.body.access_token);
+%}
+
+### Перестроить поисковый индекс (ждёт завершения)
+POST {{host}}/api/v1/catalog/admin/search/reindex
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("200 и проиндексирован дамп", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.indexed >= 40, JSON.stringify(response.body));
+    });
+%}
+
+### Список без токена: страница с total
+GET {{host}}/api/v1/catalog/entities?limit=5
+
+> {%
+    client.test("200, 5 записей из 40+", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.length === 5);
+        client.assert(response.body.total >= 40, `total ${response.body.total}`);
+        client.assert(response.body.limit === 5 && response.body.offset === 0);
+    });
+%}
+
+### Фильтры: книги с тегом sci-fi
+GET {{host}}/api/v1/catalog/entities?kind=book&tag=sci-fi&limit=100
+
+> {%
+    client.test("только книги, есть «Дюна»", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.every(e => e.kind === "book"));
+        client.assert(response.body.items.some(e => e.slug === "dune-novel"));
+    });
+%}
+
+### Фильтр по году и подстроке
+GET {{host}}/api/v1/catalog/entities?year=2021&q=дюна
+
+> {%
+    client.test("Дюна 2021", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.total === 1, JSON.stringify(response.body));
+        client.assert(response.body.items[0].slug === "dune-2021");
+    });
+%}
+
+### Неверный тип → 400
+GET {{host}}/api/v1/catalog/entities?kind=comic
+
+> {%
+    client.test("400", () => client.assert(response.status === 400, `got ${response.status}`));
+%}
+
+### Карточка: теги и участники
+GET {{host}}/api/v1/catalog/entities/dune-2021
+
+> {%
+    client.test("200, режиссёр первым, metadata фильма", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.credits[0].role === "director");
+        client.assert(response.body.credits[0].person.slug === "denis-villeneuve");
+        client.assert(response.body.tags.some(t => t.slug === "sci-fi"));
+        client.assert(response.body.metadata.runtime_min === 155);
+    });
+%}
+
+### Несуществующая карточка → 404
+GET {{host}}/api/v1/catalog/entities/no-such-entity
+
+> {%
+    client.test("404", () => {
+        client.assert(response.status === 404, `got ${response.status}`);
+        client.assert(response.body.error === "not found");
+    });
+%}
+
+### Человек и фильмография разных типов
+GET {{host}}/api/v1/catalog/people/george-rr-martin
+
+> {%
+    client.test("книга, сериал и игра", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const kinds = new Set(response.body.credits.map(c => c.entity.kind));
+        client.assert(kinds.has("book") && kinds.has("series") && kinds.has("game"), [...kinds].join());
+    });
+%}
+
+### Поиск людей по имени
+GET {{host}}/api/v1/catalog/people?q=стругацк
+
+> {%
+    client.test("оба брата", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.total === 2, JSON.stringify(response.body));
+    });
+%}
+
+### Теги с числом сущностей
+GET {{host}}/api/v1/catalog/tags
+
+> {%
+    client.test("200, у sci-fi есть сущности", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const sciFi = response.body.find(t => t.slug === "sci-fi");
+        client.assert(sciFi && sciFi.entities_count > 10, JSON.stringify(sciFi));
+    });
+%}
+
+### Поиск с опечаткой
+GET {{host}}/api/v1/catalog/search?q=нейромнат
+
+> {%
+    client.test("находит «Нейромант»", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items[0].slug === "neuromancer", JSON.stringify(response.body.items[0]));
+    });
+%}
+
+### Поиск по участнику с фильтром по типу
+GET {{host}}/api/v1/catalog/search?q=Вильнёв&kind=movie
+
+> {%
+    client.test("фильмы Вильнёва", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const slugs = response.body.items.map(e => e.slug);
+        client.assert(slugs.includes("blade-runner-2049") && slugs.includes("arrival-2016"), slugs.join());
+        client.assert(response.body.items.every(e => e.kind === "movie"));
+    });
+%}
+
+### Админка без токена → 401
+POST {{host}}/api/v1/catalog/admin/tags
+Content-Type: application/json
+
+{ "slug": "x", "name": "x" }
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}
+
+### Админка с ролью user → 403
+POST {{host}}/api/v1/catalog/admin/tags
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "slug": "x", "name": "x" }
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Создать сущность (slug уникален для каждого прогона)
+POST {{host}}/api/v1/catalog/admin/entities
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "kind": "book",
+  "slug": "http-check-{{$timestamp}}",
+  "title": "Проверка из catalog.http",
+  "original_title": "Zzhttpcheck",
+  "release_date": "2026-10-06",
+  "metadata": { "isbn": "978-0-441-01359-3", "pages": 100 },
+  "tags": ["sci-fi"]
+}
+
+> {%
+    client.test("201, ISBN нормализован", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.metadata.isbn === "9780441013593");
+        client.assert(response.body.tags[0].slug === "sci-fi");
+    });
+    client.global.set("entity_id", response.body.id);
+    client.global.set("entity_slug", response.body.slug);
+%}
+
+### Тот же slug → 409
+POST {{host}}/api/v1/catalog/admin/entities
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "kind": "book", "slug": "{{entity_slug}}", "title": "Дубль" }
+
+> {%
+    client.test("409", () => client.assert(response.status === 409, `got ${response.status}`));
+%}
+
+### metadata чужого типа → 400
+POST {{host}}/api/v1/catalog/admin/entities
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "kind": "movie", "slug": "http-check-bad", "title": "Плохая metadata", "metadata": { "pages": 100 } }
+
+> {%
+    client.test("400 unknown field", () => {
+        client.assert(response.status === 400, `got ${response.status}`);
+        client.assert(response.body.error.includes("unknown field"), response.body.error);
+    });
+%}
+
+### Изменить: null очищает поле
+PATCH {{host}}/api/v1/catalog/admin/entities/{{entity_id}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "title": "Проверка (изменено)", "release_date": null }
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.title === "Проверка (изменено)");
+        client.assert(response.body.release_date === null);
+        client.assert(response.body.original_title === "Zzhttpcheck");
+    });
+%}
+
+### Добавить участника: Фрэнк Херберт, автор
+GET {{host}}/api/v1/catalog/people/frank-herbert
+
+> {%
+    client.global.set("person_id", response.body.id);
+%}
+
+###
+POST {{host}}/api/v1/catalog/admin/entities/{{entity_id}}/credits
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "person_id": "{{person_id}}", "role": "author" }
+
+> {%
+    client.test("201", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.person.slug === "frank-herbert");
+    });
+    client.global.set("credit_id", response.body.id);
+%}
+
+### Новая сущность находится поиском (индекс обновляется с задержкой в доли секунды)
+GET {{host}}/api/v1/catalog/search?q=Zzhttpcheck
+
+> {%
+    client.test("найдена", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.some(e => e.id === client.global.get("entity_id")), JSON.stringify(response.body));
+    });
+%}
+
+### Удалить участника
+DELETE {{host}}/api/v1/catalog/admin/entities/{{entity_id}}/credits/{{credit_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Удалить сущность
+DELETE {{host}}/api/v1/catalog/admin/entities/{{entity_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Удалённой больше нет
+GET {{host}}/api/v1/catalog/entities/{{entity_slug}}
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}
+
+### Тег: создать, переименовать, удалить
+POST {{host}}/api/v1/catalog/admin/tags
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "slug": "http-check-{{$timestamp}}", "name": "Проверка" }
+
+> {%
+    client.test("201", () => client.assert(response.status === 201, `got ${response.status}`));
+    client.global.set("tag_id", response.body.id);
+%}
+
+###
+PATCH {{host}}/api/v1/catalog/admin/tags/{{tag_id}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "name": "Проверка (изменено)" }
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.name === "Проверка (изменено)");
+    });
+%}
+
+###
+DELETE {{host}}/api/v1/catalog/admin/tags/{{tag_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Человек: создать, изменить, удалить
+POST {{host}}/api/v1/catalog/admin/people
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "slug": "http-check-{{$timestamp}}", "full_name": "Проверочный Человек", "birth_date": "1990-01-01" }
+
+> {%
+    client.test("201", () => client.assert(response.status === 201, `got ${response.status}`));
+    client.global.set("new_person_id", response.body.id);
+%}
+
+###
+PATCH {{host}}/api/v1/catalog/admin/people/{{new_person_id}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "birth_date": null, "bio": "Создан из catalog.http" }
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.birth_date === null);
+    });
+%}
+
+###
+DELETE {{host}}/api/v1/catalog/admin/people/{{new_person_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}

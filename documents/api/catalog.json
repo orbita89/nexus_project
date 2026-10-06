@@ -1,0 +1,2458 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Nexus API: каталог",
+    "description": "Фильмы, сериалы, книги, игры, люди, теги и поиск.\n\nЧтение — без авторизации. Админка (`/admin/...`) — только роль `admin`: получите токен во вкладке **Nexus API** (`POST /api/v1/auth/login`, пользователь `admin`, пароль `password123`) и вставьте его в **Authorize**. Вкладка переключается в списке «Select a definition» справа вверху.",
+    "license": {
+      "name": "proprietary",
+      "identifier": "proprietary"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/catalog/admin/entities": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Создать сущность. `metadata` проверяется по схеме своего `kind`.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEntity"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля, metadata или неизвестный тег",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/entities/{id}": {
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Удалить сущность. Теги, участники, рецензии и элементы коллекций удаляются каскадно.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сущности",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Изменить сущность. Переданные поля заменяются, `null` очищает необязательное поле;\n`metadata` заменяется целиком. `kind` не меняется.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сущности",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEntity"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля или metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/entities/{id}/credits": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Добавить участника: человек, роль, персонаж (для актёров), порядок в титрах.",
+        "operationId": "add_credit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сущности",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddCredit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Добавлен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityCredit"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля или человек не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Такое участие уже есть",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/entities/{id}/credits/{credit_id}": {
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Удалить участника.",
+        "operationId": "delete_credit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сущности",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "credit_id",
+            "in": "path",
+            "description": "id участия (`credits[].id` в карточке)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/entities/{id}/tags": {
+      "put": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Заменить теги сущности целиком.",
+        "operationId": "set_tags",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сущности",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetTags"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Новые теги сущности",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Tag"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестный тег",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/people": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Добавить человека.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePerson"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Добавлен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Person"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/people/{id}": {
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Удалить человека вместе с его участием в произведениях.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id человека",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Изменить человека. Переданные поля заменяются, `null` очищает необязательное поле.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id человека",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePerson"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Person"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/search/reindex": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Перестроить поисковый индекс из PostgreSQL. Нужно после загрузки данных в БД в обход API\n(`make seed`) или если индекс отстал. Ждёт завершения.",
+        "operationId": "reindex_handler",
+        "responses": {
+          "200": {
+            "description": "Индекс перестроен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReindexResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/tags": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Создать тег.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTag"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создан",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tag"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/tags/{id}": {
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Удалить тег (снимается со всех сущностей).",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id тега",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Переименовать тег или сменить slug.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id тега",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTag"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tag"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/entities": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Список сущностей: новинки сверху, без даты — в конце.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Тип сущности.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Slug тега.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "sci-fi"
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "description": "Год выхода.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2021
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Подстрока в названии или оригинальном названии, без учёта регистра.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "дюна"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница сущностей",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_EntitySummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный фильтр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/entities/{slug}": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Карточка сущности: поля, теги и участники в порядке титров.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Карточка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/people": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Список людей по алфавиту.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Подстрока в имени, без учёта регистра.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "кинг"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница людей",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_PersonSummary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/people/{slug}": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Карточка человека: данные и все его работы любых типов, новые сверху.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug человека",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "denis-villeneuve"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Карточка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/search": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Полнотекстовый поиск по каталогу: опечатки, ранжирование, фильтры. Сортировка по релевантности.",
+        "description": "Индекс обновляется после изменений в админке с задержкой в доли секунды.",
+        "operationId": "search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Поисковый запрос: название, оригинальное название, люди, теги, описание. Опечатки допустимы.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "дюан"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Slug тега.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница результатов. `total` — оценка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_EntitySummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный фильтр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/tags": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Все теги по алфавиту с числом сущностей. Тегов немного, поэтому без пагинации.",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "Теги",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TagWithCount"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AddCredit": {
+        "type": "object",
+        "required": [
+          "person_id",
+          "role"
+        ],
+        "properties": {
+          "character_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Пол Атрейдес"
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Порядок в титрах, по умолчанию 0."
+          },
+          "role": {
+            "type": "string",
+            "description": "`actor`, `director`, `writer`, `author`, `composer`, `developer`, ...\n(латиница в нижнем регистре и `_`).",
+            "example": "actor"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BookMetadata": {
+        "type": "object",
+        "description": "Поля книги.",
+        "properties": {
+          "isbn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISBN-10 или ISBN-13, дефисы допустимы. Хранится без дефисов.",
+            "example": "9780441013593"
+          },
+          "pages": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 896,
+            "maximum": 100000,
+            "minimum": 1
+          },
+          "publisher": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Ace Books"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateEntity": {
+        "type": "object",
+        "required": [
+          "kind",
+          "slug",
+          "title"
+        ],
+        "properties": {
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`http(s)://...`"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EntityKind"
+          },
+          "metadata": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Metadata",
+                "description": "Поля для `kind`. По умолчанию `{}`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "original_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Dune"
+          },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "slug": {
+            "type": "string",
+            "description": "Латиница в нижнем регистре, цифры и дефисы.",
+            "example": "dune-2021"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Slug'и существующих тегов.",
+            "example": [
+              "sci-fi"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "example": "Дюна"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreatePerson": {
+        "type": "object",
+        "required": [
+          "slug",
+          "full_name"
+        ],
+        "properties": {
+          "bio": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "birth_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "full_name": {
+            "type": "string",
+            "example": "Дени Вильнёв"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "denis-villeneuve"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateTag": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "example": "Научная фантастика"
+          },
+          "slug": {
+            "type": "string",
+            "example": "sci-fi"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Entity": {
+        "type": "object",
+        "description": "Сущность целиком (строка `entities`).",
+        "required": [
+          "id",
+          "kind",
+          "slug",
+          "title",
+          "metadata",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EntityKind"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata",
+            "description": "Поля, специфичные для `kind`."
+          },
+          "original_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Dune"
+          },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "slug": {
+            "type": "string",
+            "example": "dune-2021"
+          },
+          "title": {
+            "type": "string",
+            "example": "Дюна"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EntityCredit": {
+        "type": "object",
+        "description": "Участие человека в сущности (строка `entity_credits` + человек).",
+        "required": [
+          "id",
+          "role",
+          "position",
+          "person"
+        ],
+        "properties": {
+          "character_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Пол Атрейдес"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "id записи участия: по нему участие удаляется."
+          },
+          "person": {
+            "$ref": "#/components/schemas/PersonRef"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "role": {
+            "type": "string",
+            "example": "director"
+          }
+        }
+      },
+      "EntityDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Entity"
+          },
+          {
+            "type": "object",
+            "required": [
+              "tags",
+              "credits"
+            ],
+            "properties": {
+              "credits": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EntityCredit"
+                }
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Tag"
+                }
+              }
+            }
+          }
+        ],
+        "description": "Карточка: сущность, теги и участники в порядке титров."
+      },
+      "EntityKind": {
+        "type": "string",
+        "description": "Тип сущности (Postgres enum `entity_kind`).",
+        "enum": [
+          "movie",
+          "series",
+          "book",
+          "game"
+        ]
+      },
+      "EntitySummary": {
+        "type": "object",
+        "description": "Сущность в списке.",
+        "required": [
+          "id",
+          "kind",
+          "slug",
+          "title"
+        ],
+        "properties": {
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EntityKind"
+          },
+          "original_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Dune"
+          },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "slug": {
+            "type": "string",
+            "example": "dune-2021"
+          },
+          "title": {
+            "type": "string",
+            "example": "Дюна"
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "Тело любого ответа с ошибкой. Нужно для документации API.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Описание ошибки.",
+            "example": "unauthorized"
+          }
+        }
+      },
+      "GameMetadata": {
+        "type": "object",
+        "description": "Поля игры.",
+        "properties": {
+          "developer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "CD Projekt Red"
+          },
+          "platforms": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "pc",
+              "ps5",
+              "xbox-series"
+            ]
+          },
+          "publisher": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "CD Projekt"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Metadata": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/MovieMetadata"
+          },
+          {
+            "$ref": "#/components/schemas/SeriesMetadata"
+          },
+          {
+            "$ref": "#/components/schemas/BookMetadata"
+          },
+          {
+            "$ref": "#/components/schemas/GameMetadata"
+          }
+        ],
+        "description": "Поля, специфичные для типа (`kind`). Все поля необязательны, неизвестные запрещены.\nТолько для документации: разбирается по `kind` функцией [`validate`]."
+      },
+      "MovieMetadata": {
+        "type": "object",
+        "description": "Поля фильма.",
+        "properties": {
+          "age_rating": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Возрастной рейтинг.",
+            "example": "PG-13"
+          },
+          "countries": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Страны производства, ISO 3166-1 alpha-2.",
+            "example": [
+              "US",
+              "CA"
+            ]
+          },
+          "runtime_min": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Длительность в минутах.",
+            "example": 155,
+            "maximum": 10000,
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "Page_EntitySummary": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Сущность в списке.",
+              "required": [
+                "id",
+                "kind",
+                "slug",
+                "title"
+              ],
+              "properties": {
+                "cover_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "kind": {
+                  "$ref": "#/components/schemas/EntityKind"
+                },
+                "original_title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "example": "Dune"
+                },
+                "release_date": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date"
+                },
+                "slug": {
+                  "type": "string",
+                  "example": "dune-2021"
+                },
+                "title": {
+                  "type": "string",
+                  "example": "Дюна"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_PersonSummary": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Человек в списке.",
+              "required": [
+                "id",
+                "slug",
+                "full_name"
+              ],
+              "properties": {
+                "birth_date": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date"
+                },
+                "full_name": {
+                  "type": "string",
+                  "example": "Дени Вильнёв"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "photo_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "slug": {
+                  "type": "string",
+                  "example": "denis-villeneuve"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Person": {
+        "type": "object",
+        "description": "Человек целиком (строка `people`).",
+        "required": [
+          "id",
+          "slug",
+          "full_name",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "bio": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "birth_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "full_name": {
+            "type": "string",
+            "example": "Дени Вильнёв"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "denis-villeneuve"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PersonCredit": {
+        "type": "object",
+        "description": "Участие человека в сущности, со стороны человека.",
+        "required": [
+          "id",
+          "role",
+          "entity"
+        ],
+        "properties": {
+          "character_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entity": {
+            "$ref": "#/components/schemas/EntitySummary"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "type": "string",
+            "example": "director"
+          }
+        }
+      },
+      "PersonDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Person"
+          },
+          {
+            "type": "object",
+            "required": [
+              "credits"
+            ],
+            "properties": {
+              "credits": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PersonCredit"
+                }
+              }
+            }
+          }
+        ],
+        "description": "Человек и его фильмография (новые работы сверху)."
+      },
+      "PersonRef": {
+        "type": "object",
+        "description": "Человек в титрах сущности.",
+        "required": [
+          "id",
+          "slug",
+          "full_name"
+        ],
+        "properties": {
+          "full_name": {
+            "type": "string",
+            "example": "Дени Вильнёв"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "denis-villeneuve"
+          }
+        }
+      },
+      "PersonSummary": {
+        "type": "object",
+        "description": "Человек в списке.",
+        "required": [
+          "id",
+          "slug",
+          "full_name"
+        ],
+        "properties": {
+          "birth_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "full_name": {
+            "type": "string",
+            "example": "Дени Вильнёв"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "denis-villeneuve"
+          }
+        }
+      },
+      "ReindexResult": {
+        "type": "object",
+        "required": [
+          "indexed"
+        ],
+        "properties": {
+          "indexed": {
+            "type": "integer",
+            "description": "Сколько сущностей в новом индексе.",
+            "example": 45,
+            "minimum": 0
+          }
+        }
+      },
+      "SeriesMetadata": {
+        "type": "object",
+        "description": "Поля сериала.",
+        "properties": {
+          "countries": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Страны производства, ISO 3166-1 alpha-2.",
+            "example": [
+              "US"
+            ]
+          },
+          "episodes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 32,
+            "maximum": 100000,
+            "minimum": 1
+          },
+          "seasons": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 4,
+            "maximum": 10000,
+            "minimum": 1
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SeriesStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SeriesStatus": {
+        "type": "string",
+        "enum": [
+          "ongoing",
+          "ended",
+          "canceled"
+        ]
+      },
+      "SetTags": {
+        "type": "object",
+        "required": [
+          "tags"
+        ],
+        "properties": {
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Slug'и тегов: заменяют текущий набор целиком.",
+            "example": [
+              "sci-fi",
+              "space-opera"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "Tag": {
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "example": "Научная фантастика"
+          },
+          "slug": {
+            "type": "string",
+            "example": "sci-fi"
+          }
+        }
+      },
+      "TagWithCount": {
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "entities_count"
+        ],
+        "properties": {
+          "entities_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько сущностей с этим тегом.",
+            "example": 12
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "example": "Научная фантастика"
+          },
+          "slug": {
+            "type": "string",
+            "example": "sci-fi"
+          }
+        }
+      },
+      "UpdateEntity": {
+        "type": "object",
+        "description": "Изменение сущности: переданные поля заменяются, `null` очищает необязательное поле.\n`kind` не меняется. `metadata` заменяется целиком.",
+        "properties": {
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Metadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "original_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdatePerson": {
+        "type": "object",
+        "description": "Изменение человека: переданные поля заменяются, `null` очищает необязательное поле.",
+        "properties": {
+          "bio": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "birth_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "full_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateTag": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "catalog",
+      "description": "Каталог: сущности, люди, теги, поиск. Без авторизации"
+    },
+    {
+      "name": "catalog-admin",
+      "description": "Управление каталогом. Только роль admin"
+    }
+  ]
+}

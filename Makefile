@@ -3,6 +3,10 @@
 
 DATABASE_URL ?= postgres://nexus_user:nexus_password@localhost:5432/nexus_db
 export DATABASE_URL
+# Тесты поиска ходят в Meilisearch из make up.
+MEILI_URL ?= http://localhost:7700
+MEILI_MASTER_KEY ?= nexus_dev_master_key
+export MEILI_URL MEILI_MASTER_KEY
 
 COMPOSE = docker compose -f infra/docker-compose.yml
 
@@ -20,8 +24,9 @@ logs:        ## Логи приложения
 run:         ## Запустить приложение локально (без Docker)
 	cargo run -p nexus
 
-seed:        ## Загрузить тестовых пользователей (seeds/dev.sql) в dev-базу
-	$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -q -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < seeds/dev.sql
+seed:        ## Загрузить тестовых пользователей и каталог (seeds/*.sql) в dev-базу, перестроить поиск
+	cat seeds/dev.sql seeds/catalog.sql | $(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -q -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+	scripts/reindex-search.sh
 
 fmt:         ## Отформатировать код
 	cargo fmt --all
@@ -45,6 +50,6 @@ image:       ## Собрать production-образ
 # Нужна сеть хоста, чтобы контейнер видел localhost:80 (nginx из make up).
 http:        ## HTTP-проверки из http/*.http против поднятого окружения (нужен make seed)
 	docker run --rm --network host -v $(CURDIR)/http:/workdir jetbrains/intellij-http-client \
-		--env-file http-client.env.json --env dev health.http auth.http
+		--env-file http-client.env.json --env dev health.http auth.http catalog.http
 
 ci: lint boundaries test deny  ## Всё, что проверяет CI (кроме сборки образа)

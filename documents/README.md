@@ -9,7 +9,7 @@
 | [modules/social.md](modules/social.md) | Модуль `social`: подписки, рецензии, коллекции, форум |
 | [modules/realtime.md](modules/realtime.md) | Модуль `realtime`: WebSocket, живые уведомления |
 | [for-other-modules.md](for-other-modules.md) | **Для разработчиков модулей:** как пользоваться авторизацией, встроить модуль, писать тесты + промт для новой сессии |
-| [api/openapi.json](api/openapi.json) | Контракт API (генерируется из кода, проверяется тестом). Удобнее смотреть в Swagger: http://localhost/docs |
+| [api/openapi.json](api/openapi.json), [api/catalog.json](api/catalog.json) | Контракт API: основной и каталог, по файлу на вкладку Swagger (генерируются из кода, проверяются тестом). Удобнее смотреть в Swagger: http://localhost/docs |
 
 Как запустить проект и какие есть команды — в [README в корне](../README.md).
 
