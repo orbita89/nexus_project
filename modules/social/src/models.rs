@@ -432,6 +432,67 @@ pub struct InterestRow {
     pub created_at: DateTime<Utc>,
 }
 
+// ---------------------------------------------------------------- лента
+
+/// Тип записи ленты.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedItemType {
+    Review,
+    Thread,
+    Collection,
+}
+
+/// Запись ленты: заполнено ровно одно из `review`, `thread`, `collection` — по `type`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FeedItem {
+    #[serde(rename = "type")]
+    pub item_type: FeedItemType,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<Review>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<Thread>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection: Option<Collection>,
+    /// Почему запись в ленте; у записи может быть несколько причин.
+    pub reasons: Vec<FeedReason>,
+}
+
+/// Причина, по которой запись попала в ленту.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FeedReason {
+    /// Автор — тот, на кого подписан пользователь.
+    Follow { user: UserRef },
+    /// Запись о сущности из интересов.
+    Interest { entity: EntityRef },
+    /// Популярная тема: личное закончилось или его нет.
+    Popular,
+}
+
+/// Страница ленты. Следующая — `?cursor=<next_cursor>`; `null` — лента закончилась.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FeedPage {
+    pub items: Vec<FeedItem>,
+    pub next_cursor: Option<String>,
+    #[schema(example = 20)]
+    pub limit: i64,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct FeedQuery {
+    /// Только записи этого типа.
+    #[serde(rename = "type")]
+    #[param(rename = "type", inline)]
+    pub item_type: Option<FeedItemType>,
+    /// `next_cursor` предыдущей страницы.
+    pub cursor: Option<String>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+}
+
 /// Отличает «поле не передано» (`None`) от `null` (`Some(None)`).
 fn nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where

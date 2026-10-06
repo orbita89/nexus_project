@@ -515,3 +515,71 @@ Authorization: Bearer {{user_token}}
 > {%
     client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
 %}
+
+# ------------------------------------------------------------------ лента
+
+### Лента без токена — 401
+GET {{host}}/api/v1/social/feed
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}
+
+### Лента user: сначала подписки, потом интересы, в конце популярное
+GET {{host}}/api/v1/social/feed?limit=100
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200, ярусы по порядку", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const tiers = { follow: 0, interest: 1, popular: 2 };
+        const order = response.body.items.map(i => tiers[i.reasons[0].type]);
+        client.assert(order.length > 0 && order[0] === 0, JSON.stringify(order));
+        client.assert(order.every((t, i) => i === 0 || order[i - 1] <= t), "ярусы не перемешаны");
+        client.assert(response.body.items.every(i => i[i.type] && i[i.type].id), "DTO по type");
+    });
+%}
+
+### Первая страница по две записи
+GET {{host}}/api/v1/social/feed?limit=2
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200, есть курсор", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.length === 2 && typeof response.body.next_cursor === "string");
+    });
+    client.global.set("feed_cursor", response.body.next_cursor);
+    client.global.set("feed_first", JSON.stringify(response.body.items.map(i => i[i.type].id)));
+%}
+
+### Следующая страница по курсору — без повторов
+GET {{host}}/api/v1/social/feed?limit=2&cursor={{feed_cursor}}
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200, другие записи", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const first = JSON.parse(client.global.get("feed_first"));
+        client.assert(response.body.items.every(i => !first.includes(i[i.type].id)));
+    });
+%}
+
+### Только темы
+GET {{host}}/api/v1/social/feed?type=thread
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200, только thread", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.every(i => i.type === "thread"));
+    });
+%}
+
+### Испорченный курсор — 400
+GET {{host}}/api/v1/social/feed?cursor=garbage
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("400", () => client.assert(response.status === 400, `got ${response.status}`));
+%}

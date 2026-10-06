@@ -1483,4 +1483,16 @@ async fn seed_social_is_valid(pool: PgPool) {
     // Интересы user.
     let interests = ctx.get_ok("/interests", Some(&user)).await;
     assert_eq!(interests["total"], 3, "{interests}");
+
+    // Лента user: сначала подписки (author, admin), потом интересы (рецензия blocked на «Дюну»).
+    let feed = ctx.get_ok("/feed?limit=100", Some(&user)).await;
+    let feed = items(&feed);
+    let kinds: Vec<&str> = feed
+        .iter()
+        .map(|item| item["reasons"][0]["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds.first(), Some(&"follow"), "{kinds:?}");
+    assert!(kinds.contains(&"interest"), "{kinds:?}");
+    let first_interest = kinds.iter().position(|k| *k == "interest").unwrap();
+    assert!(kinds[first_interest..].iter().all(|k| *k != "follow"));
 }

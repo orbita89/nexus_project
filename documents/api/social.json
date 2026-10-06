@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Nexus API: социальное",
-    "description": "Рецензии и оценки, подписки на пользователей, коллекции, форум, интересы.\n\nСущности адресуются по `slug` (как в каталоге), пользователи — по `username`, коллекции, темы и сообщения — по `id`. Ошибки — всегда `{\"error\": \"...\"}`. Чтение публичного — без авторизации; рецензии, подписки, свои коллекции и ответы на форуме — любой вошедший; темы форума — роль `author` и выше; модерация (`/admin/...`) — только роль `admin`. Токен: во вкладке **Nexus API** выполните `POST /api/v1/auth/login` (`user` / `author` / `admin`, пароль `password123`) и вставьте `access_token` в **Authorize**.",
+    "description": "Рецензии и оценки, подписки на пользователей, коллекции, форум, интересы, лента.\n\nСущности адресуются по `slug` (как в каталоге), пользователи — по `username`, коллекции, темы и сообщения — по `id`. Ошибки — всегда `{\"error\": \"...\"}`. Чтение публичного — без авторизации; рецензии, подписки, свои коллекции и ответы на форуме — любой вошедший; темы форума — роль `author` и выше; модерация (`/admin/...`) — только роль `admin`. Токен: во вкладке **Nexus API** выполните `POST /api/v1/auth/login` (`user` / `author` / `admin`, пароль `password123`) и вставьте `access_token` в **Authorize**.",
     "license": {
       "name": "proprietary",
       "identifier": "proprietary"
@@ -1579,6 +1579,88 @@
         }
       }
     },
+    "/api/v1/social/feed": {
+      "get": {
+        "tags": [
+          "feed"
+        ],
+        "summary": "Лента: подписки, затем интересы, затем популярное.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Только записи этого типа.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Тип записи ленты.",
+              "enum": [
+                "review",
+                "thread",
+                "collection"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` предыдущей страницы.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница ленты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр или курсор",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/interests": {
       "get": {
         "tags": [
@@ -2954,6 +3036,155 @@
           }
         }
       },
+      "FeedItem": {
+        "type": "object",
+        "description": "Запись ленты: заполнено ровно одно из `review`, `thread`, `collection` — по `type`.",
+        "required": [
+          "type",
+          "created_at",
+          "reasons"
+        ],
+        "properties": {
+          "collection": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Collection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeedReason"
+            },
+            "description": "Почему запись в ленте; у записи может быть несколько причин."
+          },
+          "review": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Review"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "thread": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Thread"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "$ref": "#/components/schemas/FeedItemType"
+          }
+        }
+      },
+      "FeedItemType": {
+        "type": "string",
+        "description": "Тип записи ленты.",
+        "enum": [
+          "review",
+          "thread",
+          "collection"
+        ]
+      },
+      "FeedPage": {
+        "type": "object",
+        "description": "Страница ленты. Следующая — `?cursor=<next_cursor>`; `null` — лента закончилась.",
+        "required": [
+          "items",
+          "limit"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeedItem"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "FeedReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Автор — тот, на кого подписан пользователь.",
+            "required": [
+              "user",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "follow"
+                ]
+              },
+              "user": {
+                "$ref": "#/components/schemas/UserRef"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Запись о сущности из интересов.",
+            "required": [
+              "entity",
+              "type"
+            ],
+            "properties": {
+              "entity": {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "interest"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Популярная тема: личное закончилось или его нет.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "popular"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Причина, по которой запись попала в ленту."
+      },
       "Follow": {
         "type": "object",
         "description": "Подписчик или подписка.",
@@ -3970,6 +4201,10 @@
     {
       "name": "collections",
       "description": "Коллекции: приватные видит только владелец"
+    },
+    {
+      "name": "feed",
+      "description": "Лента: записи тех, на кого подписан, затем по интересам, затем популярные темы. Пагинация курсором"
     },
     {
       "name": "interests",

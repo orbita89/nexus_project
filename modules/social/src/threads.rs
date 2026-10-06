@@ -389,7 +389,7 @@ async fn owned(db: impl PgExecutor<'_>, id: Uuid, user: &AuthUser) -> AppResult<
 }
 
 /// Темы для ответа: сущности всех тем страницы — одним запросом.
-async fn cards(state: &AppState, rows: Vec<ThreadRow>) -> AppResult<Vec<Thread>> {
+pub(crate) async fn cards(state: &AppState, rows: Vec<ThreadRow>) -> AppResult<Vec<Thread>> {
     let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
     let links: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT thread_id, entity_id FROM forum_thread_entities
