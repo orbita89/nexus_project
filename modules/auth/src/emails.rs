@@ -31,6 +31,32 @@ pub fn login_link(base_url: &str, to: &str, token: &str) -> Email {
     }
 }
 
+pub fn change_email(base_url: &str, to: &str, token: &str) -> Email {
+    Email {
+        to: to.to_string(),
+        subject: "Подтвердите новый email — Nexus".to_string(),
+        text: format!(
+            "Здравствуйте!\n\n\
+             Чтобы сделать этот адрес адресом вашего аккаунта Nexus, перейдите по ссылке:\n\
+             {base_url}/auth/change-email?token={token}\n\n\
+             Ссылка действует 1 час. Если вы не меняли email, просто проигнорируйте письмо.\n"
+        ),
+    }
+}
+
+pub fn email_changed(to: &str, new_email: &str) -> Email {
+    Email {
+        to: to.to_string(),
+        subject: "Email аккаунта изменён — Nexus".to_string(),
+        text: format!(
+            "Здравствуйте!\n\n\
+             Email вашего аккаунта Nexus изменён на {new_email}. Письма теперь приходят туда.\n\n\
+             Если это были не вы, срочно напишите в поддержку: доступ к аккаунту мог получить \
+             кто-то другой.\n"
+        ),
+    }
+}
+
 pub fn reset_password(base_url: &str, to: &str, token: &str) -> Email {
     Email {
         to: to.to_string(),

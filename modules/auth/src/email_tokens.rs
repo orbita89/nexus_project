@@ -14,6 +14,8 @@ pub enum Purpose {
     /// Код возврата с OAuth-провайдера на фронтенд (не письмо, но та же механика).
     #[sqlx(rename = "oauth_login")]
     OAuthLogin,
+    /// Подтверждение нового адреса при смене email (письмо уходит на новый адрес).
+    ChangeEmail,
 }
 
 impl Purpose {
@@ -24,6 +26,7 @@ impl Purpose {
             Self::Login => 15,
             Self::ResetPassword => 60,
             Self::OAuthLogin => 2,
+            Self::ChangeEmail => 60,
         }
     }
 }

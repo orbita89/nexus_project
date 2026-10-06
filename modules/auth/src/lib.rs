@@ -24,7 +24,7 @@ mod users;
 mod validate;
 
 use axum::Extension;
-use handlers::{account, dev, email, password, sessions};
+use handlers::{account, dev, email, password, profile, sessions};
 use oauth::OAuthHttp;
 use rate_limit::RateLimits;
 use shared::AppState;
@@ -38,7 +38,11 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(account::login))
         .routes(routes!(account::refresh))
         .routes(routes!(account::logout))
-        .routes(routes!(account::me))
+        .routes(routes!(account::me, profile::update))
+        .routes(routes!(profile::change_email))
+        .routes(routes!(profile::confirm_email_change))
+        .routes(routes!(oauth::link::list))
+        .routes(routes!(oauth::link::start, oauth::link::unlink))
         .routes(routes!(email::verify_email))
         .routes(routes!(email::resend_verification))
         .routes(routes!(email::email_login_start))

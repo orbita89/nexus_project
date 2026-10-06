@@ -363,3 +363,144 @@ async fn dev_login_creates_user_with_role_and_logs_in(pool: PgPool) {
         .await;
     assert_eq!(response.status, StatusCode::NOT_FOUND);
 }
+
+// ------------------------------------------------------------ привязка из профиля
+
+impl Ctx {
+    /// Пользователь, созданный напрямую: id и access-токен.
+    async fn user(&self, email: &str) -> (uuid::Uuid, String) {
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email, username) VALUES ($1, split_part($1, '@', 1)) RETURNING id",
+        )
+        .bind(email)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap();
+        let token = self
+            .state
+            .jwt
+            .issue(id, shared::Role::User, uuid::Uuid::new_v4())
+            .unwrap();
+        (id, token)
+    }
+
+    async fn authed(&self, method: Method, path: &str, token: &str) -> TestResponse {
+        let app = nexus::build_app(self.state.clone());
+        request(app, method, &format!("{AUTH}{path}"), None, Some(token)).await
+    }
+
+    /// Привязка: ссылка из профиля → (браузер у провайдера) → callback. Адрес возврата.
+    async fn link_via_provider(&self, token: &str, query: &str) -> String {
+        let start = self.authed(Method::POST, "/me/oauth/mock", token).await;
+        assert_eq!(start.status, StatusCode::OK);
+        let url = start.json()["url"].as_str().unwrap().to_string();
+        assert!(url.contains("/authorize?"), "{url}");
+        let state = query_param(&url, "state").unwrap();
+        let callback = self
+            .get(&format!("/oauth/mock/callback?{query}&state={state}"))
+            .await;
+        assert_eq!(callback.status, StatusCode::SEE_OTHER);
+        callback.location()
+    }
+
+    async fn linked(&self, token: &str) -> Value {
+        let response = self.authed(Method::GET, "/me/oauth", token).await;
+        assert_eq!(response.status, StatusCode::OK);
+        response.json()
+    }
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn link_attaches_provider_to_current_user_with_any_email(pool: PgPool) {
+    // У провайдера другой и даже не подтверждённый адрес: привязку подтверждает вход в профиль.
+    let ctx = Ctx::new(pool, profile("42", "other@elsewhere.io", false)).await;
+    let (neo, token) = ctx.user("neo@example.com").await;
+
+    let back = ctx
+        .link_via_provider(&token, &format!("code={GOOD_CODE}"))
+        .await;
+    assert_eq!(back, "http://front.test/settings/accounts?linked=mock");
+    let linked = ctx.linked(&token).await;
+    assert_eq!(linked.as_array().unwrap().len(), 1);
+    assert_eq!(linked[0]["provider"], "mock");
+    assert_eq!(linked[0]["email"], "other@elsewhere.io");
+
+    // Повторная привязка того же аккаунта — без ошибки и без дубля.
+    let back = ctx
+        .link_via_provider(&token, &format!("code={GOOD_CODE}"))
+        .await;
+    assert!(back.ends_with("?linked=mock"), "{back}");
+    assert_eq!(ctx.linked(&token).await.as_array().unwrap().len(), 1);
+
+    // Теперь вход через провайдера ведёт в этот аккаунт.
+    let tokens = ctx.login().await;
+    assert_eq!(tokens["user"]["id"], neo.to_string());
+    assert_eq!(tokens["user"]["email"], "neo@example.com");
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn link_rejects_account_of_another_user_and_second_account(pool: PgPool) {
+    let ctx = Ctx::new(pool, profile("42", "trinity@example.com", true)).await;
+    // Аккаунт провайдера уже у trinity (создан входом).
+    ctx.login().await;
+    let (_, neo) = ctx.user("neo@example.com").await;
+    let back = ctx
+        .link_via_provider(&neo, &format!("code={GOOD_CODE}"))
+        .await;
+    assert_eq!(
+        back,
+        "http://front.test/settings/accounts?error=already_linked"
+    );
+    assert!(ctx.linked(&neo).await.as_array().unwrap().is_empty());
+
+    // Аккаунт 42 свободен, но у morpheus уже привязан другой аккаунт этого провайдера.
+    sqlx::query("DELETE FROM oauth_accounts WHERE provider_user_id = '42'")
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let (morpheus_id, morpheus) = ctx.user("morpheus@example.com").await;
+    sqlx::query(
+        "INSERT INTO oauth_accounts (provider, provider_user_id, user_id) VALUES ('mock', '7', $1)",
+    )
+    .bind(morpheus_id)
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+    let back = ctx
+        .link_via_provider(&morpheus, &format!("code={GOOD_CODE}"))
+        .await;
+    assert!(back.ends_with("?error=provider_already_linked"), "{back}");
+
+    // Отмена у провайдера при привязке — тоже на страницу настроек.
+    let back = ctx.link_via_provider(&neo, "error=access_denied").await;
+    assert_eq!(
+        back,
+        "http://front.test/settings/accounts?error=access_denied"
+    );
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn unlink_and_link_errors(pool: PgPool) {
+    let ctx = Ctx::new(pool, profile("42", "neo@example.com", true)).await;
+    let tokens = ctx.login().await;
+    let token = tokens["access_token"].as_str().unwrap();
+    assert_eq!(ctx.linked(token).await.as_array().unwrap().len(), 1);
+
+    let response = ctx.authed(Method::DELETE, "/me/oauth/mock", token).await;
+    assert_eq!(response.status, StatusCode::NO_CONTENT);
+    assert!(ctx.linked(token).await.as_array().unwrap().is_empty());
+    let response = ctx.authed(Method::DELETE, "/me/oauth/mock", token).await;
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+
+    let response = ctx.authed(Method::POST, "/me/oauth/unknown", token).await;
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    for (method, path) in [
+        (Method::GET, "/me/oauth"),
+        (Method::POST, "/me/oauth/mock"),
+        (Method::DELETE, "/me/oauth/mock"),
+    ] {
+        let app = nexus::build_app(ctx.state.clone());
+        let response = request(app, method, &format!("{AUTH}{path}"), None, None).await;
+        assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+}

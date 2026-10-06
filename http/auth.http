@@ -220,6 +220,158 @@ Content-Type: application/json
     client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
 %}
 
+# ------------------------------------------------------------------ свой профиль (новый пользователь)
+
+### Профиль: имя и аватар
+PATCH {{host}}/api/v1/auth/me
+Authorization: Bearer {{new_token}}
+Content-Type: application/json
+
+{ "display_name": "Нео", "avatar_url": "https://example.com/neo.png" }
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.display_name === "Нео" && response.body.avatar_url === "https://example.com/neo.png");
+        client.assert(response.body.username_changed_at === null);
+    });
+%}
+
+### Аватар только по https → 400
+PATCH {{host}}/api/v1/auth/me
+Authorization: Bearer {{new_token}}
+Content-Type: application/json
+
+{ "avatar_url": "http://example.com/neo.png" }
+
+> {%
+    client.test("400 с {error}", () => {
+        client.assert(response.status === 400, `got ${response.status}`);
+        client.assert(typeof response.body.error === "string");
+    });
+%}
+
+### Сменить username
+PATCH {{host}}/api/v1/auth/me
+Authorization: Bearer {{new_token}}
+Content-Type: application/json
+
+{ "username": "{{new_username}}_x" }
+
+> {%
+    client.test("200, username сменён", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.username.endsWith("_x") && response.body.username_changed_at !== null);
+    });
+    client.global.set("new_username", response.body.username);
+%}
+
+### Снова раньше чем через 30 дней → 400
+PATCH {{host}}/api/v1/auth/me
+Authorization: Bearer {{new_token}}
+Content-Type: application/json
+
+{ "username": "{{new_username}}y" }
+
+> {%
+    client.test("400", () => {
+        client.assert(response.status === 400, `got ${response.status}`);
+        client.assert(response.body.error.includes("30 days"), response.body.error);
+    });
+%}
+
+### Сменить email без пароля → 400 (пароль у аккаунта задан)
+POST {{host}}/api/v1/auth/me/email
+Authorization: Bearer {{new_token}}
+Content-Type: application/json
+
+{ "new_email": "moved-{{new_email}}" }
+
+> {%
+    client.test("400", () => client.assert(response.status === 400, `got ${response.status}`));
+%}
+
+### Сменить email: письмо на новый адрес
+POST {{host}}/api/v1/auth/me/email
+Authorization: Bearer {{new_token}}
+Content-Type: application/json
+
+{ "new_email": "moved-{{new_email}}", "password": "new-password-456" }
+
+> {%
+    client.test("202", () => client.assert(response.status === 202, `got ${response.status}`));
+%}
+
+### Ссылка подтверждения пришла на новый адрес
+GET {{mailpit}}/api/v1/message/latest
+
+> {%
+    client.test("письмо на новый адрес", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.To[0].Address === "moved-" + client.global.get("new_email"), JSON.stringify(response.body.To));
+        client.assert(/change-email\?token=/.test(response.body.Text), response.body.Text);
+    });
+    client.global.set("change_email_token", response.body.Text.match(/token=([0-9a-f]{64})/)[1]);
+%}
+
+### Подтвердить новый email (ссылку можно открыть и без входа)
+POST {{host}}/api/v1/auth/email/change/confirm
+Content-Type: application/json
+
+{ "token": "{{change_email_token}}" }
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+    client.test("email заменён", () => client.assert(response.body.email.startsWith("moved-"), response.body.email));
+    client.test("email подтверждён", () => client.assert(response.body.email_verified_at !== null));
+    client.global.set("old_email", client.global.get("new_email"));
+    client.global.set("new_email", response.body.email);
+%}
+
+### На старый адрес пришло уведомление
+GET {{mailpit}}/api/v1/message/latest
+
+> {%
+    client.test("уведомление на старый адрес", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.To[0].Address === client.global.get("old_email"), JSON.stringify(response.body.To));
+        client.assert(response.body.Text.includes(client.global.get("new_email")), response.body.Text);
+    });
+%}
+
+### Вход по новому email и новому username
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "{{new_email}}", "password": "new-password-456" }
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.user.username === client.global.get("new_username"));
+    });
+    client.global.set("new_token", response.body.access_token);
+%}
+
+### Привязанные провайдеры: пока пусто
+GET {{host}}/api/v1/auth/me/oauth
+Authorization: Bearer {{new_token}}
+
+> {%
+    client.test("200, пустой список", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(Array.isArray(response.body) && response.body.length === 0);
+    });
+%}
+
+### Привязать выключенного провайдера → 404 (в dev ключей нет)
+POST {{host}}/api/v1/auth/me/oauth/google
+Authorization: Bearer {{new_token}}
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}
+
 ### Вход по почте без пароля: запросить ссылку (новый адрес — аккаунт создастся)
 POST {{host}}/api/v1/auth/email/login
 Content-Type: application/json

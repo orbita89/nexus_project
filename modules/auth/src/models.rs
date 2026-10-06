@@ -1,14 +1,14 @@
 //! Запросы и ответы API модуля. Описания полей попадают в Swagger.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use shared::Role;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 /// Колонки `users` для [`UserView`]. citext приводим к text: так sqlx читает их как `String`.
 pub const USER_COLUMNS: &str = "id, email::text AS email, username::text AS username, \
-     display_name, avatar_url, role, is_active, email_verified_at, created_at";
+     display_name, avatar_url, role, is_active, email_verified_at, username_changed_at, created_at";
 
 /// Пользователь. Хеш пароля наружу не отдаётся никогда.
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
@@ -25,6 +25,8 @@ pub struct UserView {
     pub is_active: bool,
     /// `null` — email не подтверждён, вход по паролю запрещён.
     pub email_verified_at: Option<DateTime<Utc>>,
+    /// Когда username меняли в последний раз (менять можно раз в 30 дней). `null` — не меняли.
+    pub username_changed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -127,4 +129,55 @@ pub struct SetRoleRequest {
 pub struct SetStatusRequest {
     /// `false` — заблокировать (все сессии пользователя отзываются), `true` — разблокировать.
     pub is_active: bool,
+}
+
+/// Изменение своего профиля: переданные поля заменяются, `null` очищает имя и аватар.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateProfileRequest {
+    /// 3–32 символа: латиница, цифры, `_`, `-`, `.`. Менять можно раз в 30 дней.
+    #[schema(example = "neo")]
+    pub username: Option<String>,
+    /// До 64 символов. `null` или пустая строка — очистить.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>, example = "Нео")]
+    pub display_name: Option<Option<String>>,
+    /// Ссылка `https://…` до 500 символов. `null` или пустая строка — очистить.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>, example = "https://example.com/neo.png")]
+    pub avatar_url: Option<Option<String>>,
+}
+
+/// Отличает «поле не передано» (`None`) от `null` (`Some(None)`).
+fn nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeEmailRequest {
+    #[schema(example = "neo@matrix.io")]
+    pub new_email: String,
+    /// Текущий пароль. Обязателен, если пароль задан.
+    pub password: Option<String>,
+}
+
+/// Ссылка на страницу провайдера: фронтенд открывает её в браузере.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LinkStartResponse {
+    pub url: String,
+}
+
+/// Привязанный аккаунт провайдера.
+#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+pub struct LinkedAccount {
+    #[schema(example = "google")]
+    pub provider: String,
+    /// Email у провайдера на момент привязки.
+    pub email: Option<String>,
+    pub created_at: DateTime<Utc>,
 }

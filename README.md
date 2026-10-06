@@ -193,10 +193,10 @@ Dependabot раз в неделю предлагает обновления за
 
 - [x] `catalog`: CRUD сущностей, людей и тегов, индексация и поиск в Meilisearch
 - [x] `social`: подписки, рецензии, коллекции
-- [ ] `social`: форум, интересы, лента
-- [ ] `realtime`: авторизация сокетов и рассылка событий вместо echo (внутри одного процесса
+- [x] `social`: форум, интересы, лента
+- [x] `realtime`: авторизация сокетов и рассылка событий вместо echo (внутри одного процесса
       хватит `tokio::sync::broadcast`, Redis pub/sub понадобится при нескольких инстансах)
 - [ ] Логи: JSON-формат, request id, `/health/live` и `/health/ready`, graceful shutdown
-- [ ] Документация: CONTRIBUTING, architecture, ADR
+- [x] Документация: CONTRIBUTING, architecture, ADR
 - [x] Публикация образа в GHCR, конфигурация staging/прода ([deploy.md](documents/deploy.md))
 - [ ] Сервер, HTTPS, деплой из CI, бэкапы (чек-лист в deploy.md)

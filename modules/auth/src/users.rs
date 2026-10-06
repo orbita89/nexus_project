@@ -2,7 +2,7 @@
 
 use crate::models::{UserView, USER_COLUMNS};
 use crate::validate;
-use shared::AppResult;
+use shared::{AppError, AppResult};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -44,6 +44,21 @@ pub async fn by_login_with_hash(
     .bind(login.trim())
     .fetch_optional(&mut *conn)
     .await?)
+}
+
+/// Нарушение уникальности email или username → 409 с понятным сообщением.
+pub fn unique_violation(error: sqlx::Error) -> AppError {
+    if let Some(db_error) = error.as_database_error() {
+        if db_error.is_unique_violation() {
+            let message = match db_error.constraint() {
+                Some("users_email_key") => "email already registered",
+                Some("users_username_key") => "username already taken",
+                _ => "user already exists",
+            };
+            return AppError::Conflict(message.to_string());
+        }
+    }
+    AppError::Database(error)
 }
 
 /// Отмечает email подтверждённым (если ещё не был) и возвращает пользователя.

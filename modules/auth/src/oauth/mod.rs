@@ -7,7 +7,11 @@
 //! 3. Фронтенд меняет одноразовый код на токены: `POST /oauth/exchange`.
 //!
 //! Токены не попадают в URL (историю браузера, логи прокси) — только короткоживущий код.
+//!
+//! Привязка из профиля (`link`) идёт тем же путём, но начинается с `POST /me/oauth/{provider}`
+//! и заканчивается на `{APP_BASE_URL}/settings/accounts?linked=...` (или `?error=...`).
 
+pub mod link;
 mod provider;
 
 use crate::email_tokens::{self, Purpose};
@@ -108,19 +112,30 @@ pub async fn start(
 ) -> AppResult<Redirect> {
     limits.check_ip(&headers)?;
     let provider = find_provider(&state, &provider_name).ok_or(AppError::NotFound)?;
+    let url = authorize_url(&state, provider, None).await?;
+    Ok(Redirect::to(&url))
+}
 
+/// Начатый вход: `state` и PKCE в `oauth_states` (`user_id` — для привязки к нему) и ссылка
+/// на страницу входа провайдера.
+async fn authorize_url(
+    state: &AppState,
+    provider: &OAuthProviderConfig,
+    user_id: Option<uuid::Uuid>,
+) -> AppResult<String> {
     let csrf_state = crypto::generate_token();
     let code_verifier = crypto::generate_token();
     let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
 
     sqlx::query(
-        "INSERT INTO oauth_states (state_hash, provider, code_verifier, expires_at)
-         VALUES ($1, $2, $3, now() + make_interval(mins => $4))",
+        "INSERT INTO oauth_states (state_hash, provider, code_verifier, expires_at, user_id)
+         VALUES ($1, $2, $3, now() + make_interval(mins => $4), $5)",
     )
     .bind(crypto::hash_token(&csrf_state))
     .bind(&provider.name)
     .bind(&code_verifier)
     .bind(STATE_TTL_MINUTES)
+    .bind(user_id)
     .execute(&state.db)
     .await?;
 
@@ -129,10 +144,7 @@ pub async fn start(
         &[
             ("response_type", "code"),
             ("client_id", provider.client_id.as_str()),
-            (
-                "redirect_uri",
-                redirect_uri(&state, &provider.name).as_str(),
-            ),
+            ("redirect_uri", redirect_uri(state, &provider.name).as_str()),
             ("scope", provider.scopes.as_str()),
             ("state", csrf_state.as_str()),
             ("code_challenge", code_challenge.as_str()),
@@ -140,7 +152,7 @@ pub async fn start(
         ],
     )
     .map_err(|e| AppError::Internal(format!("authorize url: {e}")))?;
-    Ok(Redirect::to(url.as_str()))
+    Ok(url.into())
 }
 
 /// Сюда провайдер возвращает браузер. Редиректит на фронтенд с одноразовым кодом или ошибкой.
@@ -149,10 +161,14 @@ pub async fn start(
 /// (ссылка устарела или подделана), `provider_error`, `email_required` (провайдер не дал email),
 /// `email_in_use` (адрес занят, а провайдер не подтвердил, что он принадлежит пользователю),
 /// `account_blocked`, `internal_error`.
+///
+/// Привязка из профиля возвращает на `/settings/accounts?linked={provider}` или `?error=`:
+/// те же коды и ещё `already_linked` (аккаунт провайдера привязан к другому пользователю),
+/// `provider_already_linked` (у пользователя уже привязан другой аккаунт этого провайдера).
 #[utoipa::path(
     get, path = "/oauth/{provider}/callback", tag = "oauth",
     params(("provider" = String, Path), CallbackQuery),
-    responses((status = 303, description = "Редирект на фронтенд: `/auth/oauth/callback?code=...` или `?error=...`"))
+    responses((status = 303, description = "Редирект на фронтенд: `/auth/oauth/callback?code=...` или `?error=...`; при привязке — `/settings/accounts?linked=...` или `?error=...`"))
 )]
 pub async fn callback(
     State(state): State<AppState>,
@@ -160,21 +176,25 @@ pub async fn callback(
     Path(provider_name): Path<String>,
     Query(query): Query<CallbackQuery>,
 ) -> Redirect {
-    let param = match complete_login(&state, &http, &provider_name, query).await {
+    let (link, result) = complete_login(&state, &http, &provider_name, query).await;
+    let page = if link {
+        "/settings/accounts"
+    } else {
+        "/auth/oauth/callback"
+    };
+    let param = match result {
+        Ok(_) if link => ("linked", provider_name),
         Ok(code) => ("code", code),
         Err(error) => ("error", error.code().to_string()),
     };
-    let url = Url::parse_with_params(
-        &format!("{}/auth/oauth/callback", state.config.app_base_url),
-        &[param],
-    )
-    .map(|url| url.to_string())
-    .unwrap_or_else(|_| {
-        format!(
-            "{}/auth/oauth/callback?error=internal_error",
-            state.config.app_base_url
-        )
-    });
+    let url = Url::parse_with_params(&format!("{}{page}", state.config.app_base_url), &[param])
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| {
+            format!(
+                "{}/auth/oauth/callback?error=internal_error",
+                state.config.app_base_url
+            )
+        });
     Redirect::to(&url)
 }
 
@@ -215,6 +235,8 @@ enum OAuthError {
     EmailRequired,
     EmailInUse,
     AccountBlocked,
+    AlreadyLinked,
+    ProviderAlreadyLinked,
     Internal(String),
 }
 
@@ -227,6 +249,8 @@ impl OAuthError {
             Self::EmailRequired => "email_required",
             Self::EmailInUse => "email_in_use",
             Self::AccountBlocked => "account_blocked",
+            Self::AlreadyLinked => "already_linked",
+            Self::ProviderAlreadyLinked => "provider_already_linked",
             Self::Internal(_) => "internal_error",
         }
     }
@@ -244,32 +268,40 @@ impl From<sqlx::Error> for OAuthError {
     }
 }
 
+/// Возврат от провайдера: вход (одноразовый код для фронтенда) или привязка к пользователю,
+/// начавшему её из профиля. Первое значение — была ли это привязка.
 async fn complete_login(
     state: &AppState,
     http: &OAuthHttp,
     provider_name: &str,
     query: CallbackQuery,
-) -> Result<String, OAuthError> {
+) -> (bool, Result<String, OAuthError>) {
+    let mut link_user = None;
     let result = async {
         let provider = find_provider(state, provider_name).ok_or(OAuthError::InvalidState)?;
+        // state одноразовый и привязан к провайдеру. Гасим его первым, даже если провайдер
+        // вернул ошибку: так известно, была ли это привязка (куда вернуть браузер).
+        let started: Option<(String, Option<uuid::Uuid>)> = match &query.state {
+            Some(csrf_state) => {
+                sqlx::query_as(
+                    "DELETE FROM oauth_states
+                     WHERE state_hash = $1 AND provider = $2 AND expires_at > now()
+                     RETURNING code_verifier, user_id",
+                )
+                .bind(crypto::hash_token(csrf_state))
+                .bind(&provider.name)
+                .fetch_optional(&state.db)
+                .await?
+            }
+            None => None,
+        };
+        link_user = started.as_ref().and_then(|(_, user_id)| *user_id);
         if query.error.is_some() {
             return Err(OAuthError::AccessDenied);
         }
-        let (Some(code), Some(csrf_state)) = (query.code, query.state) else {
+        let (Some(code), Some((code_verifier, _))) = (query.code, started) else {
             return Err(OAuthError::InvalidState);
         };
-
-        // state одноразовый и привязан к провайдеру.
-        let code_verifier: Option<String> = sqlx::query_scalar(
-            "DELETE FROM oauth_states
-             WHERE state_hash = $1 AND provider = $2 AND expires_at > now()
-             RETURNING code_verifier",
-        )
-        .bind(crypto::hash_token(&csrf_state))
-        .bind(&provider.name)
-        .fetch_optional(&state.db)
-        .await?;
-        let code_verifier = code_verifier.ok_or(OAuthError::InvalidState)?;
 
         let redirect_uri = redirect_uri(state, &provider.name);
         let access_token =
@@ -281,6 +313,11 @@ async fn complete_login(
             .map_err(|e| OAuthError::Provider(e.0))?;
 
         let mut tx = state.db.begin().await?;
+        if let Some(user_id) = link_user {
+            link::link_account(&mut tx, &provider.name, profile, user_id).await?;
+            tx.commit().await?;
+            return Ok(String::new());
+        }
         let user = find_or_create_user(&mut tx, &provider.name, profile).await?;
         let code =
             email_tokens::create(&mut tx, Purpose::OAuthLogin, &user.email, Some(user.id)).await?;
@@ -298,9 +335,12 @@ async fn complete_login(
             error = e.code(),
             "oauth login rejected"
         ),
+        Ok(_) if link_user.is_some() => {
+            tracing::info!(provider = provider_name, user_id = ?link_user, "oauth account linked");
+        }
         Ok(_) => {}
     }
-    result
+    (link_user.is_some(), result)
 }
 
 /// Привязанный аккаунт → его пользователь. Иначе — существующий пользователь с тем же

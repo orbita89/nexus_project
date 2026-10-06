@@ -64,7 +64,7 @@ pub async fn register(
     .bind(&display_name)
     .fetch_one(&mut *tx)
     .await
-    .map_err(map_unique_violation)?;
+    .map_err(users::unique_violation)?;
     let token = email_tokens::create(&mut tx, Purpose::VerifyEmail, &email, Some(user.id)).await?;
     tx.commit().await?;
 
@@ -236,18 +236,4 @@ struct StoredRefreshToken {
     expires_at: DateTime<Utc>,
     revoked_at: Option<DateTime<Utc>>,
     replaced_by: Option<Uuid>,
-}
-
-fn map_unique_violation(error: sqlx::Error) -> AppError {
-    if let Some(db_error) = error.as_database_error() {
-        if db_error.is_unique_violation() {
-            let message = match db_error.constraint() {
-                Some("users_email_key") => "email already registered",
-                Some("users_username_key") => "username already taken",
-                _ => "user already exists",
-            };
-            return AppError::Conflict(message.to_string());
-        }
-    }
-    AppError::Database(error)
 }

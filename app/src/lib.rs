@@ -33,6 +33,7 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../migrations");
     tags(
         (name = "auth", description = "Регистрация, вход, токены, сессии, пароль"),
         (name = "oauth", description = "Вход через внешних провайдеров (Google, GitHub, Яндекс)"),
+        (name = "profile", description = "Свой профиль: имя, аватар, email, привязанные провайдеры"),
         (name = "admin", description = "Управление пользователями. Только роль admin"),
         (name = "dev", description = "Только для разработки: включается DEV_LOGIN=true"),
         (name = "system", description = "Служебное"),

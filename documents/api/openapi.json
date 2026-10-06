@@ -296,6 +296,74 @@
         }
       }
     },
+    "/api/v1/auth/email/change/confirm": {
+      "post": {
+        "tags": [
+          "profile"
+        ],
+        "summary": "Подтвердить новый email по ссылке из письма. Токен не нужен: ссылку открывают с любого\nустройства, владение адресом подтверждает сама ссылка.",
+        "description": "Email заменяется и считается подтверждённым, на старый адрес уходит уведомление. Все\nсессии отзываются, кроме текущей, если запрос пришёл с токеном этого же пользователя.",
+        "operationId": "confirm_email_change",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Email изменён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Ссылка недействительна, использована или истекла (живёт 1 час)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Аккаунт заблокирован или токен недействителен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Адрес за это время заняли",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/auth/email/login": {
       "post": {
         "tags": [
@@ -626,6 +694,294 @@
             "bearer": []
           }
         ]
+      },
+      "patch": {
+        "tags": [
+          "profile"
+        ],
+        "summary": "Изменить свой профиль: username (раз в 30 дней), отображаемое имя, аватар.",
+        "operationId": "update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Профиль изменён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Невалидные поля или username менялся меньше 30 дней назад",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена или аккаунт заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Username занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/me/email": {
+      "post": {
+        "tags": [
+          "profile"
+        ],
+        "summary": "Сменить email: на новый адрес уходит ссылка подтверждения (`/email/change/confirm`).",
+        "description": "Если у аккаунта задан пароль, нужен текущий пароль: так угнанный токен не позволит увести\nаккаунт на чужую почту. Новый запрос гасит ссылку из предыдущего.",
+        "operationId": "change_email",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeEmailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Письмо с подтверждением отправлено на новый адрес"
+          },
+          "400": {
+            "description": "Невалидный адрес, он уже ваш, пароль не передан или неверный",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена или аккаунт заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Адрес занят другим аккаунтом",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Слишком много запросов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/me/oauth": {
+      "get": {
+        "tags": [
+          "profile"
+        ],
+        "summary": "Привязанные к своему аккаунту провайдеры.",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "Привязанные аккаунты, старые сверху",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LinkedAccount"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/me/oauth/{provider}": {
+      "post": {
+        "tags": [
+          "profile"
+        ],
+        "summary": "Начать привязку провайдера: ссылка на его страницу входа. Открыть в браузере\n(`window.location`); вернётся на `{APP_BASE_URL}/settings/accounts?linked=...` или `?error=...`.",
+        "operationId": "start",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "google, github, yandex",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ссылка на страницу провайдера (действует 10 минут)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkStartResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Провайдер не включён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Слишком много запросов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "profile"
+        ],
+        "summary": "Отвязать провайдера. Войти можно и без него — по ссылке на email.",
+        "operationId": "unlink",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "google, github, yandex",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Отвязан"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Этот провайдер не привязан",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/auth/oauth/exchange": {
@@ -705,7 +1061,7 @@
           "oauth"
         ],
         "summary": "Сюда провайдер возвращает браузер. Редиректит на фронтенд с одноразовым кодом или ошибкой.",
-        "description": "Коды ошибок в `?error=`: `access_denied` (пользователь отменил вход), `invalid_state`\n(ссылка устарела или подделана), `provider_error`, `email_required` (провайдер не дал email),\n`email_in_use` (адрес занят, а провайдер не подтвердил, что он принадлежит пользователю),\n`account_blocked`, `internal_error`.",
+        "description": "Коды ошибок в `?error=`: `access_denied` (пользователь отменил вход), `invalid_state`\n(ссылка устарела или подделана), `provider_error`, `email_required` (провайдер не дал email),\n`email_in_use` (адрес занят, а провайдер не подтвердил, что он принадлежит пользователю),\n`account_blocked`, `internal_error`.\n\nПривязка из профиля возвращает на `/settings/accounts?linked={provider}` или `?error=`:\nте же коды и ещё `already_linked` (аккаунт провайдера привязан к другому пользователю),\n`provider_already_linked` (у пользователя уже привязан другой аккаунт этого провайдера).",
         "operationId": "callback",
         "parameters": [
           {
@@ -753,7 +1109,7 @@
         ],
         "responses": {
           "303": {
-            "description": "Редирект на фронтенд: `/auth/oauth/callback?code=...` или `?error=...`"
+            "description": "Редирект на фронтенд: `/auth/oauth/callback?code=...` или `?error=...`; при привязке — `/settings/accounts?linked=...` или `?error=...`"
           }
         }
       }
@@ -1139,6 +1495,26 @@
   },
   "components": {
     "schemas": {
+      "ChangeEmailRequest": {
+        "type": "object",
+        "required": [
+          "new_email"
+        ],
+        "properties": {
+          "new_email": {
+            "type": "string",
+            "example": "neo@matrix.io"
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Текущий пароль. Обязателен, если пароль задан."
+          }
+        },
+        "additionalProperties": false
+      },
       "ChangePasswordRequest": {
         "type": "object",
         "required": [
@@ -1243,6 +1619,43 @@
           "status": {
             "type": "string",
             "example": "ok"
+          }
+        }
+      },
+      "LinkStartResponse": {
+        "type": "object",
+        "description": "Ссылка на страницу провайдера: фронтенд открывает её в браузере.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "LinkedAccount": {
+        "type": "object",
+        "description": "Привязанный аккаунт провайдера.",
+        "required": [
+          "provider",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Email у провайдера на момент привязки."
+          },
+          "provider": {
+            "type": "string",
+            "example": "google"
           }
         }
       },
@@ -1447,6 +1860,37 @@
           }
         }
       },
+      "UpdateProfileRequest": {
+        "type": "object",
+        "description": "Изменение своего профиля: переданные поля заменяются, `null` очищает имя и аватар.",
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Ссылка `https://…` до 500 символов. `null` или пустая строка — очистить.",
+            "example": "https://example.com/neo.png"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "До 64 символов. `null` или пустая строка — очистить.",
+            "example": "Нео"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "3–32 символа: латиница, цифры, `_`, `-`, `.`. Менять можно раз в 30 дней.",
+            "example": "neo"
+          }
+        },
+        "additionalProperties": false
+      },
       "UserView": {
         "type": "object",
         "description": "Пользователь. Хеш пароля наружу не отдаётся никогда.",
@@ -1501,6 +1945,14 @@
           "username": {
             "type": "string",
             "example": "user"
+          },
+          "username_changed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Когда username меняли в последний раз (менять можно раз в 30 дней). `null` — не меняли."
           }
         }
       }
@@ -1521,6 +1973,10 @@
     {
       "name": "oauth",
       "description": "Вход через внешних провайдеров (Google, GitHub, Яндекс)"
+    },
+    {
+      "name": "profile",
+      "description": "Свой профиль: имя, аватар, email, привязанные провайдеры"
     },
     {
       "name": "admin",

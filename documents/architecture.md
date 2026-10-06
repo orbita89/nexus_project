@@ -85,8 +85,8 @@ app/ (nexus)  ──собирает──►  modules/auth, catalog, social, re
                     │ cover_url, metadata (jsonb)       │
                     └─────────────────▲─────────────────┘
           ┌──────────────┬────────────┼────────────┬──────────────────┐
-     entity_tags   entity_credits  reviews   collection_items   🕓 forum_thread_entities
-                                                                 🕓 interests
+     entity_tags   entity_credits  reviews   collection_items   forum_thread_entities
+                                                                 user_interests
 ```
 
 **Как устроено:**

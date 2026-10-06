@@ -40,6 +40,21 @@ pub fn password(password: &str) -> AppResult<()> {
     }
 }
 
+/// Аватар — ссылка на картинку: только `https://`, до 500 символов.
+pub fn avatar_url(url: Option<&str>) -> AppResult<()> {
+    match url {
+        Some(url)
+            if url.chars().count() > 500
+                || !url.starts_with("https://")
+                || url.len() <= "https://".len()
+                || url.contains(char::is_whitespace) =>
+        {
+            bad("avatar_url must be an https:// link up to 500 characters")
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn display_name(name: Option<&str>) -> AppResult<()> {
     if name.is_some_and(|name| name.chars().count() > 64) {
         bad("display_name must be at most 64 characters")
@@ -58,6 +73,8 @@ mod tests {
         assert!(username("neo_1.x-y").is_ok());
         assert!(password("password123").is_ok());
         assert!(display_name(Some("Neo")).is_ok());
+        assert!(avatar_url(Some("https://example.com/a.png")).is_ok());
+        assert!(avatar_url(None).is_ok());
     }
 
     #[test]
@@ -69,5 +86,9 @@ mod tests {
         assert!(username("нео").is_err());
         assert!(password("short").is_err());
         assert!(display_name(Some(&"x".repeat(65))).is_err());
+        assert!(avatar_url(Some("http://example.com/a.png")).is_err());
+        assert!(avatar_url(Some("https://")).is_err());
+        assert!(avatar_url(Some("javascript:alert(1)")).is_err());
+        assert!(avatar_url(Some(&format!("https://{}", "x".repeat(500)))).is_err());
     }
 }
