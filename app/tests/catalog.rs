@@ -1037,6 +1037,19 @@ async fn seed_catalog_is_valid(pool: PgPool) {
         let page = ctx.get_ok(&format!("/entities?kind={kind}")).await;
         assert!(page["total"].as_i64().unwrap() >= 5, "few {kind}s");
     }
+    // Медиа для фронтенда: фильм с трейлером, фильм только с постером, книга с обложкой.
+    let dune = ctx.get_ok("/entities/dune-2021").await;
+    assert_eq!(dune["metadata"]["trailer"], "n9xhJrPXop4");
+    assert!(dune["cover_url"].as_str().unwrap().starts_with("https://"));
+    let lynch = ctx.get_ok("/entities/dune-1984").await;
+    assert!(lynch["metadata"].get("trailer").is_none());
+    assert!(lynch["cover_url"].is_string());
+    let novel = ctx.get_ok("/entities/dune-novel").await;
+    assert!(novel["cover_url"]
+        .as_str()
+        .unwrap()
+        .contains("openlibrary.org"));
+
     // Франшиза в разных типах: книга, фильм и игра по «Пикнику на обочине».
     let card = ctx.get_ok("/people/arkady-strugatsky").await;
     assert_eq!(card["credits"].as_array().unwrap().len(), 2);

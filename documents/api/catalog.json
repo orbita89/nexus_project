@@ -1820,6 +1820,15 @@
               "null"
             ],
             "example": "CD Projekt"
+          },
+          "trailer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Официальный трейлер: id видео YouTube. Принимается и ссылка (`youtube.com/watch?v=…`,\n`youtu.be/…`, `/embed/…`), хранится только id.",
+            "example": "n9xhJrPXop4",
+            "pattern": "^[A-Za-z0-9_-]{11}$"
           }
         },
         "additionalProperties": false
@@ -1877,6 +1886,15 @@
             "example": 155,
             "maximum": 10000,
             "minimum": 1
+          },
+          "trailer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Официальный трейлер: id видео YouTube. Принимается и ссылка (`youtube.com/watch?v=…`,\n`youtu.be/…`, `/embed/…`), хранится только id.",
+            "example": "n9xhJrPXop4",
+            "pattern": "^[A-Za-z0-9_-]{11}$"
           }
         },
         "additionalProperties": false
@@ -2253,6 +2271,15 @@
                 "type": "null"
               }
             ]
+          },
+          "trailer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Официальный трейлер: id видео YouTube. Принимается и ссылка (`youtube.com/watch?v=…`,\n`youtu.be/…`, `/embed/…`), хранится только id.",
+            "example": "n9xhJrPXop4",
+            "pattern": "^[A-Za-z0-9_-]{11}$"
           }
         },
         "additionalProperties": false

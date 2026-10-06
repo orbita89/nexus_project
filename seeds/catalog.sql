@@ -195,6 +195,29 @@ INSERT INTO entities (kind, slug, title, original_title, release_date, descripti
      '{"platforms": ["pc", "ps4", "ps5", "xbox-one", "xbox-series"], "developer": "FromSoftware", "publisher": "Bandai Namco Entertainment"}')
 ON CONFLICT (slug) DO NOTHING;
 
+-- Постеры, обложки и трейлеры. Отдельным UPDATE, а не в INSERT выше: ON CONFLICT DO NOTHING
+-- не трогает уже загруженные строки, а так повторный make seed дополняет и старую базу.
+-- Картинки — ссылки на CDN (TMDB, Open Library, Steam), файлы не храним. Трейлер — id видео
+-- YouTube с канала правообладателя; без трейлера фронтенд показывает только постер.
+UPDATE entities e
+SET cover_url = v.cover_url,
+    metadata = CASE WHEN v.trailer IS NULL THEN e.metadata
+                    ELSE e.metadata || jsonb_build_object('trailer', v.trailer) END
+FROM (VALUES
+    ('dune-1984',               'https://image.tmdb.org/t/p/w780/8F6LqsbPRaZIUFDt7V1Rpyh3O8L.jpg', NULL),
+    ('dune-2021',               'https://image.tmdb.org/t/p/w780/x2Jloj3InKrmTyHJKFviBAdZG0S.jpg', 'n9xhJrPXop4'),
+    ('dune-part-two-2024',      'https://image.tmdb.org/t/p/w780/pB3Hox16z3LqiBLmXZsxV9dE6EJ.jpg', 'Way9Dexny3w'),
+    ('lotr-fellowship-2001',    'https://image.tmdb.org/t/p/w780/plCqhwzN9xw09ImTnnInwSEwJBA.jpg', 'V75dMMIW2B4'),
+    ('lotr-two-towers-2002',    'https://image.tmdb.org/t/p/w780/tGoC0XMAHrDm8iZlDWI4uk80kdo.jpg', NULL),
+    ('the-witcher-series',      'https://image.tmdb.org/t/p/w780/rY2c2LhN07CRKlAbRaDZxN2XjvK.jpg', 'cSqi-8kAMmM'),
+    ('the-witcher-3-wild-hunt', 'https://steamcdn-a.akamaihd.net/steam/apps/292030/library_600x900_2x.jpg', '1-l29HlKkXU'),
+    ('dune-novel',                  'https://covers.openlibrary.org/b/isbn/9780441013593-L.jpg', NULL),
+    ('the-last-wish',               'https://covers.openlibrary.org/b/isbn/9780316029186-L.jpg', NULL),
+    ('the-hobbit-novel',            'https://covers.openlibrary.org/b/isbn/9780618260300-L.jpg', NULL),
+    ('the-lord-of-the-rings-novel', 'https://covers.openlibrary.org/b/isbn/9780544003415-L.jpg', NULL)
+) AS v (slug, cover_url, trailer)
+WHERE e.slug = v.slug;
+
 INSERT INTO people (slug, full_name, birth_date, bio) VALUES
     ('frank-herbert',       'Фрэнк Херберт',        '1920-10-08', 'Американский писатель-фантаст, автор «Дюны».'),
     ('denis-villeneuve',    'Дени Вильнёв',         '1967-10-03', 'Канадский режиссёр.'),

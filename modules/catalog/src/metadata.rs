@@ -26,6 +26,11 @@ pub struct MovieMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = "PG-13")]
     pub age_rating: Option<String>,
+    /// Официальный трейлер: id видео YouTube. Принимается и ссылка (`youtube.com/watch?v=…`,
+    /// `youtu.be/…`, `/embed/…`), хранится только id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "n9xhJrPXop4", pattern = "^[A-Za-z0-9_-]{11}$")]
+    pub trailer: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
@@ -55,6 +60,11 @@ pub struct SeriesMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = json!(["US"]))]
     pub countries: Option<Vec<String>>,
+    /// Официальный трейлер: id видео YouTube. Принимается и ссылка (`youtube.com/watch?v=…`,
+    /// `youtu.be/…`, `/embed/…`), хранится только id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "n9xhJrPXop4", pattern = "^[A-Za-z0-9_-]{11}$")]
+    pub trailer: Option<String>,
 }
 
 /// Поля книги.
@@ -86,6 +96,11 @@ pub struct GameMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = "CD Projekt")]
     pub publisher: Option<String>,
+    /// Официальный трейлер: id видео YouTube. Принимается и ссылка (`youtube.com/watch?v=…`,
+    /// `youtu.be/…`, `/embed/…`), хранится только id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "n9xhJrPXop4", pattern = "^[A-Za-z0-9_-]{11}$")]
+    pub trailer: Option<String>,
 }
 
 /// Поля, специфичные для типа (`kind`). Все поля необязательны, неизвестные запрещены.
@@ -114,6 +129,7 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             range("runtime_min", m.runtime_min, 1, 10_000)?;
             m.countries = countries(m.countries)?;
             m.age_rating = text("age_rating", m.age_rating, 16)?;
+            m.trailer = youtube_id(m.trailer)?;
             to_value(m)
         }
         EntityKind::Series => {
@@ -121,6 +137,7 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             range("seasons", m.seasons, 1, 10_000)?;
             range("episodes", m.episodes, 1, 100_000)?;
             m.countries = countries(m.countries)?;
+            m.trailer = youtube_id(m.trailer)?;
             to_value(m)
         }
         EntityKind::Book => {
@@ -137,6 +154,7 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             })?;
             m.developer = text("developer", m.developer, MAX_TEXT)?;
             m.publisher = text("publisher", m.publisher, MAX_TEXT)?;
+            m.trailer = youtube_id(m.trailer)?;
             to_value(m)
         }
     }
@@ -218,6 +236,56 @@ fn countries(values: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> {
     })
 }
 
+/// id видео YouTube из id или ссылки. Фронтенд строит из него адрес плеера сам, поэтому в БД
+/// не попадает произвольный URL (и чужой домен в iframe).
+fn youtube_id(value: Option<String>) -> AppResult<Option<String>> {
+    let Some(value) = text("trailer", value, 200)? else {
+        return Ok(None);
+    };
+    let is_id = |s: &str| {
+        s.len() == 11
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    };
+    if is_id(&value) {
+        return Ok(Some(value));
+    }
+    let rest = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(&value);
+    let rest = rest
+        .strip_prefix("www.")
+        .or_else(|| rest.strip_prefix("m."))
+        .unwrap_or(rest);
+    let candidate = if let Some(path) = rest.strip_prefix("youtu.be/") {
+        path.split(['?', '&', '/', '#']).next()
+    } else if let Some(path) = rest
+        .strip_prefix("youtube.com/")
+        .or_else(|| rest.strip_prefix("youtube-nocookie.com/"))
+    {
+        if let Some(query) = path.strip_prefix("watch?") {
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("v="))
+                .and_then(|v| v.split('#').next())
+        } else {
+            ["embed/", "shorts/", "v/"]
+                .iter()
+                .find_map(|prefix| path.strip_prefix(prefix))
+                .and_then(|p| p.split(['?', '&', '/', '#']).next())
+        }
+    } else {
+        None
+    };
+    match candidate {
+        Some(id) if is_id(id) => Ok(Some(id.to_string())),
+        _ => Err(bad(
+            "metadata.trailer must be a YouTube video id or link (youtube.com/watch?v=…, youtu.be/…)",
+        )),
+    }
+}
+
 /// Убирает дефисы и пробелы, проверяет длину и контрольную цифру ISBN-10/13.
 fn isbn_normalize(isbn: &str) -> AppResult<String> {
     let isbn: String = isbn
@@ -291,6 +359,42 @@ mod tests {
         assert!(validate(EntityKind::Series, json!({ "status": "paused" })).is_err());
         assert!(validate(EntityKind::Game, json!({ "platforms": [""] })).is_err());
         assert!(validate(EntityKind::Book, json!([])).is_err());
+    }
+
+    #[test]
+    fn trailer_is_youtube_id_from_id_or_link() {
+        let id = "n9xhJrPXop4";
+        for input in [
+            id.to_string(),
+            format!(" {id} "),
+            format!("https://www.youtube.com/watch?v={id}"),
+            format!("https://www.youtube.com/watch?feature=share&v={id}&t=30"),
+            format!("https://youtu.be/{id}?si=abc"),
+            format!("https://www.youtube-nocookie.com/embed/{id}"),
+            format!("youtube.com/shorts/{id}"),
+        ] {
+            for kind in [EntityKind::Movie, EntityKind::Series, EntityKind::Game] {
+                let value = validate(kind, json!({ "trailer": input })).unwrap();
+                assert_eq!(value, json!({ "trailer": id }), "{kind:?} {input}");
+            }
+        }
+        assert_eq!(
+            validate(EntityKind::Movie, json!({ "trailer": "" })).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn trailer_rejects_other_sites_and_books() {
+        let bad = |kind, trailer: &str| validate(kind, json!({ "trailer": trailer })).is_err();
+        assert!(bad(EntityKind::Movie, "https://vimeo.com/12345678"));
+        assert!(bad(
+            EntityKind::Movie,
+            "https://evil.example/watch?v=n9xhJrPXop4"
+        ));
+        assert!(bad(EntityKind::Movie, "short"));
+        assert!(bad(EntityKind::Movie, "https://youtu.be/bad id here"));
+        assert!(bad(EntityKind::Book, "n9xhJrPXop4"));
     }
 
     #[test]
