@@ -107,6 +107,23 @@ docker compose -f infra/docker-compose.prod.yml --env-file /tmp/nexus-local.env 
 Нужны сервер и домен. Варианты: certbot рядом с nginx (сертификат в том, `listen 443 ssl`), или
 домен за Cloudflare (TLS на их стороне). Решить при подключении сервера.
 
+### Постеры и трейлеры по расписанию
+
+`nexus media check` — разовая команда того же образа (не сервер): проверяет, живы ли постеры и
+трейлеры, мёртвые заменяет, заодно заполняет медиа у новых сущностей. Ключи — `TMDB_API_KEY`,
+`TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET` в `infra/.env.prod` (без них ищутся только обложки
+книг и Rutube). Раз в сутки достаточно: ссылки пропадают редко, а частый запуск — лишние запросы
+к TMDB. cron на сервере:
+
+```cron
+# m h  dom mon dow
+30 4 * * *  cd /srv/nexus && docker compose -f infra/docker-compose.prod.yml --env-file infra/.env.prod exec -T app nexus media check >> /var/log/nexus-media.log 2>&1
+```
+
+После массового добавления сущностей можно запустить `nexus media fill` вручную, не дожидаясь
+ночи. В отчёте раздел «Проверить глазами» — найденные автоматически трейлеры Rutube (сторонние
+каналы): их стоит просмотреть.
+
 ## Чек-лист: когда появится сервер
 
 1. VPS (2 vCPU, 4 ГБ RAM хватит на старт), Docker и compose plugin, пользователь для деплоя,
@@ -117,6 +134,7 @@ docker compose -f infra/docker-compose.prod.yml --env-file /tmp/nexus-local.env 
 4. HTTPS (см. выше).
 5. OAuth: отдельные приложения у провайдеров с redirect_uri этого окружения.
 6. Бэкапы Postgres: ежедневный `pg_dump` в хранилище вне сервера + проверка восстановления.
+   Там же — cron для `nexus media check` (см. выше).
 7. Деплой из CI: job после `docker`, по SSH выполняет обновление (см. выше). Staging —
    автоматически после main, прод — вручную (GitHub Environments с подтверждением), тем же sha.
 8. После деплоя на staging — `http/*.http` с окружением `staging` в `http/http-client.env.json`

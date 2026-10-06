@@ -86,6 +86,11 @@ services:
       OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
       OAUTH_YANDEX_CLIENT_ID: ${OAUTH_YANDEX_CLIENT_ID:-}
       OAUTH_YANDEX_CLIENT_SECRET: ${OAUTH_YANDEX_CLIENT_SECRET:-}
+      # Постеры и трейлеры (nexus media fill|check, make media): TMDB — фильмы и сериалы,
+      # IGDB через приложение Twitch — игры. Без ключей ищутся только обложки книг и Rutube.
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID:-}
+      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET:-}
       BIND_ADDR: 0.0.0.0:8080
       RUST_LOG: ${RUST_LOG:-info,tower_http=debug}
       RUST_BACKTRACE: "1"

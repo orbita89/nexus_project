@@ -12,7 +12,7 @@ COMPOSE = docker compose -f infra/docker-compose.yml
 # Контейнер с тулчейном (сервис tools) от пользователя хоста: Rust на машине не нужен.
 TOOLS = $(COMPOSE) run --rm --user $(shell id -u):$(shell id -g) tools
 
-.PHONY: up down logs run seed fmt lint boundaries test deny ci image http ci-docker test-docker shell
+.PHONY: up down logs run seed media fmt lint boundaries test deny ci image http ci-docker test-docker shell
 
 up:          ## Поднять dev-окружение
 	$(COMPOSE) up -d --build
@@ -29,6 +29,11 @@ run:         ## Запустить приложение локально (без
 seed:        ## Загрузить тестовых пользователей, каталог и social (seeds/*.sql) в dev-базу, перестроить поиск
 	cat seeds/dev.sql seeds/catalog.sql seeds/social.sql | $(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -q -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 	scripts/reindex-search.sh
+
+# Ключи источников берутся из infra/.env (только эти три строки — файл не исполняется как shell).
+media:       ## Постеры и трейлеры каталога: make media [MODE=check] [ARGS="--dry-run --slug dune-2021"]
+	env $$(grep -sE '^(TMDB_API_KEY|TWITCH_CLIENT_ID|TWITCH_CLIENT_SECRET)=' infra/.env) \
+		cargo run -q -p nexus -- media $(or $(MODE),fill) $(ARGS)
 
 fmt:         ## Отформатировать код
 	cargo fmt --all

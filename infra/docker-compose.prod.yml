@@ -78,6 +78,10 @@ services:
       OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
       OAUTH_YANDEX_CLIENT_ID: ${OAUTH_YANDEX_CLIENT_ID:-}
       OAUTH_YANDEX_CLIENT_SECRET: ${OAUTH_YANDEX_CLIENT_SECRET:-}
+      # Постеры и трейлеры: docker compose ... exec app nexus media check (по cron, см. deploy.md).
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID:-}
+      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET:-}
       RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       postgres:

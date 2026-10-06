@@ -20,3 +20,4 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
+reqwest = { workspace = true }

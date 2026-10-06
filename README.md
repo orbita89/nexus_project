@@ -151,6 +151,7 @@ sqlx сверяет контрольные суммы и не даст стар�
 | `make shell`      | bash в контейнере с тулчейном                                 |
 | `make image`      | собрать production-образ                                      |
 | `make seed`       | загрузить пользователей, каталог и social (`seeds/*.sql`), перестроить поиск |
+| `make media`      | постеры и трейлеры каталога (`MODE=check` — проверить ссылки; ключи в `infra/.env`, см. `documents/modules/catalog.md`) |
 | `make http`       | HTTP-проверки против поднятого окружения (после `make seed`)  |
 
 Staging и прод: `infra/docker-compose.prod.yml` с готовым образом из CI — см.

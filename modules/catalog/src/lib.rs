@@ -6,6 +6,7 @@
 pub mod admin;
 pub mod directory;
 pub mod entities;
+pub mod media;
 pub mod metadata;
 pub mod models;
 pub mod people;
