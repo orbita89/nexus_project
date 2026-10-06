@@ -51,6 +51,9 @@ app/ (nexus)  ──собирает──►  modules/auth, catalog, social, re
    делается через явный публичный интерфейс (трейт в `shared`), а не через SQL в чужие таблицы.
    Сделано так: `shared::directory` (`EntityDirectory` реализует catalog, `UserDirectory` — auth),
    реализации лежат в `AppState`, см. [social.md](modules/social.md#чужие-данные-справочники).
+5. Если модулю нужно сообщить другим о том, что произошло (новое сообщение в теме), он публикует
+   событие в `shared::events::EventBus` (`state.events`), а не вызывает другой модуль: так `social`
+   сообщает `realtime`, см. [realtime.md](modules/realtime.md).
 
 ### Почему монолит, а не микросервисы
 

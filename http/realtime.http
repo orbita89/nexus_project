@@ -1,9 +1,31 @@
-# WebSocket — только для ручной проверки в IDE (в `make http` не входит).
-# Сервер пока работает как echo: каждое отправленное сообщение возвращается обратно.
+# WebSocket /ws — только для ручной проверки в IDE (в `make http` не входит: CLI-клиент не
+# умеет WebSocket). Протокол — documents/modules/realtime.md.
+#
+# Как смотреть события: откройте соединение ниже, затем в http/forum.http или http/social.http
+# создайте тему, ответьте или поставьте оценку про «Дюну» — событие придёт в это соединение.
 
-### Echo
+### Гость: подписка на «Дюну» 2021 и тему из дампа
 WEBSOCKET {{ws}}/ws
 
 ===
-ping
+{ "type": "subscribe", "channels": ["entity:dune-2021", "thread:00000000-0000-4000-9100-000000000001"] }
+=== wait-for-server
+{ "type": "ping" }
+=== wait-for-server
+
+### Вход для личного канала
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "user", "password": "password123" }
+
+> {%
+    client.global.set("user_token", response.body.access_token);
+%}
+
+### Вошедший: user:me и интересы user из дампа подписываются сами
+WEBSOCKET {{ws}}/ws
+
+===
+{ "type": "auth", "token": "{{user_token}}" }
 === wait-for-server

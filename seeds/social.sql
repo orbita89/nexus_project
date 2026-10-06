@@ -1,5 +1,5 @@
--- Мини-дамп социального модуля для локальной разработки: рецензии и оценки, подписки, коллекции
--- и форум тестовых пользователей (seeds/dev.sql) на сущности из seeds/catalog.sql.
+-- Мини-дамп социального модуля для локальной разработки: рецензии и оценки, подписки, коллекции,
+-- форум и интересы тестовых пользователей (seeds/dev.sql) на сущности из seeds/catalog.sql.
 -- Загрузка: make seed (после dev.sql и catalog.sql). Повторный запуск безопасен: существующие
 -- записи не трогаются.
 --
@@ -146,5 +146,17 @@ UPDATE forum_threads t SET
     posts_count = (SELECT count(*) FROM forum_posts p WHERE p.thread_id = t.id AND p.deleted_at IS NULL),
     last_post_at = COALESCE((SELECT max(p.created_at) FROM forum_posts p WHERE p.thread_id = t.id), t.created_at)
 WHERE t.id::text LIKE '00000000-0000-4000-9100-%';
+
+-- Интересы: по ним realtime сам подписывает соединение на каналы сущностей.
+INSERT INTO user_interests (user_id, entity_id)
+SELECT (SELECT id FROM users WHERE username = v.username::citext), (SELECT id FROM entities WHERE slug = v.slug)
+FROM (VALUES
+    ('user',   'dune-2021'),
+    ('user',   'dune-novel'),
+    ('user',   'the-witcher-3-wild-hunt'),
+    ('author', 'roadside-picnic'),
+    ('author', 'blade-runner-2049')
+) AS v(username, slug)
+ON CONFLICT DO NOTHING;
 
 COMMIT;

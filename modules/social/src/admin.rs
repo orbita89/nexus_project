@@ -1,5 +1,6 @@
 //! Модерация: admin удаляет любую рецензию, коллекцию, тему и сообщение, закрывает темы.
 
+use crate::events;
 use crate::posts;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -25,13 +26,14 @@ pub async fn delete_review(
     AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let author: Option<Uuid> =
-        sqlx::query_scalar("DELETE FROM reviews WHERE id = $1 RETURNING user_id")
+    let review: Option<(Uuid, Uuid)> =
+        sqlx::query_as("DELETE FROM reviews WHERE id = $1 RETURNING user_id, entity_id")
             .bind(id)
             .fetch_optional(&state.db)
             .await?;
-    let author = author.ok_or(AppError::NotFound)?;
+    let (author, entity) = review.ok_or(AppError::NotFound)?;
     tracing::info!(admin_id = %admin.id, review_id = %id, author_id = %author, "review deleted by admin");
+    events::publish(&state, events::review("review.deleted", id, entity, author));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -79,13 +81,20 @@ pub async fn delete_thread(
     AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
+    let mut tx = state.db.begin().await?;
+    let entities = events::thread_entities(&mut *tx, id).await?;
     let author: Option<Uuid> =
         sqlx::query_scalar("DELETE FROM forum_threads WHERE id = $1 RETURNING author_id")
             .bind(id)
-            .fetch_optional(&state.db)
+            .fetch_optional(&mut *tx)
             .await?;
     let author = author.ok_or(AppError::NotFound)?;
+    tx.commit().await?;
     tracing::info!(admin_id = %admin.id, thread_id = %id, author_id = %author, "thread deleted by admin");
+    events::publish(
+        &state,
+        events::thread_changed("thread.deleted", id, &entities),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -107,9 +116,13 @@ pub async fn delete_post(
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     let mut tx = state.db.begin().await?;
-    let author = posts::remove(&mut tx, id).await?;
+    let removed = posts::remove(&mut tx, id).await?;
     tx.commit().await?;
-    tracing::info!(admin_id = %admin.id, post_id = %id, author_id = %author, "post deleted by admin");
+    tracing::info!(admin_id = %admin.id, post_id = %id, author_id = %removed.author_id, "post deleted by admin");
+    events::publish(
+        &state,
+        events::post_changed("post.deleted", removed.thread_id, id),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -166,5 +179,10 @@ async fn set_locked(state: &AppState, id: Uuid, locked: bool) -> AppResult<()> {
     if updated.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
+    let entities = events::thread_entities(&state.db, id).await?;
+    events::publish(
+        state,
+        events::thread_changed("thread.updated", id, &entities),
+    );
     Ok(())
 }

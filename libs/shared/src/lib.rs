@@ -6,6 +6,7 @@ pub mod config;
 pub mod db;
 pub mod directory;
 pub mod error;
+pub mod events;
 pub mod extract;
 pub mod mail;
 pub mod pagination;

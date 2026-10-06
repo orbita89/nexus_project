@@ -940,3 +940,107 @@ async fn profile_counts_forum_activity(pool: PgPool) {
     assert_eq!(profile["threads_count"], 0);
     assert_eq!(profile["posts_count"], 1);
 }
+
+// ---------------------------------------------------------------- события для realtime
+
+/// Все события, уже опубликованные в шину.
+fn drain(
+    events: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<shared::events::Event>>,
+) -> Vec<shared::events::Event> {
+    std::iter::from_fn(|| events.try_recv().ok())
+        .map(|event| (*event).clone())
+        .collect()
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn forum_publishes_events_with_ids_only(pool: PgPool) {
+    use shared::events::Channel;
+
+    let ctx = Ctx::new(pool);
+    let author = ctx.login("author", "author").await;
+    let alice = ctx.login("alice", "user").await;
+    let admin = ctx.login("admin", "admin").await;
+    let entity = |slug: &'static str| {
+        let db = ctx.state.db.clone();
+        async move {
+            let id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM entities WHERE slug = $1")
+                .bind(slug)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            Channel::Entity(id)
+        }
+    };
+    let (dune, book, witcher) = (
+        entity("dune-2021").await,
+        entity("dune-novel").await,
+        entity("witcher-3").await,
+    );
+    let thread = ctx.thread(&author, "Тема", &["dune-2021"]).await;
+    let thread_id: uuid::Uuid = thread.parse().unwrap();
+    let mut events = ctx.state.events.subscribe();
+
+    // Смена набора сущностей: узнают и старая сущность, и новые.
+    ctx.expect(
+        StatusCode::OK,
+        Method::PATCH,
+        &format!("/threads/{thread}"),
+        Some(json!({ "entities": ["dune-novel", "witcher-3"] })),
+        Some(&author),
+    )
+    .await;
+    let updated = drain(&mut events);
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].kind, "thread.updated");
+    assert_eq!(
+        updated[0].channels,
+        [Channel::Thread(thread_id), dune, book, witcher]
+    );
+    assert_eq!(updated[0].data, json!({ "thread_id": thread }));
+
+    // Ошибка — событий нет.
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::PATCH,
+        &format!("/threads/{thread}"),
+        Some(json!({ "title": "X" })),
+        Some(&alice),
+    )
+    .await;
+    assert!(drain(&mut events).is_empty());
+
+    // Модерация: удаление сообщения и темы.
+    let post = ctx.post(&alice, &thread, "Спам", None).await;
+    drain(&mut events);
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/admin/posts/{post}"),
+        None,
+        Some(&admin),
+    )
+    .await;
+    let deleted = drain(&mut events);
+    assert_eq!(deleted[0].kind, "post.deleted");
+    assert_eq!(deleted[0].channels, [Channel::Thread(thread_id)]);
+    assert_eq!(
+        deleted[0].data,
+        json!({ "thread_id": thread, "post_id": post })
+    );
+
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/admin/threads/{thread}"),
+        None,
+        Some(&admin),
+    )
+    .await;
+    let deleted = drain(&mut events);
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].kind, "thread.deleted");
+    assert_eq!(
+        deleted[0].channels,
+        [Channel::Thread(thread_id), book, witcher]
+    );
+}

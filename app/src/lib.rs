@@ -64,7 +64,7 @@ struct CatalogDoc;
 #[openapi(
     info(
         title = "Nexus API: социальное",
-        description = "Рецензии и оценки, подписки на пользователей, коллекции, форум.\n\n\
+        description = "Рецензии и оценки, подписки на пользователей, коллекции, форум, интересы.\n\n\
             Сущности адресуются по `slug` (как в каталоге), пользователи — по `username`, коллекции, темы \
             и сообщения — по `id`. Ошибки — всегда `{\"error\": \"...\"}`. Чтение публичного — без авторизации; рецензии, подписки, свои коллекции \
             и ответы на форуме — любой вошедший; темы форума — роль `author` и выше; модерация (`/admin/...`) — только роль `admin`. Токен: во вкладке **Nexus API** \
@@ -77,6 +77,7 @@ struct CatalogDoc;
         (name = "reviews", description = "Рецензии и оценки"),
         (name = "follows", description = "Подписки на пользователей"),
         (name = "collections", description = "Коллекции: приватные видит только владелец"),
+        (name = "interests", description = "Интересы: на какие сущности подписан пользователь. Список личный; по нему realtime (/ws) присылает события сущностей"),
         (name = "forum", description = "Форум: темы, привязанные к нескольким сущностям, и сообщения с ветками. Темы создаёт роль author и выше, отвечает любой вошедший"),
         (name = "social-admin", description = "Модерация. Только роль admin"),
     )
@@ -88,7 +89,8 @@ struct SocialDoc;
 pub fn directories(db: PgPool) -> Directories {
     Directories {
         entities: Arc::new(catalog::directory::PgEntityDirectory::new(db.clone())),
-        users: Arc::new(auth::directory::PgUserDirectory::new(db)),
+        users: Arc::new(auth::directory::PgUserDirectory::new(db.clone())),
+        interests: Arc::new(social::directory::PgInterestDirectory::new(db)),
     }
 }
 

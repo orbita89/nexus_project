@@ -304,11 +304,10 @@ API видно в PR. Обновить: `UPDATE_OPENAPI=1 cargo test -p nexus op
 `state_hash` (PK, SHA-256 параметра `state`), `provider`, `code_verifier` (PKCE), `expires_at` (10 минут).
 Запись удаляется при возврате от провайдера или фоновой чисткой.
 
-### `user_interests` 🕓 — интересы пользователя
+### `user_interests` — интересы пользователя (в `social`)
 
-Основа столпа «реалтайм по интересам» (см. [vision](../vision.md)): на какие сущности подписан
-пользователь. Предлагается держать в модуле `social`: таблица ссылается на `entities`, и ею
-пользуются лента и `realtime`.
+Решено держать в модуле `social`: таблица ссылается на `entities`, ею пользуются лента и `realtime`.
+См. [social.md](social.md#user_interests---интересы).
 
 ## Дальше 🕓
 

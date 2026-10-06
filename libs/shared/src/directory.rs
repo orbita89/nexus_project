@@ -2,7 +2,8 @@
 //!
 //! Модуль не ходит SQL'ем в чужие таблицы (см. «Правила границ» в `documents/architecture.md`).
 //! Если `social` нужно название сущности или имя автора, он вызывает трейт отсюда, а реализует
-//! трейт модуль-владелец данных: [`EntityDirectory`] — `catalog`, [`UserDirectory`] — `auth`.
+//! трейт модуль-владелец данных: [`EntityDirectory`] — `catalog`, [`UserDirectory`] — `auth`,
+//! [`InterestDirectory`] — `social`.
 //! Реализации собирает `app` и кладёт в [`AppState`](crate::AppState); в тестах их можно
 //! подменить: `state.entities = Arc::new(Fake)`.
 //!
@@ -60,9 +61,17 @@ pub trait UserDirectory: Send + Sync {
     async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, UserRef>>;
 }
 
+/// Интересы пользователей. Реализует `social`, пользуется `realtime` (автоподписка).
+#[async_trait]
+pub trait InterestDirectory: Send + Sync {
+    /// Сущности, которые пользователь добавил в интересы.
+    async fn entity_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>>;
+}
+
 /// Все справочники разом: аргумент [`AppState::new`](crate::AppState::new).
 #[derive(Clone)]
 pub struct Directories {
     pub entities: Arc<dyn EntityDirectory>,
     pub users: Arc<dyn UserDirectory>,
+    pub interests: Arc<dyn InterestDirectory>,
 }

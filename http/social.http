@@ -459,3 +459,59 @@ Authorization: Bearer {{admin_token}}
 > {%
     client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
 %}
+
+# ------------------------------------------------------------------ интересы
+
+### Свои интересы без токена — 401
+GET {{host}}/api/v1/social/interests
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}
+
+### Добавить Elden Ring в интересы (повторно — тоже 204)
+PUT {{host}}/api/v1/social/entities/elden-ring/interest
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Elden Ring в интересах
+GET {{host}}/api/v1/social/entities/elden-ring/interest
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.entity.slug === "elden-ring" && typeof response.body.since === "string");
+    });
+%}
+
+### Свои интересы: Elden Ring и «Дюна» из дампа
+GET {{host}}/api/v1/social/interests?limit=100
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const slugs = response.body.items.map(i => i.entity.slug);
+        client.assert(slugs.includes("elden-ring") && slugs.includes("dune-2021"), JSON.stringify(slugs));
+    });
+%}
+
+### Убрать из интересов
+DELETE {{host}}/api/v1/social/entities/elden-ring/interest
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Больше не в интересах
+GET {{host}}/api/v1/social/entities/elden-ring/interest
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("404", () => client.assert(response.status === 404, `got ${response.status}`));
+%}

@@ -416,6 +416,22 @@ pub struct UpdatePost {
     pub body: String,
 }
 
+// ---------------------------------------------------------------- интересы
+
+/// Сущность в интересах пользователя.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Interest {
+    pub entity: EntityRef,
+    /// Когда добавлена.
+    pub since: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct InterestRow {
+    pub entity_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Отличает «поле не передано» (`None`) от `null` (`Some(None)`).
 fn nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where

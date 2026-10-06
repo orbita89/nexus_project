@@ -5,6 +5,7 @@
 //! «сообщение удалено» (текст и автор не показываются), чтобы ветка не рвалась. Заглушка, у
 //! которой не осталось ответов, удаляется следом.
 
+use crate::events::{self, NewPost};
 use crate::models::{CreatePost, Post, PostRow, UpdatePost, POST_COLUMNS};
 use crate::refs;
 use crate::validate::{self, MAX_POST_BODY};
@@ -51,26 +52,29 @@ pub async fn create(
         Some(true) if user.role < Role::Admin => return Err(AppError::Forbidden),
         Some(_) => {}
     }
+    // Автор родителя — для уведомления «вам ответили».
+    let mut parent_author = None;
     if let Some(parent) = req.parent_id {
-        let deleted: Option<bool> = sqlx::query_scalar(
-            "SELECT deleted_at IS NOT NULL FROM forum_posts WHERE id = $1 AND thread_id = $2",
+        let found: Option<(bool, Uuid)> = sqlx::query_as(
+            "SELECT deleted_at IS NOT NULL, author_id FROM forum_posts
+             WHERE id = $1 AND thread_id = $2",
         )
         .bind(parent)
         .bind(thread_id)
         .fetch_optional(&mut *tx)
         .await?;
-        match deleted {
+        match found {
             None => {
                 return Err(AppError::BadRequest(
                     "parent_id: no such post in this thread".into(),
                 ))
             }
-            Some(true) => {
+            Some((true, _)) => {
                 return Err(AppError::BadRequest(
                     "parent_id: cannot reply to a deleted post".into(),
                 ))
             }
-            Some(false) => {}
+            Some((false, author)) => parent_author = Some(author),
         }
     }
 
@@ -92,9 +96,20 @@ pub async fn create(
     .bind(thread_id)
     .execute(&mut *tx)
     .await?;
+    let entities = events::thread_entities(&mut *tx, thread_id).await?;
     tx.commit().await?;
 
     tracing::info!(user_id = %user.id, thread_id = %thread_id, post_id = %id, "post created");
+    let new = NewPost {
+        thread_id,
+        post_id: id,
+        parent_id: req.parent_id,
+        author_id: user.id,
+    };
+    events::publish(&state, new.created(&entities));
+    if let Some(reply) = new.reply(parent_author) {
+        events::publish(&state, reply);
+    }
     let row = load(&state.db, id).await?.ok_or(AppError::NotFound)?;
     Ok((StatusCode::CREATED, Json(refs::post(&state, row).await?)))
 }
@@ -122,13 +137,14 @@ pub async fn update(
     let body = validate::required("body", &req.body, MAX_POST_BODY)?;
     let mut tx = state.db.begin().await?;
     // NO KEY UPDATE не мешает параллельным ответам на это сообщение.
-    owned(&mut *tx, id, &user, "FOR NO KEY UPDATE").await?;
+    let thread_id = owned(&mut *tx, id, &user, "FOR NO KEY UPDATE").await?;
     sqlx::query("UPDATE forum_posts SET body = $2, edited_at = now() WHERE id = $1")
         .bind(id)
         .bind(body)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    events::publish(&state, events::post_changed("post.updated", thread_id, id));
 
     let row = load(&state.db, id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(refs::post(&state, row).await?))
@@ -153,30 +169,40 @@ pub async fn delete(
 ) -> AppResult<StatusCode> {
     let mut tx = state.db.begin().await?;
     owned(&mut *tx, id, &user, "").await?;
-    remove(&mut tx, id).await?;
+    let removed = remove(&mut tx, id).await?;
     tx.commit().await?;
     tracing::info!(user_id = %user.id, post_id = %id, "post deleted");
+    events::publish(
+        &state,
+        events::post_changed("post.deleted", removed.thread_id, id),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Сообщение пользователя `user`: нет или удалено — 404, чужое — 403.
-async fn owned(db: impl PgExecutor<'_>, id: Uuid, user: &AuthUser, lock: &str) -> AppResult<()> {
-    let author: Option<Uuid> = sqlx::query_scalar(&format!(
-        "SELECT author_id FROM forum_posts WHERE id = $1 AND deleted_at IS NULL {lock}"
+/// Сообщение пользователя `user`: его тема. Нет или удалено — 404, чужое — 403.
+async fn owned(db: impl PgExecutor<'_>, id: Uuid, user: &AuthUser, lock: &str) -> AppResult<Uuid> {
+    let post: Option<(Uuid, Uuid)> = sqlx::query_as(&format!(
+        "SELECT author_id, thread_id FROM forum_posts WHERE id = $1 AND deleted_at IS NULL {lock}"
     ))
     .bind(id)
     .fetch_optional(db)
     .await?;
-    match author {
-        Some(author) if author == user.id => Ok(()),
+    match post {
+        Some((author, thread)) if author == user.id => Ok(thread),
         Some(_) => Err(AppError::Forbidden),
         None => Err(AppError::NotFound),
     }
 }
 
+/// Удалённое сообщение: чьё и из какой темы.
+pub(crate) struct Removed {
+    pub author_id: Uuid,
+    pub thread_id: Uuid,
+}
+
 /// Удалить сообщение (права уже проверены): целиком или в заглушку, если есть ответы.
-/// Возвращает автора. Нет или уже удалено — 404.
-pub(crate) async fn remove(tx: &mut PgConnection, id: Uuid) -> AppResult<Uuid> {
+/// Нет или уже удалено — 404.
+pub(crate) async fn remove(tx: &mut PgConnection, id: Uuid) -> AppResult<Removed> {
     // Сначала тема, потом сообщение — в том же порядке, что и при ответе (create): иначе ответ
     // (держит тему, ждёт родителя) и удаление родителя (держит его, ждёт тему) заблокируют друг друга.
     let thread_id: Option<Uuid> =
@@ -230,7 +256,10 @@ pub(crate) async fn remove(tx: &mut PgConnection, id: Uuid) -> AppResult<Uuid> {
         .bind(thread_id)
         .execute(&mut *tx)
         .await?;
-    Ok(author)
+    Ok(Removed {
+        author_id: author,
+        thread_id,
+    })
 }
 
 async fn load(db: impl PgExecutor<'_>, id: Uuid) -> AppResult<Option<PostRow>> {

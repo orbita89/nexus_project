@@ -14,6 +14,7 @@ shared = { workspace = true }
 # проверяется только для modules/*, хелпер тестов может зависеть от них.
 auth = { workspace = true }
 catalog = { workspace = true }
+social = { workspace = true }
 axum = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

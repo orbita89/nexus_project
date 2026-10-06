@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Nexus API: социальное",
-    "description": "Рецензии и оценки, подписки на пользователей, коллекции, форум.\n\nСущности адресуются по `slug` (как в каталоге), пользователи — по `username`, коллекции, темы и сообщения — по `id`. Ошибки — всегда `{\"error\": \"...\"}`. Чтение публичного — без авторизации; рецензии, подписки, свои коллекции и ответы на форуме — любой вошедший; темы форума — роль `author` и выше; модерация (`/admin/...`) — только роль `admin`. Токен: во вкладке **Nexus API** выполните `POST /api/v1/auth/login` (`user` / `author` / `admin`, пароль `password123`) и вставьте `access_token` в **Authorize**.",
+    "description": "Рецензии и оценки, подписки на пользователей, коллекции, форум, интересы.\n\nСущности адресуются по `slug` (как в каталоге), пользователи — по `username`, коллекции, темы и сообщения — по `id`. Ошибки — всегда `{\"error\": \"...\"}`. Чтение публичного — без авторизации; рецензии, подписки, свои коллекции и ответы на форуме — любой вошедший; темы форума — роль `author` и выше; модерация (`/admin/...`) — только роль `admin`. Токен: во вкладке **Nexus API** выполните `POST /api/v1/auth/login` (`user` / `author` / `admin`, пароль `password123`) и вставьте `access_token` в **Authorize**.",
     "license": {
       "name": "proprietary",
       "identifier": "proprietary"
@@ -1004,6 +1004,172 @@
         }
       }
     },
+    "/api/v1/social/entities/{slug}/interest": {
+      "get": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Есть ли сущность в своих интересах: кнопка «Следить» на карточке.",
+        "operationId": "get_own",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "В интересах",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Interest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена или её нет в интересах",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Добавить сущность в интересы → 204 (повторно — тоже 204).",
+        "operationId": "add",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "В интересах"
+          },
+          "400": {
+            "description": "Уже 500 интересов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Убрать сущность из интересов → 204 (даже если её там не было).",
+        "operationId": "remove",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Не в интересах"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/entities/{slug}/rating": {
       "get": {
         "tags": [
@@ -1411,6 +1577,64 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/social/interests": {
+      "get": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Свои интересы, новые сверху.",
+        "operationId": "list_own",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница интересов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Interest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/social/posts/{id}": {
@@ -2748,6 +2972,24 @@
           }
         }
       },
+      "Interest": {
+        "type": "object",
+        "description": "Сущность в интересах пользователя.",
+        "required": [
+          "entity",
+          "since"
+        ],
+        "properties": {
+          "entity": {
+            "$ref": "#/components/schemas/EntityRef"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Когда добавлена."
+          }
+        }
+      },
       "Page_Collection": {
         "type": "object",
         "description": "Страница списка.",
@@ -2856,6 +3098,55 @@
                 },
                 "user": {
                   "$ref": "#/components/schemas/UserRef"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_Interest": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Сущность в интересах пользователя.",
+              "required": [
+                "entity",
+                "since"
+              ],
+              "properties": {
+                "entity": {
+                  "$ref": "#/components/schemas/EntityRef"
+                },
+                "since": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Когда добавлена."
                 }
               }
             }
@@ -3679,6 +3970,10 @@
     {
       "name": "collections",
       "description": "Коллекции: приватные видит только владелец"
+    },
+    {
+      "name": "interests",
+      "description": "Интересы: на какие сущности подписан пользователь. Список личный; по нему realtime (/ws) присылает события сущностей"
     },
     {
       "name": "forum",

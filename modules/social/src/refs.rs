@@ -5,8 +5,8 @@
 //! удалены прямо сейчас, каскад ещё не дошёл), пропускается.
 
 use crate::models::{
-    Collection, CollectionItem, CollectionItemRow, CollectionRow, Post, PostRow, Review, ReviewRow,
-    Thread, ThreadRow,
+    Collection, CollectionItem, CollectionItemRow, CollectionRow, Interest, InterestRow, Post,
+    PostRow, Review, ReviewRow, Thread, ThreadRow,
 };
 use shared::directory::{EntityRef, UserRef};
 use shared::{AppError, AppResult, AppState};
@@ -184,4 +184,17 @@ pub async fn post(state: &AppState, row: PostRow) -> AppResult<Post> {
         .await?
         .pop()
         .ok_or(AppError::NotFound)
+}
+
+pub async fn interests(state: &AppState, rows: Vec<InterestRow>) -> AppResult<Vec<Interest>> {
+    let entities = entities(state, rows.iter().map(|r| r.entity_id).collect()).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(Interest {
+                entity: entities.get(&row.entity_id)?.clone(),
+                since: row.created_at,
+            })
+        })
+        .collect())
 }

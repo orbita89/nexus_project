@@ -1,4 +1,5 @@
-//! social — рецензии и оценки, подписки на пользователей, коллекции, социальный профиль, форум.
+//! social — рецензии и оценки, подписки на пользователей, коллекции, социальный профиль, форум,
+//! интересы. После изменений публикует события в `shared::events` (см. `events`) для `realtime`.
 //! Монтируется под `/api/v1/social`.
 //!
 //! Чтение публичного — без авторизации, запись — любой вошедший (темы форума — author и выше),
@@ -8,7 +9,10 @@
 
 pub mod admin;
 pub mod collections;
+pub mod directory;
+mod events;
 pub mod follows;
+pub mod interests;
 pub mod models;
 pub mod posts;
 pub mod profiles;
@@ -45,6 +49,12 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(collections::list_for_entity))
         .routes(routes!(collections::reorder))
         .routes(routes!(collections::put_item, collections::delete_item))
+        .routes(routes!(interests::list_own))
+        .routes(routes!(
+            interests::get_own,
+            interests::add,
+            interests::remove
+        ))
         .routes(routes!(threads::list, threads::create))
         .routes(routes!(threads::get, threads::update, threads::delete))
         .routes(routes!(threads::list_for_entity))

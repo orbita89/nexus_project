@@ -1,6 +1,7 @@
 //! Темы форума. Тема привязана к 1–10 сущностям: тема про «Дюну» видна и у книги, и у фильма.
 //! Читать — гость, создавать — роль author и выше, менять и удалять — автор темы.
 
+use crate::events;
 use crate::models::{
     CreateThread, ListThreadsQuery, PageQuery, PostRow, PostsQuery, Thread, ThreadDetail,
     ThreadRow, ThreadSort, UpdateThread, POST_COLUMNS, THREAD_COLUMNS,
@@ -198,6 +199,7 @@ pub async fn create(
     tx.commit().await?;
 
     tracing::info!(user_id = %user.id, thread_id = %id, "thread created");
+    events::publish(&state, events::thread_created(id, user.id, &entities));
     let row = load(&state.db, id).await?.ok_or(AppError::NotFound)?;
     let detail = detail(
         &state,
@@ -246,6 +248,8 @@ pub async fn update(
 
     let mut tx = state.db.begin().await?;
     owned(&mut *tx, id, &user).await?;
+    // О теме узнают и те, кто следит за сущностями, от которых её отвязали.
+    let mut channels = events::thread_entities(&mut *tx, id).await?;
     if title.is_some() || body.is_some() || entities.is_some() {
         sqlx::query(
             "UPDATE forum_threads SET
@@ -264,8 +268,18 @@ pub async fn update(
             .execute(&mut *tx)
             .await?;
         set_entities(&mut tx, id, &entities).await?;
+        channels.extend(
+            entities
+                .iter()
+                .filter(|e| !channels.contains(e))
+                .collect::<Vec<_>>(),
+        );
     }
     tx.commit().await?;
+    events::publish(
+        &state,
+        events::thread_changed("thread.updated", id, &channels),
+    );
 
     let row = load(&state.db, id).await?.ok_or(AppError::NotFound)?;
     let detail = detail(
@@ -299,12 +313,17 @@ pub async fn delete(
 ) -> AppResult<StatusCode> {
     let mut tx = state.db.begin().await?;
     owned(&mut *tx, id, &user).await?;
+    let entities = events::thread_entities(&mut *tx, id).await?;
     sqlx::query("DELETE FROM forum_threads WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
     tracing::info!(user_id = %user.id, thread_id = %id, "thread deleted");
+    events::publish(
+        &state,
+        events::thread_changed("thread.deleted", id, &entities),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

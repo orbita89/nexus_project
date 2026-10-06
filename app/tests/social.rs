@@ -1351,6 +1351,64 @@ async fn social_reads_entities_through_directory(pool: PgPool) {
     .await;
 }
 
+// ---------------------------------------------------------------- события для realtime
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reviews_publish_events(pool: PgPool) {
+    use shared::events::Channel;
+
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let mut events = ctx.state.events.subscribe();
+    let mut next = || {
+        let event = events.try_recv().expect("event");
+        (event.kind, event.channels.clone(), event.data.clone())
+    };
+
+    let created = ctx
+        .review(&alice, "dune-2021", json!({ "rating": 9 }))
+        .await;
+    let (kind, channels, data) = next();
+    assert_eq!(kind, "review.created");
+    let Channel::Entity(entity) = channels[0] else {
+        panic!("{channels:?}")
+    };
+    assert_eq!(data["review_id"], created["id"]);
+    assert_eq!(data["entity_id"], entity.to_string());
+    assert_eq!(data["author_id"], created["author"]["id"]);
+
+    ctx.review(&alice, "dune-2021", json!({ "rating": 7 }))
+        .await;
+    assert_eq!(next().0, "review.updated");
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        "/entities/dune-2021/review",
+        None,
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(next().0, "review.deleted");
+
+    let created = ctx
+        .review(&alice, "witcher-3", json!({ "rating": 3 }))
+        .await;
+    next();
+    let id = created["id"].as_str().unwrap();
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/admin/reviews/{id}"),
+        None,
+        Some(&admin),
+    )
+    .await;
+    let (kind, _, data) = next();
+    assert_eq!(kind, "review.deleted");
+    assert_eq!(data["review_id"], id);
+}
+
 // ---------------------------------------------------------------- дамп
 
 /// `seeds/social.sql` загружается поверх `seeds/dev.sql` и `seeds/catalog.sql` и читается через API.
@@ -1421,4 +1479,8 @@ async fn seed_social_is_valid(pool: PgPool) {
     let profile = ctx.get_ok("/users/author", None).await;
     assert_eq!(profile["threads_count"], 3);
     assert_eq!(profile["posts_count"], 2);
+
+    // Интересы user.
+    let interests = ctx.get_ok("/interests", Some(&user)).await;
+    assert_eq!(interests["total"], 3, "{interests}");
 }

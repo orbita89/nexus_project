@@ -1,7 +1,8 @@
 //! Состояние приложения, общее для всех модулей.
 
 use crate::auth::Jwt;
-use crate::directory::{Directories, EntityDirectory, UserDirectory};
+use crate::directory::{Directories, EntityDirectory, InterestDirectory, UserDirectory};
+use crate::events::EventBus;
 use crate::mail::Mailer;
 use crate::search::Search;
 use crate::Config;
@@ -21,6 +22,10 @@ pub struct AppState {
     pub entities: Arc<dyn EntityDirectory>,
     /// Пользователи для других модулей (реализует `auth`).
     pub users: Arc<dyn UserDirectory>,
+    /// Интересы пользователей для других модулей (реализует `social`).
+    pub interests: Arc<dyn InterestDirectory>,
+    /// Шина событий: модули публикуют, `realtime` рассылает клиентам.
+    pub events: EventBus,
 }
 
 impl AppState {
@@ -35,6 +40,8 @@ impl AppState {
             search,
             entities: directories.entities,
             users: directories.users,
+            interests: directories.interests,
+            events: EventBus::default(),
         }
     }
 }

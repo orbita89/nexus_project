@@ -1,5 +1,6 @@
 //! Рецензии и оценки. Чтение без авторизации, своя рецензия — любой вошедший.
 
+use crate::events;
 use crate::models::{
     ListReviewsQuery, PageQuery, PutReview, RatingSummary, Review, ReviewRow, ReviewSort,
     REVIEW_COLUMNS,
@@ -180,12 +181,16 @@ pub async fn put_own(
     .await
     .map_err(validate::missing_reference)?;
 
-    let status = if saved.created {
+    let (status, kind) = if saved.created {
         tracing::info!(user_id = %user.id, review_id = %saved.review.id, "review created");
-        StatusCode::CREATED
+        (StatusCode::CREATED, "review.created")
     } else {
-        StatusCode::OK
+        (StatusCode::OK, "review.updated")
     };
+    events::publish(
+        &state,
+        events::review(kind, saved.review.id, entity.id, user.id),
+    );
     Ok((status, Json(refs::review(&state, saved.review).await?)))
 }
 
@@ -213,14 +218,18 @@ pub async fn delete_own(
     Path(slug): Path<String>,
 ) -> AppResult<StatusCode> {
     let entity = refs::entity(&state, &slug).await?;
-    let deleted = sqlx::query("DELETE FROM reviews WHERE user_id = $1 AND entity_id = $2")
-        .bind(user.id)
-        .bind(entity.id)
-        .execute(&state.db)
-        .await?;
-    if deleted.rows_affected() == 0 {
-        return Err(AppError::NotFound);
-    }
+    let deleted: Option<uuid::Uuid> = sqlx::query_scalar(
+        "DELETE FROM reviews WHERE user_id = $1 AND entity_id = $2 RETURNING id",
+    )
+    .bind(user.id)
+    .bind(entity.id)
+    .fetch_optional(&state.db)
+    .await?;
+    let id = deleted.ok_or(AppError::NotFound)?;
+    events::publish(
+        &state,
+        events::review("review.deleted", id, entity.id, user.id),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

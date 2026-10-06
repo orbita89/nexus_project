@@ -5,8 +5,9 @@
 **URL:** `/api/v1/social` · **Код:** `modules/social/`
 
 **Статус:** ✅ рецензии и оценки, подписки на пользователей, коллекции, социальный профиль,
-форум (темы на несколько сущностей, сообщения с ветками, закрытие тем), модерация, мини-дамп.
-🕓 интересы, лента, рассылка новых сообщений через `realtime`.
+форум (темы на несколько сущностей, сообщения с ветками, закрытие тем), интересы, события для
+`realtime`, модерация, мини-дамп.
+🕓 лента.
 
 Все таблицы ссылаются на `entities.id`, а не на «фильм» или «книгу». Поэтому любая функция
 модуля сразу работает для любого типа контента.
@@ -133,11 +134,20 @@
   сообщения темы по порядку; частичный по `parent_id` — есть ли ответы; частичный по `author_id`
   для неудалённых — счётчик в профиле.
 
-## Интересы 🕓
+### `user_interests` ✅ — интересы
 
-**`user_interests`** — на какие произведения подписан пользователь: `user_id`, `entity_id`, PK по
-паре. Из неё строятся лента («новые темы и рецензии по моим интересам») и подписки в `realtime`.
-Где держать таблицу, в `auth` или `social`, — см. вопрос в [auth.md](auth.md).
+На какие произведения подписан пользователь. По ним `realtime` сам подписывает соединения
+пользователя на каналы сущностей, позже из них строится лента. Таблица в `social` (а не в `auth`):
+она ссылается на `entities` и нужна социальным функциям. Миграция `20261010100000_social_interests.sql`.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `user_id` | `uuid` | PK, FK → `users`, CASCADE | Кто |
+| `entity_id` | `uuid` | PK, FK → `entities`, CASCADE | Что интересует |
+| `created_at` | `timestamptz` | NOT NULL | Когда добавлено |
+
+**Индексы:** PK; (`user_id`, `created_at DESC`) — свои интересы, новые сверху; `entity_id` — кто
+интересуется сущностью (лента, рассылки). Не больше 500 интересов на пользователя.
 
 ## Чужие данные: справочники
 
@@ -150,9 +160,12 @@
 | `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>` |
 | `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных) |
 
+В обратную сторону `social` сам реализует `InterestDirectory` (`social::directory::PgInterestDirectory`,
+`entity_ids(user)`): по нему `realtime` узнаёт интересы, не читая `user_interests`.
+
 - `EntityRef` — `id`, `kind`, `slug`, `title`, `cover_url`; `UserRef` — `id`, `username`,
   `display_name`, `avatar_url`. Это же их вид в ответах API.
-- **Подключение:** `AppState::new(..., Directories { entities, users })`; реализации собирает
+- **Подключение:** `AppState::new(..., Directories { entities, users, interests })`; реализации собирает
   `nexus::directories(pool)` в `app` (и `test_utils::directories` в тестах). Модули по-прежнему
   не зависят друг от друга: `social` знает только трейты из `shared`.
 - **Без N+1:** хендлер выбирает свои строки, собирает id и одним вызовом `by_ids` получает ссылки
@@ -262,6 +275,18 @@
 Чужие тему и сообщение не правит никто, даже admin: он только удаляет и закрывает. Сообщения и темы
 заблокированных пользователей остаются видны, как и их рецензии.
 
+### Интересы
+
+| Метод | Путь | Доступ | Что делает |
+|---|---|---|---|
+| GET | `/interests` | user | Свои интересы, новые сверху: `{entity, since}` |
+| GET | `/entities/{slug}/interest` | user | Есть ли сущность в интересах (кнопка «Следить»): `{entity, since}` или 404 |
+| PUT | `/entities/{slug}/interest` | user | Добавить → 204 (повторно — тоже 204). Уже 500 интересов — 400 |
+| DELETE | `/entities/{slug}/interest` | user | Убрать → 204 (даже если не было) |
+
+Интересы личные: чужие не видит никто, включая admin. Изменение сразу доходит до открытых
+WebSocket-соединений пользователя (`interest.added` / `interest.removed`, см. ниже).
+
 ### Модерация (только `admin`, иначе 401/403)
 
 | Метод | Путь | Что делает |
@@ -299,6 +324,8 @@
 «Зона: Стругацкие и наследники» у `author`. Форум: четыре темы на несколько сущностей («Дюна:
 книга против экранизаций» — книга и три фильма; Зона; Ведьмак — закрытая; «Бегущий по лезвию» —
 без ответов), сообщения с ветками и заглушка удалённого сообщения `blocked`, на которое ответили.
+Интересы: у `user` — «Дюна» (фильм и книга) и «Ведьмак 3», у `author` — «Пикник на обочине» и
+«Бегущий по лезвию 2049».
 Повторная загрузка безопасна: у коллекций, тем и сообщений фиксированные id. Тест `seed_social_is_valid` загружает все три дампа в чистую БД и читает их через API.
 
 ## Код
@@ -311,36 +338,37 @@
 | `validate.rs` | Проверка строк и оценки; FK violation → 404 |
 | `reviews.rs`, `follows.rs`, `collections.rs` | Эндпоинты |
 | `threads.rs`, `posts.rs` | Форум: темы и сообщения |
+| `interests.rs` | Интересы |
+| `events.rs` | События для `realtime` |
+| `directory.rs` | `InterestDirectory` для других модулей |
 | `admin.rs` | Модерация |
 
-Тесты — `app/tests/social.rs` и `app/tests/forum.rs` (сущности — `app/tests/fixtures/catalog.sql`,
+Тесты — `app/tests/social.rs`, `app/tests/forum.rs`, `app/tests/interests.rs` (сущности — `app/tests/fixtures/catalog.sql`,
 пользователи — через dev login). Живые проверки — `http/social.http` и `http/forum.http`: всё, что
 файл создаёт, он же удаляет; `forum.http` первым делом удаляет свои темы, оставшиеся от прерванного
 прогона (по заголовку «Проверка из http/forum.http…»).
 
-## Realtime: новые сообщения 🕓 (предложение, не реализовано)
+## События для realtime
 
-Как `social` сообщит [`realtime`](realtime.md) о новых сообщениях, не завися от него:
+После успешного изменения (после `commit`) `social` публикует событие в `state.events`
+(`shared::events::EventBus`), а [`realtime`](realtime.md) доставляет его WebSocket-клиентам,
+подписанным на каналы события. Ошибка запроса — событий нет. В данных **только id**: тексты и имена
+клиент перечитывает по API.
 
-```rust
-// shared::events
-pub enum Event {
-    ThreadCreated { thread_id: Uuid, author_id: Uuid, entity_ids: Vec<Uuid> },
-    PostCreated { thread_id: Uuid, post_id: Uuid, parent_id: Option<Uuid>, author_id: Uuid, entity_ids: Vec<Uuid> },
-}
+| Событие | Каналы | `data` |
+|---|---|---|
+| `thread.created` | сущности темы | `thread_id`, `author_id` |
+| `thread.updated` | тема, сущности (при смене набора — старые и новые) | `thread_id` |
+| `thread.deleted` | тема, сущности | `thread_id` |
+| `post.created` | тема, сущности темы | `thread_id`, `post_id`, `parent_id`, `author_id` |
+| `post.updated`, `post.deleted` | тема | `thread_id`, `post_id` |
+| `reply.created` | автор сообщения, на которое ответили (себе — нет) | `thread_id`, `post_id`, `parent_id`, `author_id` |
+| `review.created`, `review.updated`, `review.deleted` | сущность | `review_id`, `entity_id`, `author_id` |
+| `interest.added`, `interest.removed` | пользователь | `entity_id` |
 
-pub trait EventPublisher: Send + Sync {
-    fn publish(&self, event: Event); // не async и без ошибки: публикация не должна валить запрос
-}
-```
-
-- `AppState::events: Arc<dyn EventPublisher>`, по умолчанию — no-op (как `Search::disabled()`);
-  `app` подставляет реализацию из `realtime` (`tokio::sync::broadcast`, позже Redis pub/sub).
-- `social` публикует **после** `commit`, в событии только id: тексты и имена `realtime` (или клиент)
-  получает по API, так событие не устаревает и не раскрывает удалённое.
-- Каналы: `thread:<id>` — открытая тема, `entity:<id>` для каждой сущности темы — интересы,
-  `user:<id>` автора `parent_id` — «вам ответили».
-- В тестах — публикатор, который складывает события в `Vec`, как `outbox` писем.
+`thread.updated` — и правка автором, и закрытие/открытие admin; `thread.deleted` и `post.deleted` —
+и автором, и admin. Коллекции и подписки на пользователей событий не публикуют. Код —
+`modules/social/src/events.rs`.
 
 ## Планируемые эндпоинты 🕓
 

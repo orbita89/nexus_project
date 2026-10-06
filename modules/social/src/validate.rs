@@ -11,6 +11,7 @@ pub const MAX_THREAD_TITLE: usize = 200;
 pub const MAX_THREAD_BODY: usize = 20_000;
 pub const MAX_POST_BODY: usize = 10_000;
 pub const MAX_THREAD_ENTITIES: usize = 10;
+pub const MAX_INTERESTS: i64 = 500;
 
 fn bad(message: String) -> AppError {
     AppError::BadRequest(message)

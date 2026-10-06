@@ -1,27 +1,48 @@
-//! realtime — WebSocket: живые уведомления, присутствие, чат.
-//! Пока заглушка: echo-сокет на `/ws`, чтобы проверить проксирование в nginx.
+//! realtime — живые события по WebSocket на `/ws`: новое в темах форума, по сущностям из
+//! интересов, ответы на свои сообщения.
+//!
+//! Данные создают другие модули и публикуют события в `shared::events::EventBus`; realtime
+//! только доставляет их соединениям, подписанным на канал. В чужие таблицы не ходит: slug
+//! сущностей — через `state.entities`, интересы — через `state.interests`.
+//!
+//! Протокол (JSON-сообщения с полем `type`) — `documents/modules/realtime.md`.
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+mod channels;
+mod connection;
+mod registry;
+
+use axum::extract::{State, WebSocketUpgrade};
 use axum::response::Response;
-use axum::{routing::get, Router};
+use axum::{routing::get, Extension, Router};
+use registry::Registry;
 use shared::AppState;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Как часто сервер пингует клиента.
+pub const HEARTBEAT: Duration = Duration::from_secs(30);
+/// Клиент молчит дольше (ни сообщений, ни pong) — соединение закрывается.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// За сколько до истечения токена сервер присылает `auth_expiring`.
+pub const EXPIRY_WARNING: Duration = Duration::from_secs(60);
+/// Каналов, подписанных вручную, на соединение (интересы и `user:me` не считаются).
+pub const MAX_CHANNELS: usize = 200;
+/// Одновременных соединений одного пользователя (гостевые не ограничены).
+pub const MAX_CONNECTIONS_PER_USER: usize = 5;
+/// Максимальный размер сообщения от клиента.
+pub const MAX_MESSAGE_SIZE: usize = 16 * 1024;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/ws", get(ws_handler))
+    Router::new()
+        .route("/ws", get(ws_handler))
+        .layer(Extension(Arc::new(Registry::default())))
 }
 
-async fn ws_handler(ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(echo)
-}
-
-/// Временная заглушка: возвращает клиенту его же сообщения.
-async fn echo(mut socket: WebSocket) {
-    while let Some(Ok(msg)) = socket.recv().await {
-        if let Message::Close(_) = msg {
-            break;
-        }
-        if socket.send(msg).await.is_err() {
-            break;
-        }
-    }
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Extension(registry): Extension<Arc<Registry>>,
+) -> Response {
+    ws.max_message_size(MAX_MESSAGE_SIZE)
+        .on_upgrade(move |socket| connection::run(socket, state, registry))
 }

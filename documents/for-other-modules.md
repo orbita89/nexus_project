@@ -59,6 +59,26 @@ let authors = state.users.by_ids(&ids).await?;                                  
 
 Пагинация: `shared::pagination::{Page, page_bounds}` — `{items, total, limit, offset}`.
 
+## События для realtime
+
+Что-то изменилось и это стоит показать открытым вкладкам (новое сообщение, рецензия) — опубликуйте
+событие в шину **после** `commit`. Модуль `realtime` сам разошлёт его подписанным WebSocket-клиентам:
+
+```rust
+use shared::events::{Channel, Event};
+
+tx.commit().await?;
+state.events.publish(Event::new(
+    "post.created",
+    vec![Channel::Thread(thread_id), Channel::Entity(entity_id)],
+    json!({ "thread_id": thread_id, "post_id": post_id }),   // только id, тексты клиент возьмёт по API
+));
+```
+
+Каналы: `Thread` (тема), `Entity` (сущность — для подписчиков и интересов), `User` (личное).
+`publish` не возвращает ошибку и не ждёт клиентов. В тестах: `let mut rx = state.events.subscribe();`
+до запроса, потом `rx.try_recv()`. Образец — `modules/social/src/events.rs`, протокол — `modules/realtime.md`.
+
 ## Как встроить модуль
 
 1. `modules/<name>/src/lib.rs` отдаёт `pub fn router() -> OpenApiRouter<AppState>` (`utoipa_axum`).
@@ -99,6 +119,7 @@ let authors = state.users.by_ids(&ids).await?;                                  
 | Письма | http://localhost:8025 (Mailpit) |
 | БД | `postgres://nexus_user:nexus_password@localhost:5432/nexus_db` |
 | Тесты | `make test` (нужен Postgres из `make up`) или `make test-docker` / `make ci-docker` без Rust на машине |
+| WebSocket | `ws://localhost/ws`, ручная проверка — `http/realtime.http` в IDE |
 
 ## Definition of Done
 

@@ -70,13 +70,24 @@ impl Jwt {
 
     /// Выпускает access-токен на [`ACCESS_TOKEN_TTL_SECS`].
     pub fn issue(&self, user_id: Uuid, role: Role, session_id: Uuid) -> AppResult<String> {
+        self.issue_with_ttl(user_id, role, session_id, ACCESS_TOKEN_TTL_SECS)
+    }
+
+    /// То же со своим сроком в секундах (тесты истечения токена).
+    pub fn issue_with_ttl(
+        &self,
+        user_id: Uuid,
+        role: Role,
+        session_id: Uuid,
+        ttl_secs: i64,
+    ) -> AppResult<String> {
         let now = chrono::Utc::now().timestamp();
         self.encode(&Claims {
             sub: user_id,
             role,
             sid: session_id,
             iat: now,
-            exp: now + ACCESS_TOKEN_TTL_SECS,
+            exp: now + ttl_secs,
         })
     }
 
