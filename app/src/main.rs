@@ -25,7 +25,9 @@ async fn main() -> anyhow::Result<()> {
 
     auth::cleanup::spawn(pool.clone());
 
-    let app = nexus::build_app(AppState::new(config.clone(), pool, mailer));
+    let state = AppState::new(config.clone(), pool, mailer);
+    catalog::search::spawn_reindex(state.clone());
+    let app = nexus::build_app(state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!("nexus listening on {}", config.bind_addr);

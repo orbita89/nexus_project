@@ -73,27 +73,42 @@ async fn swagger_ui_and_openapi_spec_are_served() {
 
     let response = test_utils::get(app.clone(), "/api-docs/openapi.json").await;
     assert_eq!(response.status, StatusCode::OK);
-    assert!(response.json()["paths"]["/api/v1/auth/login"].is_object());
+    let main = response.json();
+    assert!(main["paths"]["/api/v1/auth/login"].is_object());
+    // Каталог — в своей вкладке, в основной схеме его нет.
+    assert!(main["paths"]["/api/v1/catalog/entities"].is_null());
+
+    let response = test_utils::get(app.clone(), "/api-docs/catalog.json").await;
+    assert_eq!(response.status, StatusCode::OK);
+    let catalog = response.json();
+    assert!(catalog["paths"]["/api/v1/catalog/entities"].is_object());
+    assert!(catalog["paths"]["/api/v1/auth/login"].is_null());
+    assert!(catalog["components"]["securitySchemes"]["bearer"].is_object());
 
     let response = test_utils::get(app, "/docs/").await;
     assert_eq!(response.status, StatusCode::OK);
 }
 
-/// `documents/api/openapi.json` — контракт API в репозитории: любое изменение API видно в PR.
+/// `documents/api/*.json` — контракт API в репозитории (по файлу на вкладку Swagger UI):
+/// любое изменение API видно в PR.
 /// Обновить после изменения эндпоинтов: `UPDATE_OPENAPI=1 cargo test -p nexus openapi`.
 #[test]
-fn openapi_spec_file_is_up_to_date() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../documents/api/openapi.json");
-    let actual = nexus::openapi().to_pretty_json().unwrap() + "\n";
+fn openapi_spec_files_are_up_to_date() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../documents/api");
+    for doc in nexus::openapi_docs() {
+        let path = dir.join(doc.file);
+        let actual = doc.spec.to_pretty_json().unwrap() + "\n";
 
-    if std::env::var("UPDATE_OPENAPI").is_ok() {
-        std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap()).unwrap();
-        std::fs::write(path, &actual).unwrap();
-        return;
+        if std::env::var("UPDATE_OPENAPI").is_ok() {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(&path, &actual).unwrap();
+            continue;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            expected == actual,
+            "documents/api/{} is outdated, run: UPDATE_OPENAPI=1 cargo test -p nexus openapi",
+            doc.file
+        );
     }
-    let expected = std::fs::read_to_string(path).unwrap_or_default();
-    assert!(
-        expected == actual,
-        "documents/api/openapi.json is outdated, run: UPDATE_OPENAPI=1 cargo test -p nexus openapi"
-    );
 }

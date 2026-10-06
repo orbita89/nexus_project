@@ -21,3 +21,5 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 utoipa = { workspace = true }
 lettre = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }

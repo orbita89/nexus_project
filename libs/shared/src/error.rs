@@ -38,6 +38,10 @@ pub enum AppError {
     #[error("too many requests, try again later")]
     TooManyRequests,
 
+    /// Внешний сервис (например, Meilisearch) недоступен. Сообщение уходит клиенту.
+    #[error("{0}")]
+    Unavailable(String),
+
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 
@@ -57,6 +61,7 @@ impl IntoResponse for AppError {
             }
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             AppError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            AppError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
             // Детали внутренних ошибок наружу не отдаём — только в лог.
             AppError::Database(e) => {
                 tracing::error!(error = %e, "database error");
@@ -98,6 +103,10 @@ mod tests {
         assert_eq!(
             status_of(AppError::Conflict("x".into())),
             StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status_of(AppError::Unavailable("x".into())),
+            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 

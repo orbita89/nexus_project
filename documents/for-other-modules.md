@@ -35,8 +35,10 @@ async fn admin_only(AdminUser(admin): AdminUser, ...) -> AppResult<...>     // �
 | `author` | + создавать форумы и темы |
 | `admin` | + админские эндпоинты (`/api/v1/<модуль>/admin/...`) |
 
-Ошибки — `AppError` (`NotFound`, `BadRequest(msg)`, `Unauthorized`, `Forbidden`, `Conflict(msg)`, ...),
-тело ответа всегда `{"error": "..."}`. Ошибки БД наружу не уходят, только в лог.
+Ошибки — `AppError` (`NotFound`, `BadRequest(msg)`, `Unauthorized`, `Forbidden`, `Conflict(msg)`,
+`Unavailable(msg)` → 503, ...), тело ответа всегда `{"error": "..."}`. Ошибки БД наружу не уходят, только в лог.
+JSON-тело запроса принимайте через `shared::extract::JsonBody<T>` вместо `axum::Json<T>`: неразобранное
+тело тогда тоже даёт `400 {"error": "..."}`, а не текст с 422.
 
 ## Как встроить модуль
 
@@ -44,7 +46,8 @@ async fn admin_only(AdminUser(admin): AdminUser, ...) -> AppResult<...>     // �
    Каждый хендлер описан `#[utoipa::path(...)]` и добавлен через `.routes(routes!(handler))` — тогда он
    сам появится в Swagger. Защищённым эндпоинтам — `security(("bearer" = []))`. Образец: `modules/auth/src/admin.rs`.
 2. Модуль уже смонтирован в `app/src/lib.rs` под `/api/v1/<name>`. Путь в `#[utoipa::path]` — без префикса.
-3. Тег модуля добавить в `tags(...)` в `app/src/lib.rs`.
+3. Тег модуля добавить в `tags(...)` в `app/src/lib.rs`. Большому модулю можно дать отдельную
+   вкладку в Swagger (свой OpenAPI-документ): образец — `CatalogDoc` и список документов в `api()`.
 4. DTO: `#[derive(Serialize/Deserialize, utoipa::ToSchema)]`. Ошибки в описании: `body = shared::error::ErrorBody`.
 
 ## База данных
@@ -62,15 +65,17 @@ async fn admin_only(AdminUser(admin): AdminUser, ...) -> AppResult<...>     // �
   `test_utils::request(app, Method::POST, uri, Some(json), Some(token))`.
 - Пользователь с ролью в тесте: включить dev login (`config.dev_login = true`, `test_utils::state_with_config`)
   и `POST /api/v1/auth/dev/login {"login": "x@example.com", "role": "author"}`. Пример — `app/tests/oauth.rs`.
+- Внешние сервисы: в тестах поиск выключен (`state.search` — `Search::disabled()`);
+  `test_utils::with_search(state)` включает Meilisearch со своим префиксом индексов. Пример — `app/tests/catalog.rs`.
 - Живые проверки: `http/<модуль>.http` (HTTP Client JetBrains), подключить в `make http`.
-- После изменения API: `UPDATE_OPENAPI=1 cargo test -p nexus openapi` (обновит `documents/api/openapi.json`).
+- После изменения API: `UPDATE_OPENAPI=1 cargo test -p nexus openapi` (обновит `documents/api/*.json`: файл на вкладку Swagger).
 - Перед коммитом: `make ci` (fmt, clippy, границы модулей, тесты, cargo deny).
 
 ## Окружение
 
 | | |
 |---|---|
-| Запуск | `make up`, `make seed` (admin / author / user, пароль `password123`) |
+| Запуск | `make up`, `make seed` (admin / author / user, пароль `password123`, и мини-каталог) |
 | Swagger | http://localhost/docs |
 | Письма | http://localhost:8025 (Mailpit) |
 | БД | `postgres://nexus_user:nexus_password@localhost:5432/nexus_db` |
@@ -78,14 +83,56 @@ async fn admin_only(AdminUser(admin): AdminUser, ...) -> AppResult<...>     // �
 
 ## Definition of Done
 
-Тесты на каждый эндпоинт зелёные · эндпоинты в Swagger · `documents/api/openapi.json` обновлён ·
+Тесты на каждый эндпоинт зелёные · эндпоинты в Swagger · `documents/api/*.json` обновлены ·
 `http/<модуль>.http` · миграция только новая · `documents/modules/<модуль>.md` обновлён · `make ci` проходит.
 
 ---
 
 ## Промт для новой сессии
 
-Скопируйте в новую сессию Claude Code, открытую в `/home/dev/nexus_project`. Пример для каталога:
+Скопируйте в новую сессию Claude Code, открытую в `/home/dev/nexus_project`.
+
+### social (следующий)
+
+```
+Проект Nexus — модульный монолит на Rust (axum 0.8, sqlx 0.8, PostgreSQL 17, utoipa, Meilisearch).
+Перед работой прочитай: documents/for-other-modules.md (правила для модулей и авторизация),
+documents/vision.md (замысел), documents/architecture.md (особенно «Правила границ»),
+documents/modules/social.md (таблицы и план эндпоинтов), documents/modules/catalog.md (как
+устроен готовый модуль). Модули auth и catalog готовы — их поведение не менять. Образец кода,
+тестов, http-проверок и документации — modules/catalog, app/tests/catalog.rs, http/catalog.http.
+
+Задача: реализовать модуль social (modules/social), первая часть — без форума, интересов и ленты:
+- рецензии и оценки: своя рецензия на сущность (создать/изменить/удалить), список рецензий
+  сущности, рецензии пользователя, сводка оценок сущности (средняя, количество);
+- подписки на пользователей: подписаться/отписаться, подписчики и подписки;
+- коллекции: CRUD своих коллекций и их содержимого (порядок, заметки), публичные коллекции
+  других, в каких коллекциях есть сущность; приватные видит только владелец;
+- модерация: admin может удалить любую рецензию и коллекцию.
+Чтение публичного — без авторизации, запись — AuthUser (роль user и выше).
+
+Главный архитектурный вопрос: social нельзя читать таблицы entities и users (они catalog и auth),
+а в ответах нужны название/slug сущности и имя автора, и при записи нужно проверять, что сущность
+существует. По правилам это явный интерфейс в shared (трейт), который реализует модуль-владелец
+и который передаётся через AppState. Предложи вариант (трейты, где реализация, как подключается,
+как подменяется в тестах) до того, как писать код.
+
+Соглашения как в catalog: пагинация {items, total, limit, offset} (тип Page<T> перенеси в shared,
+если нужен обоим модулям), JSON-тело через shared::extract::JsonBody, ошибки {"error": ...},
+отдельная вкладка Swagger «Социальное» (как CatalogDoc в app/src/lib.rs).
+
+Требования: каждый эндпоинт с #[utoipa::path] и интеграционным тестом (#[sqlx::test]);
+http/social.http с проверками (подключить в make http); мини-дамп seeds/social.sql (рецензии,
+оценки, подписки и коллекции тестовых пользователей на сущности из seeds/catalog.sql, загрузка
+в make seed) с тестом, что он загружается; обновить documents/modules/social.md и
+documents/api/*.json; новые таблицы/индексы — только новой миграцией; make ci должен проходить.
+
+Перед началом покажи план и спроси о неясном, например: адресация сущностей в URL (slug или id),
+формат и округление сводки оценок, отдавать ли сводку в карточке каталога, сортировки списков
+рецензий, может ли рецензия быть без текста в списке, лимиты длины текста, видимость подписок.
+```
+
+### catalog (готов, для истории)
 
 ```
 Проект Nexus — модульный монолит на Rust (axum 0.8, sqlx 0.8, PostgreSQL 17, utoipa).

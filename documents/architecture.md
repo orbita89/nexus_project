@@ -8,14 +8,14 @@
 | HTTP и WebSocket | **axum** 0.8 + tokio | Асинхронный веб-фреймворк от авторов tokio, WebSocket из коробки |
 | БД | **PostgreSQL** 17 | Основное хранилище. Используем `jsonb`, триграммный поиск (`pg_trgm`), `citext` |
 | Доступ к БД | **sqlx** 0.8 | SQL пишем руками, без ORM. Миграции встроены в бинарник |
-| Поиск | **Meilisearch** 1.15 🕓 | Быстрый полнотекстовый поиск по каталогу с опечатками. Поднят в dev, ещё не подключён в коде |
+| Поиск | **Meilisearch** 1.15 | Быстрый полнотекстовый поиск по каталогу с опечатками. Клиент — `shared::search` (HTTP API через reqwest), индексирует `catalog` |
 | Кэш, pub/sub | **Redis** 7 🕓 | Кэш, rate limiting, рассылка событий при нескольких инстансах. Поднят, ещё не используется |
 | Авторизация | **jsonwebtoken** (JWT HS256) + **argon2** | Access/refresh-токены, хеши паролей. Подробно — [auth.md](modules/auth.md) |
 | Логи | **tracing** | Структурированные логи, уровень через `RUST_LOG` |
 | Reverse proxy | **nginx** 1.27 | Единая точка входа, апгрейд WebSocket |
 | Окружение | **Docker Compose** | Всё окружение одной командой `make up` |
 | CI | **GitHub Actions** | fmt, clippy, тесты, проверка зависимостей, сборка образа |
-| Документация API | **utoipa** + Swagger UI | OpenAPI-схема генерируется из кода, UI на `/docs` |
+| Документация API | **utoipa** + Swagger UI | OpenAPI-схемы генерируются из кода, UI на `/docs`; крупные модули (каталог) — отдельной вкладкой |
 | Почта | **lettre** (SMTP), в dev — **Mailpit** | Подтверждение email, вход по ссылке, сброс пароля |
 | OAuth | **reqwest** | Вход через Google, GitHub, Яндекс ID |
 | Rate limiting | **governor** | Защита входа и писем от перебора |
@@ -124,7 +124,7 @@ JOIN'ы и правки во всех запросах «по всем типа�
      nginx  ──────►  app (nexus :8080)  ──►  PostgreSQL :5432
                                          ──►  Mailpit :1025 (SMTP, dev)
                                          ──►  Redis :6379 🕓
-                                         ──►  Meilisearch :7700 🕓
+                                         ──►  Meilisearch :7700
 ```
 
 - **Монорепозиторий.** Весь код — в одном Cargo workspace: `app/`, `modules/*`, `libs/*`.
