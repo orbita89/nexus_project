@@ -3,6 +3,7 @@
 **/*.rs.bk
 .env
 infra/.env
+infra/.env.prod
 .DS_Store
 .idea/
 .vscode/

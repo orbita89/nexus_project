@@ -146,9 +146,15 @@ sqlx сверяет контрольные суммы и не даст стар�
 | `make boundaries` | проверка, что модули не зависят друг от друга                 |
 | `make deny`       | уязвимости и лицензии зависимостей (`cargo install cargo-deny`) |
 | `make ci`         | всё перечисленное — то же, что проверяет CI                   |
+| `make ci-docker`  | `make ci` в контейнере `tools` — Rust на машине не нужен       |
+| `make test-docker`| тесты в контейнере `tools`                                    |
+| `make shell`      | bash в контейнере с тулчейном                                 |
 | `make image`      | собрать production-образ                                      |
 | `make seed`       | загрузить пользователей, каталог и social (`seeds/*.sql`), перестроить поиск |
 | `make http`       | HTTP-проверки против поднятого окружения (после `make seed`)  |
+
+Staging и прод: `infra/docker-compose.prod.yml` с готовым образом из CI — см.
+[documents/deploy.md](documents/deploy.md).
 
 ### Тесты
 
@@ -192,4 +198,5 @@ Dependabot раз в неделю предлагает обновления за
       хватит `tokio::sync::broadcast`, Redis pub/sub понадобится при нескольких инстансах)
 - [ ] Логи: JSON-формат, request id, `/health/live` и `/health/ready`, graceful shutdown
 - [ ] Документация: CONTRIBUTING, architecture, ADR
-- [ ] Публикация образа и деплой
+- [x] Публикация образа в GHCR, конфигурация staging/прода ([deploy.md](documents/deploy.md))
+- [ ] Сервер, HTTPS, деплой из CI, бэкапы (чек-лист в deploy.md)
