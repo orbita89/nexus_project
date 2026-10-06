@@ -16,7 +16,7 @@ const TAG_ENTITIES: &str = "SELECT entity_id FROM entity_tags WHERE tag_id = $1"
 
 /// Создать тег.
 #[utoipa::path(
-    post, path = "/admin/tags", tag = "catalog-admin",
+    post, operation_id = "create_tag", path = "/admin/tags", tag = "catalog-admin",
     security(("bearer" = [])),
     request_body = CreateTag,
     responses(
@@ -49,7 +49,7 @@ pub async fn create(
 
 /// Переименовать тег или сменить slug.
 #[utoipa::path(
-    patch, path = "/admin/tags/{id}", tag = "catalog-admin",
+    patch, operation_id = "update_tag", path = "/admin/tags/{id}", tag = "catalog-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id тега")),
     request_body = UpdateTag,
@@ -97,7 +97,7 @@ pub async fn update(
 
 /// Удалить тег (снимается со всех сущностей).
 #[utoipa::path(
-    delete, path = "/admin/tags/{id}", tag = "catalog-admin",
+    delete, operation_id = "delete_tag", path = "/admin/tags/{id}", tag = "catalog-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id тега")),
     responses(

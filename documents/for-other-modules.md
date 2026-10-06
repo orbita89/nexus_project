@@ -84,6 +84,10 @@ state.events.publish(Event::new(
 1. `modules/<name>/src/lib.rs` отдаёт `pub fn router() -> OpenApiRouter<AppState>` (`utoipa_axum`).
    Каждый хендлер описан `#[utoipa::path(...)]` и добавлен через `.routes(routes!(handler))` — тогда он
    сам появится в Swagger. Защищённым эндпоинтам — `security(("bearer" = []))`. Образец: `modules/auth/src/admin.rs`.
+   `operationId` в документе должен быть уникален (по нему фронтенд генерирует клиент): если имя
+   функции не уникально (`create`, `get`, `list`), задайте `operation_id = "create_entity"`.
+   Enum из query-параметров (`IntoParams`) utoipa в схемы сам не кладёт — добавьте его в
+   `components(schemas(...))` документа. Оба правила проверяет тест `openapi_specs_are_valid_for_client_generators`.
 2. Модуль уже смонтирован в `app/src/lib.rs` под `/api/v1/<name>`. Путь в `#[utoipa::path]` — без префикса.
 3. Тег модуля добавить в `tags(...)` в `app/src/lib.rs`. Большому модулю можно дать отдельную
    вкладку в Swagger (свой OpenAPI-документ): образец — `CatalogDoc` и список документов в `api()`.

@@ -433,3 +433,63 @@ async fn email_taken_before_confirmation_is_conflict(pool: PgPool) {
     )
     .await;
 }
+
+/// `has_password`: по нему фронтенд решает, спрашивать ли пароль при смене email.
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn has_password_reflects_whether_password_is_set(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+
+    let neo = ctx.register("neo").await;
+    assert_eq!(neo["user"]["has_password"], true);
+
+    // Вход по ссылке создаёт аккаунт без пароля.
+    let email = "trinity@example.com";
+    let body = json!({ "email": email });
+    ctx.expect(
+        StatusCode::ACCEPTED,
+        Method::POST,
+        "/email/login",
+        Some(body),
+        None,
+    )
+    .await;
+    let body = json!({ "token": ctx.email_token(email) });
+    let trinity = ctx
+        .expect(
+            StatusCode::OK,
+            Method::POST,
+            "/email/login/confirm",
+            Some(body),
+            None,
+        )
+        .await;
+    assert_eq!(trinity["user"]["has_password"], false);
+    let token = trinity["access_token"].as_str().unwrap();
+    let me = ctx
+        .expect(StatusCode::OK, Method::GET, "/me", None, Some(token))
+        .await;
+    assert_eq!(me["has_password"], false);
+
+    // Пароль задан через «забыли пароль».
+    let body = json!({ "email": email });
+    ctx.expect(
+        StatusCode::ACCEPTED,
+        Method::POST,
+        "/password/forgot",
+        Some(body),
+        None,
+    )
+    .await;
+    let body = json!({ "token": ctx.email_token(email), "password": PASSWORD });
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::POST,
+        "/password/reset",
+        Some(body),
+        None,
+    )
+    .await;
+    let response = ctx.login(email).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.json()["user"]["has_password"], true);
+}

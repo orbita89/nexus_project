@@ -251,7 +251,7 @@
         ],
         "summary": "**Только для разработки.** Вход под любым пользователем без пароля и подтверждения email.",
         "description": "Включается `DEV_LOGIN=true` (в dev-окружении включено). Выключенный — 404.",
-        "operationId": "login",
+        "operationId": "dev_login",
         "requestBody": {
           "content": {
             "application/json": {
@@ -836,7 +836,7 @@
           "profile"
         ],
         "summary": "Привязанные к своему аккаунту провайдеры.",
-        "operationId": "list",
+        "operationId": "list_linked_accounts",
         "responses": {
           "200": {
             "description": "Привязанные аккаунты, старые сверху",
@@ -875,7 +875,7 @@
           "profile"
         ],
         "summary": "Начать привязку провайдера: ссылка на его страницу входа. Открыть в браузере\n(`window.location`); вернётся на `{APP_BASE_URL}/settings/accounts?linked=...` или `?error=...`.",
-        "operationId": "start",
+        "operationId": "start_oauth_link",
         "parameters": [
           {
             "name": "provider",
@@ -1121,7 +1121,7 @@
         ],
         "summary": "Начать вход через провайдера: редирект на его страницу входа.",
         "description": "Открывать в браузере (не через fetch): дальше браузер сам пройдёт по редиректам.",
-        "operationId": "start",
+        "operationId": "start_oauth_login",
         "parameters": [
           {
             "name": "provider",
@@ -1388,7 +1388,7 @@
           "auth"
         ],
         "summary": "Мои активные сессии (устройства), новые сверху.",
-        "operationId": "list",
+        "operationId": "list_sessions",
         "responses": {
           "200": {
             "description": "Активные сессии",
@@ -1590,6 +1590,16 @@
             "type": "string",
             "description": "Описание ошибки.",
             "example": "unauthorized"
+          },
+          "retry_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Только для 429: через сколько секунд можно повторить (то же, что заголовок `Retry-After`).",
+            "example": 80,
+            "minimum": 0
           }
         }
       },
@@ -1900,6 +1910,7 @@
           "username",
           "role",
           "is_active",
+          "has_password",
           "created_at"
         ],
         "properties": {
@@ -1930,6 +1941,10 @@
             ],
             "format": "date-time",
             "description": "`null` — email не подтверждён, вход по паролю запрещён."
+          },
+          "has_password": {
+            "type": "boolean",
+            "description": "Задан ли пароль. `false` — входит по ссылке из письма или через провайдера: пароль не\nспрашивается при смене email, задать его можно через «забыли пароль»."
           },
           "id": {
             "type": "string",

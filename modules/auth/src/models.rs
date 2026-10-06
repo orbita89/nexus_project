@@ -8,7 +8,8 @@ use uuid::Uuid;
 
 /// Колонки `users` для [`UserView`]. citext приводим к text: так sqlx читает их как `String`.
 pub const USER_COLUMNS: &str = "id, email::text AS email, username::text AS username, \
-     display_name, avatar_url, role, is_active, email_verified_at, username_changed_at, created_at";
+     display_name, avatar_url, role, is_active, email_verified_at, username_changed_at, \
+     password_hash IS NOT NULL AS has_password, created_at";
 
 /// Пользователь. Хеш пароля наружу не отдаётся никогда.
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
@@ -27,6 +28,9 @@ pub struct UserView {
     pub email_verified_at: Option<DateTime<Utc>>,
     /// Когда username меняли в последний раз (менять можно раз в 30 дней). `null` — не меняли.
     pub username_changed_at: Option<DateTime<Utc>>,
+    /// Задан ли пароль. `false` — входит по ссылке из письма или через провайдера: пароль не
+    /// спрашивается при смене email, задать его можно через «забыли пароль».
+    pub has_password: bool,
     pub created_at: DateTime<Utc>,
 }
 

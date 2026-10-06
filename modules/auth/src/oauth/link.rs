@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 /// Привязанные к своему аккаунту провайдеры.
 #[utoipa::path(
-    get, path = "/me/oauth", tag = "profile",
+    get, operation_id = "list_linked_accounts", path = "/me/oauth", tag = "profile",
     security(("bearer" = [])),
     responses(
         (status = 200, description = "Привязанные аккаунты, старые сверху", body = Vec<LinkedAccount>),
@@ -47,7 +47,7 @@ pub async fn list(
 /// Начать привязку провайдера: ссылка на его страницу входа. Открыть в браузере
 /// (`window.location`); вернётся на `{APP_BASE_URL}/settings/accounts?linked=...` или `?error=...`.
 #[utoipa::path(
-    post, path = "/me/oauth/{provider}", tag = "profile",
+    post, operation_id = "start_oauth_link", path = "/me/oauth/{provider}", tag = "profile",
     security(("bearer" = [])),
     params(("provider" = String, Path, description = "google, github, yandex")),
     responses(

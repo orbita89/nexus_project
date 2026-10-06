@@ -16,7 +16,7 @@ const PERSON_ENTITIES: &str = "SELECT DISTINCT entity_id FROM entity_credits WHE
 
 /// Добавить человека.
 #[utoipa::path(
-    post, path = "/admin/people", tag = "catalog-admin",
+    post, operation_id = "create_person", path = "/admin/people", tag = "catalog-admin",
     security(("bearer" = [])),
     request_body = CreatePerson,
     responses(
@@ -56,7 +56,7 @@ pub async fn create(
 
 /// Изменить человека. Переданные поля заменяются, `null` очищает необязательное поле.
 #[utoipa::path(
-    patch, path = "/admin/people/{id}", tag = "catalog-admin",
+    patch, operation_id = "update_person", path = "/admin/people/{id}", tag = "catalog-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id человека")),
     request_body = UpdatePerson,
@@ -129,7 +129,7 @@ pub async fn update(
 
 /// Удалить человека вместе с его участием в произведениях.
 #[utoipa::path(
-    delete, path = "/admin/people/{id}", tag = "catalog-admin",
+    delete, operation_id = "delete_person", path = "/admin/people/{id}", tag = "catalog-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id человека")),
     responses(

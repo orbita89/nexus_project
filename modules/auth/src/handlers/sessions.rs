@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 /// Мои активные сессии (устройства), новые сверху.
 #[utoipa::path(
-    get, path = "/sessions", tag = "auth",
+    get, operation_id = "list_sessions", path = "/sessions", tag = "auth",
     security(("bearer" = [])),
     responses(
         (status = 200, description = "Активные сессии", body = Vec<SessionView>),

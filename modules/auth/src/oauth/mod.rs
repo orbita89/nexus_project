@@ -96,7 +96,7 @@ pub async fn providers(State(state): State<AppState>) -> Json<ProvidersResponse>
 ///
 /// Открывать в браузере (не через fetch): дальше браузер сам пройдёт по редиректам.
 #[utoipa::path(
-    get, path = "/oauth/{provider}/start", tag = "oauth",
+    get, operation_id = "start_oauth_login", path = "/oauth/{provider}/start", tag = "oauth",
     params(("provider" = String, Path, description = "google, github, yandex")),
     responses(
         (status = 303, description = "Редирект на страницу входа провайдера"),

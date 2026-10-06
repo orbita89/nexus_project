@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 /// Ответить в теме или на сообщение (`parent_id`).
 #[utoipa::path(
-    post, path = "/threads/{id}/posts", tag = "forum",
+    post, operation_id = "create_post", path = "/threads/{id}/posts", tag = "forum",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id темы")),
     request_body = CreatePost,
@@ -116,7 +116,7 @@ pub async fn create(
 
 /// Изменить своё сообщение. Ставит `edited_at`; в закрытой теме тоже можно.
 #[utoipa::path(
-    patch, path = "/posts/{id}", tag = "forum",
+    patch, operation_id = "update_post", path = "/posts/{id}", tag = "forum",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id сообщения")),
     request_body = UpdatePost,
@@ -152,7 +152,7 @@ pub async fn update(
 
 /// Удалить своё сообщение. Если на него есть ответы, остаётся заглушка «сообщение удалено».
 #[utoipa::path(
-    delete, path = "/posts/{id}", tag = "forum",
+    delete, operation_id = "delete_post", path = "/posts/{id}", tag = "forum",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id сообщения")),
     responses(

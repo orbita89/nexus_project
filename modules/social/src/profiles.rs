@@ -11,7 +11,7 @@ use shared::{AppResult, AppState, AuthUser};
 /// Профиль: сколько подписчиков, подписок, рецензий, коллекций, тем и сообщений форума; вошедшему — подписан ли он
 /// и подписан ли пользователь на него. Шапка профиля и кнопка «Подписаться» — одним запросом.
 #[utoipa::path(
-    get, path = "/users/{username}", tag = "users",
+    get, operation_id = "get_profile", path = "/users/{username}", tag = "users",
     security((), ("bearer" = [])),
     params(("username" = String, Path, description = "username", example = "author")),
     responses(

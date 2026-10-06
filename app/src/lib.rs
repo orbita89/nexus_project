@@ -73,6 +73,8 @@ struct CatalogDoc;
             `access_token` в **Authorize**."
     ),
     modifiers(&BearerAuth),
+    // Enum'ы из query-параметров utoipa сам в components не кладёт, а ссылается на них через $ref.
+    components(schemas(social::models::ReviewSort, social::models::ThreadSort)),
     tags(
         (name = "users", description = "Социальный профиль: счётчики и подписан ли вошедший"),
         (name = "reviews", description = "Рецензии и оценки"),

@@ -36,7 +36,7 @@ pub async fn list_public(
 
 /// Коллекции пользователя, новые сверху. Владелец видит и свои приватные.
 #[utoipa::path(
-    get, path = "/users/{username}/collections", tag = "collections",
+    get, operation_id = "list_user_collections", path = "/users/{username}/collections", tag = "collections",
     security((), ("bearer" = [])),
     params(("username" = String, Path, description = "username", example = "user"), PageQuery),
     responses(
@@ -62,7 +62,7 @@ pub async fn list_for_user(
 
 /// Публичные коллекции, в которых есть сущность.
 #[utoipa::path(
-    get, path = "/entities/{slug}/collections", tag = "collections",
+    get, operation_id = "list_entity_collections", path = "/entities/{slug}/collections", tag = "collections",
     params(("slug" = String, Path, description = "slug сущности", example = "dune-2021"), PageQuery),
     responses(
         (status = 200, description = "Страница коллекций", body = Page<Collection>),
@@ -114,7 +114,7 @@ async fn page(
 
 /// Коллекция с содержимым по порядку.
 #[utoipa::path(
-    get, path = "/collections/{id}", tag = "collections",
+    get, operation_id = "get_collection", path = "/collections/{id}", tag = "collections",
     security((), ("bearer" = [])),
     params(("id" = Uuid, Path, description = "id коллекции")),
     responses(
@@ -137,7 +137,7 @@ pub async fn get(
 
 /// Создать коллекцию.
 #[utoipa::path(
-    post, path = "/collections", tag = "collections",
+    post, operation_id = "create_collection", path = "/collections", tag = "collections",
     security(("bearer" = [])),
     request_body = CreateCollection,
     responses(
@@ -174,7 +174,7 @@ pub async fn create(
 
 /// Изменить название, описание или видимость своей коллекции.
 #[utoipa::path(
-    patch, path = "/collections/{id}", tag = "collections",
+    patch, operation_id = "update_collection", path = "/collections/{id}", tag = "collections",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id коллекции")),
     request_body = UpdateCollection,
@@ -223,7 +223,7 @@ pub async fn update(
 
 /// Удалить свою коллекцию.
 #[utoipa::path(
-    delete, path = "/collections/{id}", tag = "collections",
+    delete, operation_id = "delete_collection", path = "/collections/{id}", tag = "collections",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id коллекции")),
     responses(

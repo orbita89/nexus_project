@@ -35,7 +35,7 @@ const POPULAR: u8 = 2;
 
 /// Лента: подписки, затем интересы, затем популярное.
 #[utoipa::path(
-    get, path = "/feed", tag = "feed",
+    get, operation_id = "get_feed", path = "/feed", tag = "feed",
     security(("bearer" = [])),
     params(FeedQuery),
     responses(

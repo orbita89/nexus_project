@@ -53,7 +53,7 @@ pub async fn list_own(
 
 /// Есть ли сущность в своих интересах: кнопка «Следить» на карточке.
 #[utoipa::path(
-    get, path = "/entities/{slug}/interest", tag = "interests",
+    get, operation_id = "get_own_interest", path = "/entities/{slug}/interest", tag = "interests",
     security(("bearer" = [])),
     params(("slug" = String, Path, description = "slug сущности", example = "dune-2021")),
     responses(

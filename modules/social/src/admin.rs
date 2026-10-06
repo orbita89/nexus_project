@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 /// Удалить любую рецензию.
 #[utoipa::path(
-    delete, path = "/admin/reviews/{id}", tag = "social-admin",
+    delete, operation_id = "admin_delete_review", path = "/admin/reviews/{id}", tag = "social-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id рецензии")),
     responses(
@@ -39,7 +39,7 @@ pub async fn delete_review(
 
 /// Удалить любую коллекцию, в том числе приватную.
 #[utoipa::path(
-    delete, path = "/admin/collections/{id}", tag = "social-admin",
+    delete, operation_id = "admin_delete_collection", path = "/admin/collections/{id}", tag = "social-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id коллекции")),
     responses(
@@ -66,7 +66,7 @@ pub async fn delete_collection(
 
 /// Удалить любую тему вместе с сообщениями.
 #[utoipa::path(
-    delete, path = "/admin/threads/{id}", tag = "social-admin",
+    delete, operation_id = "admin_delete_thread", path = "/admin/threads/{id}", tag = "social-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id темы")),
     responses(
@@ -100,7 +100,7 @@ pub async fn delete_thread(
 
 /// Удалить любое сообщение. Если на него есть ответы, остаётся заглушка «сообщение удалено».
 #[utoipa::path(
-    delete, path = "/admin/posts/{id}", tag = "social-admin",
+    delete, operation_id = "admin_delete_post", path = "/admin/posts/{id}", tag = "social-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id сообщения")),
     responses(
@@ -128,7 +128,7 @@ pub async fn delete_post(
 
 /// Закрыть тему для ответов (повторно — тоже 204). Править и удалять свои сообщения можно.
 #[utoipa::path(
-    put, path = "/admin/threads/{id}/lock", tag = "social-admin",
+    put, operation_id = "admin_lock_thread", path = "/admin/threads/{id}/lock", tag = "social-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id темы")),
     responses(
@@ -150,7 +150,7 @@ pub async fn lock_thread(
 
 /// Открыть тему для ответов (повторно — тоже 204).
 #[utoipa::path(
-    delete, path = "/admin/threads/{id}/lock", tag = "social-admin",
+    delete, operation_id = "admin_unlock_thread", path = "/admin/threads/{id}/lock", tag = "social-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id темы")),
     responses(

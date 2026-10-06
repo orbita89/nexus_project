@@ -16,7 +16,7 @@
           "social-admin"
         ],
         "summary": "Удалить любую коллекцию, в том числе приватную.",
-        "operationId": "delete_collection",
+        "operationId": "admin_delete_collection",
         "parameters": [
           {
             "name": "id",
@@ -77,7 +77,7 @@
           "social-admin"
         ],
         "summary": "Удалить любое сообщение. Если на него есть ответы, остаётся заглушка «сообщение удалено».",
-        "operationId": "delete_post",
+        "operationId": "admin_delete_post",
         "parameters": [
           {
             "name": "id",
@@ -138,7 +138,7 @@
           "social-admin"
         ],
         "summary": "Удалить любую рецензию.",
-        "operationId": "delete_review",
+        "operationId": "admin_delete_review",
         "parameters": [
           {
             "name": "id",
@@ -199,7 +199,7 @@
           "social-admin"
         ],
         "summary": "Удалить любую тему вместе с сообщениями.",
-        "operationId": "delete_thread",
+        "operationId": "admin_delete_thread",
         "parameters": [
           {
             "name": "id",
@@ -260,7 +260,7 @@
           "social-admin"
         ],
         "summary": "Закрыть тему для ответов (повторно — тоже 204). Править и удалять свои сообщения можно.",
-        "operationId": "lock_thread",
+        "operationId": "admin_lock_thread",
         "parameters": [
           {
             "name": "id",
@@ -319,7 +319,7 @@
           "social-admin"
         ],
         "summary": "Открыть тему для ответов (повторно — тоже 204).",
-        "operationId": "unlock_thread",
+        "operationId": "admin_unlock_thread",
         "parameters": [
           {
             "name": "id",
@@ -421,7 +421,7 @@
           "collections"
         ],
         "summary": "Создать коллекцию.",
-        "operationId": "create",
+        "operationId": "create_collection",
         "requestBody": {
           "content": {
             "application/json": {
@@ -477,7 +477,7 @@
           "collections"
         ],
         "summary": "Коллекция с содержимым по порядку.",
-        "operationId": "get",
+        "operationId": "get_collection",
         "parameters": [
           {
             "name": "id",
@@ -534,7 +534,7 @@
           "collections"
         ],
         "summary": "Удалить свою коллекцию.",
-        "operationId": "delete",
+        "operationId": "delete_collection",
         "parameters": [
           {
             "name": "id",
@@ -593,7 +593,7 @@
           "collections"
         ],
         "summary": "Изменить название, описание или видимость своей коллекции.",
-        "operationId": "update",
+        "operationId": "update_collection",
         "parameters": [
           {
             "name": "id",
@@ -947,7 +947,7 @@
           "collections"
         ],
         "summary": "Публичные коллекции, в которых есть сущность.",
-        "operationId": "list_for_entity",
+        "operationId": "list_entity_collections",
         "parameters": [
           {
             "name": "slug",
@@ -1010,7 +1010,7 @@
           "interests"
         ],
         "summary": "Есть ли сущность в своих интересах: кнопка «Следить» на карточке.",
-        "operationId": "get_own",
+        "operationId": "get_own_interest",
         "parameters": [
           {
             "name": "slug",
@@ -1219,7 +1219,7 @@
           "reviews"
         ],
         "summary": "Своя рецензия на сущность.",
-        "operationId": "get_own",
+        "operationId": "get_own_review",
         "parameters": [
           {
             "name": "slug",
@@ -1412,7 +1412,7 @@
           "reviews"
         ],
         "summary": "Рецензии на сущность. По умолчанию только с текстом и новые сверху.",
-        "operationId": "list_for_entity",
+        "operationId": "list_entity_reviews",
         "parameters": [
           {
             "name": "slug",
@@ -1503,7 +1503,7 @@
           "forum"
         ],
         "summary": "Темы, к которым привязана сущность (в том числе вместе с другими).",
-        "operationId": "list_for_entity",
+        "operationId": "list_entity_threads",
         "parameters": [
           {
             "name": "slug",
@@ -1585,7 +1585,7 @@
           "feed"
         ],
         "summary": "Лента: подписки, затем интересы, затем популярное.",
-        "operationId": "get",
+        "operationId": "get_feed",
         "parameters": [
           {
             "name": "type",
@@ -1725,7 +1725,7 @@
           "forum"
         ],
         "summary": "Удалить своё сообщение. Если на него есть ответы, остаётся заглушка «сообщение удалено».",
-        "operationId": "delete",
+        "operationId": "delete_post",
         "parameters": [
           {
             "name": "id",
@@ -1784,7 +1784,7 @@
           "forum"
         ],
         "summary": "Изменить своё сообщение. Ставит `edited_at`; в закрытой теме тоже можно.",
-        "operationId": "update",
+        "operationId": "update_post",
         "parameters": [
           {
             "name": "id",
@@ -1932,7 +1932,7 @@
           "forum"
         ],
         "summary": "Создать тему. Нужна роль author или admin.",
-        "operationId": "create",
+        "operationId": "create_thread",
         "requestBody": {
           "content": {
             "application/json": {
@@ -1998,7 +1998,7 @@
           "forum"
         ],
         "summary": "Тема с текстом и страницей сообщений по времени.",
-        "operationId": "get",
+        "operationId": "get_thread",
         "parameters": [
           {
             "name": "id",
@@ -2069,7 +2069,7 @@
           "forum"
         ],
         "summary": "Удалить свою тему вместе со всеми сообщениями.",
-        "operationId": "delete",
+        "operationId": "delete_thread",
         "parameters": [
           {
             "name": "id",
@@ -2128,7 +2128,7 @@
           "forum"
         ],
         "summary": "Изменить свою тему: заголовок, текст, набор сущностей. Ставит `edited_at`.",
-        "operationId": "update",
+        "operationId": "update_thread",
         "parameters": [
           {
             "name": "id",
@@ -2216,7 +2216,7 @@
           "forum"
         ],
         "summary": "Ответить в теме или на сообщение (`parent_id`).",
-        "operationId": "create",
+        "operationId": "create_post",
         "parameters": [
           {
             "name": "id",
@@ -2304,7 +2304,7 @@
           "users"
         ],
         "summary": "Профиль: сколько подписчиков, подписок, рецензий, коллекций, тем и сообщений форума; вошедшему — подписан ли он\nи подписан ли пользователь на него. Шапка профиля и кнопка «Подписаться» — одним запросом.",
-        "operationId": "get",
+        "operationId": "get_profile",
         "parameters": [
           {
             "name": "username",
@@ -2363,7 +2363,7 @@
           "collections"
         ],
         "summary": "Коллекции пользователя, новые сверху. Владелец видит и свои приватные.",
-        "operationId": "list_for_user",
+        "operationId": "list_user_collections",
         "parameters": [
           {
             "name": "username",
@@ -2678,7 +2678,7 @@
           "reviews"
         ],
         "summary": "Рецензии и оценки пользователя, новые сверху (включая оценки без текста).",
-        "operationId": "list_for_user",
+        "operationId": "list_user_reviews",
         "parameters": [
           {
             "name": "username",
@@ -2741,7 +2741,7 @@
           "forum"
         ],
         "summary": "Темы пользователя, новые сверху.",
-        "operationId": "list_for_user",
+        "operationId": "list_user_threads",
         "parameters": [
           {
             "name": "username",
@@ -3033,6 +3033,16 @@
             "type": "string",
             "description": "Описание ошибки.",
             "example": "unauthorized"
+          },
+          "retry_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Только для 429: через сколько секунд можно повторить (то же, что заголовок `Retry-After`).",
+            "example": 80,
+            "minimum": 0
           }
         }
       },
@@ -3924,6 +3934,15 @@
           }
         }
       },
+      "ReviewSort": {
+        "type": "string",
+        "description": "Порядок рецензий сущности.",
+        "enum": [
+          "new",
+          "rating_desc",
+          "rating_asc"
+        ]
+      },
       "SocialProfile": {
         "type": "object",
         "description": "Социальный профиль пользователя.",
@@ -4072,6 +4091,14 @@
           }
         ],
         "description": "Тема с текстом и страницей сообщений."
+      },
+      "ThreadSort": {
+        "type": "string",
+        "description": "Порядок тем.",
+        "enum": [
+          "active",
+          "new"
+        ]
       },
       "UpdateCollection": {
         "type": "object",

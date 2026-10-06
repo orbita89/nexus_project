@@ -48,7 +48,7 @@ pub async fn list(
 
 /// Темы, к которым привязана сущность (в том числе вместе с другими).
 #[utoipa::path(
-    get, path = "/entities/{slug}/threads", tag = "forum",
+    get, operation_id = "list_entity_threads", path = "/entities/{slug}/threads", tag = "forum",
     params(
         ("slug" = String, Path, description = "slug сущности", example = "dune-2021"),
         ListThreadsQuery,
@@ -81,7 +81,7 @@ pub async fn list_for_entity(
 
 /// Темы пользователя, новые сверху.
 #[utoipa::path(
-    get, path = "/users/{username}/threads", tag = "forum",
+    get, operation_id = "list_user_threads", path = "/users/{username}/threads", tag = "forum",
     params(("username" = String, Path, description = "username", example = "author"), PageQuery),
     responses(
         (status = 200, description = "Страница тем", body = Page<Thread>),
@@ -146,7 +146,7 @@ async fn page(
 
 /// Тема с текстом и страницей сообщений по времени.
 #[utoipa::path(
-    get, path = "/threads/{id}", tag = "forum",
+    get, operation_id = "get_thread", path = "/threads/{id}", tag = "forum",
     params(("id" = Uuid, Path, description = "id темы"), PostsQuery),
     responses(
         (status = 200, description = "Тема", body = ThreadDetail),
@@ -165,7 +165,7 @@ pub async fn get(
 
 /// Создать тему. Нужна роль author или admin.
 #[utoipa::path(
-    post, path = "/threads", tag = "forum",
+    post, operation_id = "create_thread", path = "/threads", tag = "forum",
     security(("bearer" = [])),
     request_body = CreateThread,
     responses(
@@ -215,7 +215,7 @@ pub async fn create(
 
 /// Изменить свою тему: заголовок, текст, набор сущностей. Ставит `edited_at`.
 #[utoipa::path(
-    patch, path = "/threads/{id}", tag = "forum",
+    patch, operation_id = "update_thread", path = "/threads/{id}", tag = "forum",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id темы")),
     request_body = UpdateThread,
@@ -296,7 +296,7 @@ pub async fn update(
 
 /// Удалить свою тему вместе со всеми сообщениями.
 #[utoipa::path(
-    delete, path = "/threads/{id}", tag = "forum",
+    delete, operation_id = "delete_thread", path = "/threads/{id}", tag = "forum",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id темы")),
     responses(
