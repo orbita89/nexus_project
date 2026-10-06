@@ -7,7 +7,7 @@ use shared::{AppResult, AppState};
 
 /// Все теги по алфавиту с числом сущностей. Тегов немного, поэтому без пагинации.
 #[utoipa::path(
-    get, path = "/tags", tag = "catalog",
+    get, operation_id = "list_tags", path = "/tags", tag = "catalog",
     responses((status = 200, description = "Теги", body = Vec<TagWithCount>))
 )]
 pub async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<TagWithCount>>> {

@@ -16,7 +16,7 @@
           "catalog-admin"
         ],
         "summary": "Создать сущность. `metadata` проверяется по схеме своего `kind`.",
-        "operationId": "create",
+        "operationId": "create_entity",
         "requestBody": {
           "content": {
             "application/json": {
@@ -92,7 +92,7 @@
           "catalog-admin"
         ],
         "summary": "Удалить сущность. Теги, участники, рецензии и элементы коллекций удаляются каскадно.",
-        "operationId": "delete",
+        "operationId": "delete_entity",
         "parameters": [
           {
             "name": "id",
@@ -151,7 +151,7 @@
           "catalog-admin"
         ],
         "summary": "Изменить сущность. Переданные поля заменяются, `null` очищает необязательное поле;\n`metadata` заменяется целиком. `kind` не меняется.",
-        "operationId": "update",
+        "operationId": "update_entity",
         "parameters": [
           {
             "name": "id",
@@ -509,7 +509,7 @@
           "catalog-admin"
         ],
         "summary": "Добавить человека.",
-        "operationId": "create",
+        "operationId": "create_person",
         "requestBody": {
           "content": {
             "application/json": {
@@ -585,7 +585,7 @@
           "catalog-admin"
         ],
         "summary": "Удалить человека вместе с его участием в произведениях.",
-        "operationId": "delete",
+        "operationId": "delete_person",
         "parameters": [
           {
             "name": "id",
@@ -644,7 +644,7 @@
           "catalog-admin"
         ],
         "summary": "Изменить человека. Переданные поля заменяются, `null` очищает необязательное поле.",
-        "operationId": "update",
+        "operationId": "update_person",
         "parameters": [
           {
             "name": "id",
@@ -798,7 +798,7 @@
           "catalog-admin"
         ],
         "summary": "Создать тег.",
-        "operationId": "create",
+        "operationId": "create_tag",
         "requestBody": {
           "content": {
             "application/json": {
@@ -874,7 +874,7 @@
           "catalog-admin"
         ],
         "summary": "Удалить тег (снимается со всех сущностей).",
-        "operationId": "delete",
+        "operationId": "delete_tag",
         "parameters": [
           {
             "name": "id",
@@ -933,7 +933,7 @@
           "catalog-admin"
         ],
         "summary": "Переименовать тег или сменить slug.",
-        "operationId": "update",
+        "operationId": "update_tag",
         "parameters": [
           {
             "name": "id",
@@ -1031,7 +1031,7 @@
           "catalog"
         ],
         "summary": "Список сущностей: новинки сверху, без даты — в конце.",
-        "operationId": "list",
+        "operationId": "list_entities",
         "parameters": [
           {
             "name": "kind",
@@ -1124,7 +1124,7 @@
           "catalog"
         ],
         "summary": "Карточка сущности: поля, теги и участники в порядке титров.",
-        "operationId": "get",
+        "operationId": "get_entity",
         "parameters": [
           {
             "name": "slug",
@@ -1167,7 +1167,7 @@
           "catalog"
         ],
         "summary": "Список людей по алфавиту.",
-        "operationId": "list",
+        "operationId": "list_people",
         "parameters": [
           {
             "name": "q",
@@ -1220,7 +1220,7 @@
           "catalog"
         ],
         "summary": "Карточка человека: данные и все его работы любых типов, новые сверху.",
-        "operationId": "get",
+        "operationId": "get_person",
         "parameters": [
           {
             "name": "slug",
@@ -1363,7 +1363,7 @@
           "catalog"
         ],
         "summary": "Все теги по алфавиту с числом сущностей. Тегов немного, поэтому без пагинации.",
-        "operationId": "list",
+        "operationId": "list_tags",
         "responses": {
           "200": {
             "description": "Теги",
@@ -1776,6 +1776,16 @@
             "type": "string",
             "description": "Описание ошибки.",
             "example": "unauthorized"
+          },
+          "retry_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Только для 429: через сколько секунд можно повторить (то же, что заголовок `Retry-After`).",
+            "example": 80,
+            "minimum": 0
           }
         }
       },

@@ -25,7 +25,7 @@ const LIST_FILTER: &str = "
 
 /// Список сущностей: новинки сверху, без даты — в конце.
 #[utoipa::path(
-    get, path = "/entities", tag = "catalog",
+    get, operation_id = "list_entities", path = "/entities", tag = "catalog",
     params(ListEntitiesQuery),
     responses(
         (status = 200, description = "Страница сущностей", body = Page<EntitySummary>),
@@ -73,7 +73,7 @@ pub async fn list(
 
 /// Карточка сущности: поля, теги и участники в порядке титров.
 #[utoipa::path(
-    get, path = "/entities/{slug}", tag = "catalog",
+    get, operation_id = "get_entity", path = "/entities/{slug}", tag = "catalog",
     params(("slug" = String, Path, description = "slug сущности", example = "dune-2021")),
     responses(
         (status = 200, description = "Карточка", body = EntityDetail),

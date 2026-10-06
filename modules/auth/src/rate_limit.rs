@@ -5,6 +5,7 @@
 //! Когда экземпляров станет несколько, перенести в Redis.
 
 use axum::http::HeaderMap;
+use governor::clock::{Clock, DefaultClock};
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use shared::{AppError, AppResult};
 use std::num::NonZeroU32;
@@ -62,9 +63,14 @@ impl RateLimits {
 
     fn check(&self, limiter: &DefaultKeyedRateLimiter<String>, key: String) -> AppResult<()> {
         self.forget_stale_keys();
-        limiter
-            .check_key(&key)
-            .map_err(|_| AppError::TooManyRequests)
+        limiter.check_key(&key).map_err(|not_until| {
+            let wait = not_until.wait_time_from(DefaultClock::default().now());
+            // Округляем вверх: повтор ровно через `Retry-After` секунд должен пройти.
+            let retry_after_secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+            AppError::TooManyRequests {
+                retry_after_secs: retry_after_secs.max(1),
+            }
+        })
     }
 
     /// Счётчики хранятся на каждый ключ; давно не встречавшиеся периодически выбрасываем,
@@ -101,7 +107,7 @@ mod tests {
         }
         assert!(matches!(
             limits.check_login("NEO"),
-            Err(AppError::TooManyRequests)
+            Err(AppError::TooManyRequests { retry_after_secs }) if (89..=90).contains(&retry_after_secs)
         ));
         assert!(limits.check_login("trinity").is_ok());
     }

@@ -17,7 +17,7 @@ use shared::{AppError, AppResult, AppState, AuthUser};
 
 /// Рецензии на сущность. По умолчанию только с текстом и новые сверху.
 #[utoipa::path(
-    get, path = "/entities/{slug}/reviews", tag = "reviews",
+    get, operation_id = "list_entity_reviews", path = "/entities/{slug}/reviews", tag = "reviews",
     params(
         ("slug" = String, Path, description = "slug сущности", example = "dune-2021"),
         ListReviewsQuery,
@@ -114,7 +114,7 @@ fn summary(counts: &[(i16, i64)]) -> RatingSummary {
 
 /// Своя рецензия на сущность.
 #[utoipa::path(
-    get, path = "/entities/{slug}/review", tag = "reviews",
+    get, operation_id = "get_own_review", path = "/entities/{slug}/review", tag = "reviews",
     security(("bearer" = [])),
     params(("slug" = String, Path, description = "slug сущности", example = "dune-2021")),
     responses(
@@ -235,7 +235,7 @@ pub async fn delete_own(
 
 /// Рецензии и оценки пользователя, новые сверху (включая оценки без текста).
 #[utoipa::path(
-    get, path = "/users/{username}/reviews", tag = "reviews",
+    get, operation_id = "list_user_reviews", path = "/users/{username}/reviews", tag = "reviews",
     params(
         ("username" = String, Path, description = "username", example = "user"),
         PageQuery,

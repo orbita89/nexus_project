@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 /// Создать сущность. `metadata` проверяется по схеме своего `kind`.
 #[utoipa::path(
-    post, path = "/admin/entities", tag = "catalog-admin",
+    post, operation_id = "create_entity", path = "/admin/entities", tag = "catalog-admin",
     security(("bearer" = [])),
     request_body = CreateEntity,
     responses(
@@ -74,7 +74,7 @@ pub async fn create(
 /// Изменить сущность. Переданные поля заменяются, `null` очищает необязательное поле;
 /// `metadata` заменяется целиком. `kind` не меняется.
 #[utoipa::path(
-    patch, path = "/admin/entities/{id}", tag = "catalog-admin",
+    patch, operation_id = "update_entity", path = "/admin/entities/{id}", tag = "catalog-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id сущности")),
     request_body = UpdateEntity,
@@ -164,7 +164,7 @@ pub async fn update(
 
 /// Удалить сущность. Теги, участники, рецензии и элементы коллекций удаляются каскадно.
 #[utoipa::path(
-    delete, path = "/admin/entities/{id}", tag = "catalog-admin",
+    delete, operation_id = "delete_entity", path = "/admin/entities/{id}", tag = "catalog-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id сущности")),
     responses(

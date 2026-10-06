@@ -1,6 +1,6 @@
 //! Единый тип ошибки для HTTP-хендлеров всех сервисов.
 
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
@@ -12,6 +12,10 @@ pub struct ErrorBody {
     /// Описание ошибки.
     #[schema(example = "unauthorized")]
     pub error: String,
+    /// Только для 429: через сколько секунд можно повторить (то же, что заголовок `Retry-After`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 80)]
+    pub retry_after: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -35,8 +39,9 @@ pub enum AppError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// Сработал лимит; `retry_after_secs` — когда можно повторить (заголовок `Retry-After`).
     #[error("too many requests, try again later")]
-    TooManyRequests,
+    TooManyRequests { retry_after_secs: u64 },
 
     /// Внешний сервис (например, Meilisearch) недоступен. Сообщение уходит клиенту.
     #[error("{0}")]
@@ -60,7 +65,18 @@ impl IntoResponse for AppError {
                 (StatusCode::FORBIDDEN, self.to_string())
             }
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
-            AppError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            AppError::TooManyRequests { retry_after_secs } => {
+                let body = ErrorBody {
+                    error: self.to_string(),
+                    retry_after: Some(*retry_after_secs),
+                };
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(header::RETRY_AFTER, retry_after_secs.to_string())],
+                    Json(body),
+                )
+                    .into_response();
+            }
             AppError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
             // Детали внутренних ошибок наружу не отдаём — только в лог.
             AppError::Database(e) => {
@@ -79,7 +95,11 @@ impl IntoResponse for AppError {
             }
         };
 
-        (status, Json(ErrorBody { error: message })).into_response()
+        let body = ErrorBody {
+            error: message,
+            retry_after: None,
+        };
+        (status, Json(body)).into_response()
     }
 }
 
@@ -108,6 +128,22 @@ mod tests {
             status_of(AppError::Unavailable("x".into())),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[tokio::test]
+    async fn too_many_requests_tells_when_to_retry() {
+        let response = AppError::TooManyRequests {
+            retry_after_secs: 80,
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "80");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["retry_after"], 80);
+        assert!(body["error"].is_string());
     }
 
     #[test]

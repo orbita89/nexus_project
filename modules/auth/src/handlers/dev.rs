@@ -26,7 +26,7 @@ pub struct DevLoginRequest {
 ///
 /// Включается `DEV_LOGIN=true` (в dev-окружении включено). Выключенный — 404.
 #[utoipa::path(
-    post, path = "/dev/login", tag = "dev",
+    post, operation_id = "dev_login", path = "/dev/login", tag = "dev",
     request_body = DevLoginRequest,
     responses(
         (status = 200, description = "Пара токенов", body = TokenResponse),

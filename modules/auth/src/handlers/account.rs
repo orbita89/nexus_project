@@ -85,7 +85,7 @@ pub async fn register(
 /// Неверный логин, неверный пароль и заблокированный аккаунт выглядят одинаково (401),
 /// чтобы не подсказывать, какие логины существуют.
 #[utoipa::path(
-    post, path = "/login", tag = "auth",
+    post, operation_id = "login", path = "/login", tag = "auth",
     request_body = LoginRequest,
     responses(
         (status = 200, description = "Пара токенов", body = TokenResponse),

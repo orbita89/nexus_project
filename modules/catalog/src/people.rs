@@ -13,7 +13,7 @@ use shared::{AppError, AppResult, AppState};
 
 /// Список людей по алфавиту.
 #[utoipa::path(
-    get, path = "/people", tag = "catalog",
+    get, operation_id = "list_people", path = "/people", tag = "catalog",
     params(ListPeopleQuery),
     responses((status = 200, description = "Страница людей", body = Page<PersonSummary>))
 )]
@@ -51,7 +51,7 @@ pub async fn list(
 
 /// Карточка человека: данные и все его работы любых типов, новые сверху.
 #[utoipa::path(
-    get, path = "/people/{slug}", tag = "catalog",
+    get, operation_id = "get_person", path = "/people/{slug}", tag = "catalog",
     params(("slug" = String, Path, description = "slug человека", example = "denis-villeneuve")),
     responses(
         (status = 200, description = "Карточка", body = PersonDetail),

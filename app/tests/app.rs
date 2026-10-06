@@ -119,3 +119,54 @@ fn openapi_spec_files_are_up_to_date() {
         );
     }
 }
+
+/// Контракт валиден для генераторов клиентов (openapi-typescript и др.): каждый `$ref`
+/// разрешается, `operationId` уникальны. Сравнение с файлом выше этого не ловит.
+#[test]
+fn openapi_specs_are_valid_for_client_generators() {
+    fn collect<'a>(node: &'a serde_json::Value, refs: &mut Vec<&'a str>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(r)) = map.get("$ref") {
+                    refs.push(r);
+                }
+                map.values().for_each(|v| collect(v, refs));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| collect(v, refs)),
+            _ => {}
+        }
+    }
+
+    for doc in nexus::openapi_docs() {
+        let spec: serde_json::Value = serde_json::from_str(&doc.spec.to_json().unwrap()).unwrap();
+
+        let mut refs = Vec::new();
+        collect(&spec, &mut refs);
+        for r in refs {
+            let name = r
+                .strip_prefix("#/components/schemas/")
+                .unwrap_or_else(|| panic!("{}: unexpected $ref {r}", doc.file));
+            assert!(
+                spec["components"]["schemas"].get(name).is_some(),
+                "{}: $ref to missing schema {name}",
+                doc.file
+            );
+        }
+
+        let mut seen = std::collections::HashMap::new();
+        for (path, item) in spec["paths"].as_object().unwrap() {
+            for (method, op) in item.as_object().unwrap() {
+                let Some(id) = op.get("operationId").and_then(|id| id.as_str()) else {
+                    continue;
+                };
+                if let Some(prev) = seen.insert(id.to_string(), format!("{method} {path}")) {
+                    panic!(
+                        "{}: operationId `{id}` is used by `{prev}` and `{method} {path}`; \
+                         set operation_id in #[utoipa::path]",
+                        doc.file
+                    );
+                }
+            }
+        }
+    }
+}
