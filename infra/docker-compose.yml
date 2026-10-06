@@ -67,6 +67,24 @@ services:
       REDIS_URL: redis://redis:6379
       MEILI_URL: http://meilisearch:7700
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-nexus_dev_master_key}
+      # Не короче 32 символов. В проде — свой случайный секрет (openssl rand -base64 48).
+      JWT_SECRET: ${JWT_SECRET:-nexus-dev-jwt-secret-change-me-in-production}
+      # Письма уходят в Mailpit: веб-интерфейс http://localhost:8025.
+      SMTP_URL: ${SMTP_URL:-smtp://mailpit:1025}
+      MAIL_FROM: ${MAIL_FROM:-Nexus <no-reply@nexus.local>}
+      # Фронтенд: из него строятся ссылки в письмах.
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
+      # Публичный адрес API: из него строится redirect_uri для OAuth-провайдеров.
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost}
+      # POST /api/v1/auth/dev/login — вход под любым пользователем. Только для dev, в проде false.
+      DEV_LOGIN: ${DEV_LOGIN:-true}
+      # OAuth-провайдеры включаются ключами (как получить — documents/modules/auth.md):
+      OAUTH_GOOGLE_CLIENT_ID: ${OAUTH_GOOGLE_CLIENT_ID:-}
+      OAUTH_GOOGLE_CLIENT_SECRET: ${OAUTH_GOOGLE_CLIENT_SECRET:-}
+      OAUTH_GITHUB_CLIENT_ID: ${OAUTH_GITHUB_CLIENT_ID:-}
+      OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
+      OAUTH_YANDEX_CLIENT_ID: ${OAUTH_YANDEX_CLIENT_ID:-}
+      OAUTH_YANDEX_CLIENT_SECRET: ${OAUTH_YANDEX_CLIENT_SECRET:-}
       BIND_ADDR: 0.0.0.0:8080
       RUST_LOG: ${RUST_LOG:-info,tower_http=debug}
       RUST_BACKTRACE: "1"
@@ -79,6 +97,16 @@ services:
         condition: service_healthy
       meilisearch:
         condition: service_healthy
+      mailpit:
+        condition: service_started
+
+  # Ловушка для писем в dev: всё, что отправляет приложение, видно на http://localhost:8025.
+  mailpit:
+    image: axllent/mailpit:v1.27
+    restart: unless-stopped
+    ports:
+      - "8025:8025"   # веб-интерфейс и API
+      - "1025:1025"   # SMTP
 
   nginx:
     image: nginx:1.27-alpine

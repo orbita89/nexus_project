@@ -17,7 +17,17 @@ pub const ACCESS_TOKEN_TTL_SECS: i64 = 15 * 60;
 /// Роль пользователя. Порядок вариантов задаёт старшинство: `User < Author < Admin`,
 /// так что проверка «не ниже автора» — это `role >= Role::Author`.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, sqlx::Type,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    utoipa::ToSchema,
 )]
 #[sqlx(type_name = "user_role", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -36,6 +46,8 @@ pub struct Claims {
     /// id пользователя.
     pub sub: Uuid,
     pub role: Role,
+    /// id сессии (строка в `refresh_tokens`): по нему видно, какая сессия текущая.
+    pub sid: Uuid,
     pub iat: i64,
     pub exp: i64,
 }
@@ -57,11 +69,12 @@ impl Jwt {
     }
 
     /// Выпускает access-токен на [`ACCESS_TOKEN_TTL_SECS`].
-    pub fn issue(&self, user_id: Uuid, role: Role) -> AppResult<String> {
+    pub fn issue(&self, user_id: Uuid, role: Role, session_id: Uuid) -> AppResult<String> {
         let now = chrono::Utc::now().timestamp();
         self.encode(&Claims {
             sub: user_id,
             role,
+            sid: session_id,
             iat: now,
             exp: now + ACCESS_TOKEN_TTL_SECS,
         })
@@ -86,6 +99,8 @@ impl Jwt {
 pub struct AuthUser {
     pub id: Uuid,
     pub role: Role,
+    /// Сессия, которой выдан токен.
+    pub session_id: Uuid,
 }
 
 impl AuthUser {
@@ -114,6 +129,7 @@ impl FromRequestParts<AppState> for AuthUser {
         Ok(Self {
             id: claims.sub,
             role: claims.role,
+            session_id: claims.sid,
         })
     }
 }
@@ -149,17 +165,19 @@ mod tests {
     #[test]
     fn issued_token_verifies() {
         let id = Uuid::new_v4();
+        let sid = Uuid::new_v4();
         let claims = jwt()
-            .verify(&jwt().issue(id, Role::Author).unwrap())
+            .verify(&jwt().issue(id, Role::Author, sid).unwrap())
             .unwrap();
         assert_eq!(claims.sub, id);
         assert_eq!(claims.role, Role::Author);
+        assert_eq!(claims.sid, sid);
     }
 
     #[test]
     fn token_signed_with_other_secret_is_rejected() {
         let token = Jwt::new(b"another-secret-another-secret-123")
-            .issue(Uuid::new_v4(), Role::Admin)
+            .issue(Uuid::new_v4(), Role::Admin, Uuid::new_v4())
             .unwrap();
         assert!(matches!(jwt().verify(&token), Err(AppError::Unauthorized)));
     }
@@ -172,6 +190,7 @@ mod tests {
             .encode(&Claims {
                 sub: Uuid::new_v4(),
                 role: Role::User,
+                sid: Uuid::new_v4(),
                 iat: past - ACCESS_TOKEN_TTL_SECS,
                 exp: past,
             })
@@ -184,6 +203,7 @@ mod tests {
         let author = AuthUser {
             id: Uuid::new_v4(),
             role: Role::Author,
+            session_id: Uuid::new_v4(),
         };
         assert!(author.require(Role::User).is_ok());
         assert!(author.require(Role::Author).is_ok());

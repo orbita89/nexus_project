@@ -1,9 +1,11 @@
-# Авторизация. Нужны тестовые пользователи: make seed (пароль у всех password123).
-# Запросы зависят друг от друга (токены сохраняются в client.global) — запускайте файл целиком.
+# Авторизация: все сценарии против живого окружения.
+# Нужно: make up, make seed (тестовые пользователи, пароль password123).
+# Письма берутся из Mailpit (http://localhost:8025) через его API.
+# Запросы зависят друг от друга (значения сохраняются в client.global) — запускайте файл целиком.
 # Из консоли: make http
 
 ### Вход админом
-POST {{host}}/api/auth/login
+POST {{host}}/api/v1/auth/login
 Content-Type: application/json
 
 { "login": "admin", "password": "password123" }
@@ -17,7 +19,7 @@ Content-Type: application/json
 %}
 
 ### Вход обычным пользователем (по email, регистр не важен)
-POST {{host}}/api/auth/login
+POST {{host}}/api/v1/auth/login
 Content-Type: application/json
 
 { "login": "USER@nexus.local", "password": "password123" }
@@ -32,7 +34,7 @@ Content-Type: application/json
 %}
 
 ### Неверный пароль → 401
-POST {{host}}/api/auth/login
+POST {{host}}/api/v1/auth/login
 Content-Type: application/json
 
 { "login": "user", "password": "wrong-password" }
@@ -42,7 +44,7 @@ Content-Type: application/json
 %}
 
 ### Заблокированный пользователь → 401
-POST {{host}}/api/auth/login
+POST {{host}}/api/v1/auth/login
 Content-Type: application/json
 
 { "login": "blocked", "password": "password123" }
@@ -52,7 +54,7 @@ Content-Type: application/json
 %}
 
 ### Профиль по access-токену
-GET {{host}}/api/auth/me
+GET {{host}}/api/v1/auth/me
 Authorization: Bearer {{user_token}}
 
 > {%
@@ -63,14 +65,14 @@ Authorization: Bearer {{user_token}}
 %}
 
 ### Профиль без токена → 401
-GET {{host}}/api/auth/me
+GET {{host}}/api/v1/auth/me
 
 > {%
     client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
 %}
 
 ### Обновление токенов (refresh одноразовый: выдаётся новый)
-POST {{host}}/api/auth/refresh
+POST {{host}}/api/v1/auth/refresh
 Content-Type: application/json
 
 { "refresh_token": "{{user_refresh}}" }
@@ -81,11 +83,23 @@ Content-Type: application/json
         client.assert(response.status === 200, `got ${response.status}`);
         client.assert(!!response.body.refresh_token, JSON.stringify(response.body));
     });
+    client.global.set("user_token", response.body.access_token);
     client.global.set("user_refresh", response.body.refresh_token);
 %}
 
+### Мои активные сессии: текущая помечена
+GET {{host}}/api/v1/auth/sessions
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200 и есть текущая сессия", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.some(s => s.current === true), JSON.stringify(response.body));
+    });
+%}
+
 ### Админка: обычный пользователь → 403
-GET {{host}}/api/auth/admin/users
+GET {{host}}/api/v1/auth/admin/users
 Authorization: Bearer {{user_token}}
 
 > {%
@@ -93,7 +107,7 @@ Authorization: Bearer {{user_token}}
 %}
 
 ### Админка: список пользователей
-GET {{host}}/api/auth/admin/users?limit=10
+GET {{host}}/api/v1/auth/admin/users?limit=10
 Authorization: Bearer {{admin_token}}
 
 > {%
@@ -103,8 +117,8 @@ Authorization: Bearer {{admin_token}}
     });
 %}
 
-### Регистрация нового пользователя (уникальное имя на каждый запуск)
-POST {{host}}/api/auth/register
+### Регистрация по паролю (уникальный адрес на каждый запуск)
+POST {{host}}/api/v1/auth/register
 Content-Type: application/json
 
 {
@@ -115,15 +129,147 @@ Content-Type: application/json
 }
 
 > {%
-    client.test("201 и роль user", () => {
+    client.test("201, email не подтверждён, токенов нет", () => {
         client.assert(response.status === 201, `got ${response.status}`);
-        client.assert(response.body.user.role === "user");
+        client.assert(response.body.email_verified_at === null);
+        client.assert(response.body.access_token === undefined);
     });
-    client.global.set("new_user_id", response.body.user.id);
+    client.global.set("new_email", response.body.email);
+    client.global.set("new_username", response.body.username);
+    client.global.set("new_user_id", response.body.id);
+%}
+
+### До подтверждения email вход по паролю запрещён → 403
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "{{new_username}}", "password": "password123" }
+
+> {%
+    client.test("403 email not verified", () => {
+        client.assert(response.status === 403, `got ${response.status}`);
+        client.assert(response.body.error === "email not verified");
+    });
+%}
+
+### Письмо с подтверждением пришло в Mailpit
+GET {{mailpit}}/api/v1/message/latest
+
+> {%
+    client.test("письмо на новый адрес со ссылкой", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.To[0].Address === client.global.get("new_email"), JSON.stringify(response.body.To));
+        client.assert(/verify-email\?token=/.test(response.body.Text), response.body.Text);
+    });
+    client.global.set("verify_token", response.body.Text.match(/token=([0-9a-f]{64})/)[1]);
+%}
+
+### Подтверждение email по ссылке → сразу вход
+POST {{host}}/api/v1/auth/email/verify
+Content-Type: application/json
+
+{ "token": "{{verify_token}}" }
+
+> {%
+    client.test("200, email подтверждён, есть токены", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.user.email_verified_at !== null);
+        client.assert(!!response.body.access_token);
+    });
+    client.global.set("new_token", response.body.access_token);
+%}
+
+### Забыл пароль → письмо со ссылкой
+POST {{host}}/api/v1/auth/password/forgot
+Content-Type: application/json
+
+{ "email": "{{new_email}}" }
+
+> {%
+    client.test("202", () => client.assert(response.status === 202, `got ${response.status}`));
+%}
+
+### Письмо о сбросе пароля пришло в Mailpit
+GET {{mailpit}}/api/v1/message/latest
+
+> {%
+    client.test("письмо со ссылкой сброса", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(/reset-password\?token=/.test(response.body.Text), response.body.Text);
+    });
+    client.global.set("reset_token", response.body.Text.match(/token=([0-9a-f]{64})/)[1]);
+%}
+
+### Новый пароль по ссылке
+POST {{host}}/api/v1/auth/password/reset
+Content-Type: application/json
+
+{ "token": "{{reset_token}}", "password": "new-password-456" }
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Вход с новым паролем
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "{{new_username}}", "password": "new-password-456" }
+
+> {%
+    client.test("200", () => client.assert(response.status === 200, `got ${response.status}`));
+%}
+
+### Вход по почте без пароля: запросить ссылку (новый адрес — аккаунт создастся)
+POST {{host}}/api/v1/auth/email/login
+Content-Type: application/json
+
+{ "email": "magic{{$timestamp}}@example.com" }
+
+> {%
+    client.test("202", () => client.assert(response.status === 202, `got ${response.status}`));
+%}
+
+### Ссылка для входа пришла в Mailpit
+GET {{mailpit}}/api/v1/message/latest
+
+> {%
+    client.test("письмо со ссылкой входа", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(/email-login\?token=/.test(response.body.Text), response.body.Text);
+    });
+    client.global.set("magic_token", response.body.Text.match(/token=([0-9a-f]{64})/)[1]);
+%}
+
+### Переход по ссылке → вход (аккаунт создан, email подтверждён)
+POST {{host}}/api/v1/auth/email/login/confirm
+Content-Type: application/json
+
+{ "token": "{{magic_token}}" }
+
+> {%
+    client.test("200 и новый пользователь", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.user.email_verified_at !== null);
+        client.assert(response.body.user.username.startsWith("magic"), response.body.user.username);
+    });
+%}
+
+### Dev login: войти как author без пароля (только при DEV_LOGIN=true)
+POST {{host}}/api/v1/auth/dev/login
+Content-Type: application/json
+
+{ "login": "author" }
+
+> {%
+    client.test("200 и роль author", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.user.role === "author");
+    });
 %}
 
 ### Админ повышает нового пользователя до author
-PATCH {{host}}/api/auth/admin/users/{{new_user_id}}/role
+PATCH {{host}}/api/v1/auth/admin/users/{{new_user_id}}/role
 Authorization: Bearer {{admin_token}}
 Content-Type: application/json
 
@@ -136,8 +282,42 @@ Content-Type: application/json
     });
 %}
 
+### Админ блокирует нового пользователя
+PATCH {{host}}/api/v1/auth/admin/users/{{new_user_id}}/status
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "is_active": false }
+
+> {%
+    client.test("200 и is_active=false", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.is_active === false);
+    });
+%}
+
+### Заблокированный не может войти → 401
+POST {{host}}/api/v1/auth/login
+Content-Type: application/json
+
+{ "login": "{{new_username}}", "password": "new-password-456" }
+
+> {%
+    client.test("401", () => client.assert(response.status === 401, `got ${response.status}`));
+%}
+
+### Включённые OAuth-провайдеры (пустой список, пока не заданы ключи)
+GET {{host}}/api/v1/auth/oauth/providers
+
+> {%
+    client.test("200 и список", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(Array.isArray(response.body.providers));
+    });
+%}
+
 ### Выход: refresh-токен отзывается
-POST {{host}}/api/auth/logout
+POST {{host}}/api/v1/auth/logout
 Content-Type: application/json
 
 { "refresh_token": "{{user_refresh}}" }
@@ -147,7 +327,7 @@ Content-Type: application/json
 %}
 
 ### После выхода refresh не работает → 401
-POST {{host}}/api/auth/refresh
+POST {{host}}/api/v1/auth/refresh
 Content-Type: application/json
 
 { "refresh_token": "{{user_refresh}}" }

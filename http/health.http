@@ -13,8 +13,8 @@ GET {{host}}/health
     });
 %}
 
-### Модуль смонтирован: неизвестный путь под /api/auth отдаёт 404 от приложения, а не от nginx
-GET {{host}}/api/auth/does-not-exist
+### Модуль смонтирован: неизвестный путь под /api/v1/auth отдаёт 404 от приложения, а не от nginx
+GET {{host}}/api/v1/auth/does-not-exist
 
 > {%
     client.test("status 404", () => {

@@ -7,6 +7,6 @@ fn main() {
         .expect("usage: hash_password <password>");
     println!(
         "{}",
-        auth::password::hash_blocking(&password).expect("hash")
+        auth::crypto::hash_password_blocking(&password).expect("hash")
     );
 }

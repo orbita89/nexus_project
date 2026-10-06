@@ -2,7 +2,7 @@
 
 **Отвечает за:** всё общение вокруг контента — форумы, рецензии и оценки, коллекции, подписки
 на пользователей, интересы.
-**URL:** `/api/social` · **Код:** `modules/social/`
+**URL:** `/api/v1/social` · **Код:** `modules/social/`
 
 **Статус:** таблицы подписок, рецензий и коллекций есть; форума и интересов нет; эндпоинтов нет.
 
@@ -99,9 +99,9 @@
 
 | Метод | Путь | Что делает |
 |---|---|---|
-| GET/PUT/DELETE | `/api/social/entities/{id}/review` | Своя рецензия и оценка на произведение |
-| GET | `/api/social/entities/{id}/reviews` | Рецензии на произведение |
-| POST/DELETE | `/api/social/users/{id}/follow` | Подписаться / отписаться |
-| CRUD | `/api/social/collections` | Коллекции и их содержимое |
-| CRUD | `/api/social/threads` | Темы форума с привязкой к сущностям |
-| GET | `/api/social/feed` | Лента по интересам и подпискам |
+| GET/PUT/DELETE | `/api/v1/social/entities/{id}/review` | Своя рецензия и оценка на произведение |
+| GET | `/api/v1/social/entities/{id}/reviews` | Рецензии на произведение |
+| POST/DELETE | `/api/v1/social/users/{id}/follow` | Подписаться / отписаться |
+| CRUD | `/api/v1/social/collections` | Коллекции и их содержимое |
+| CRUD | `/api/v1/social/threads` | Темы форума с привязкой к сущностям |
+| GET | `/api/v1/social/feed` | Лента по интересам и подпискам |

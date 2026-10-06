@@ -19,3 +19,5 @@ tracing-subscriber = { workspace = true }
 jsonwebtoken = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+utoipa = { workspace = true }
+lettre = { workspace = true }

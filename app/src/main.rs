@@ -1,5 +1,6 @@
-//! Точка входа: конфиг, логирование, БД, миграции, HTTP-сервер.
+//! Точка входа: конфиг, логирование, БД, миграции, фоновые задачи, HTTP-сервер.
 
+use shared::mail::Mailer;
 use shared::{db, telemetry, AppState, Config};
 
 /// Используется, если `RUST_LOG` не задан.
@@ -10,15 +11,27 @@ const DEFAULT_LOG_FILTER: &str =
 async fn main() -> anyhow::Result<()> {
     telemetry::init(DEFAULT_LOG_FILTER);
     let config = Config::from_env();
-    let pool = db::connect(&config.database_url).await?;
+    if config.uses_dev_jwt_secret() {
+        tracing::warn!("JWT_SECRET is the development default, set your own in production");
+    }
+    let mailer = Mailer::from_config(&config).map_err(anyhow::Error::msg)?;
+    if matches!(mailer, Mailer::Log) {
+        tracing::warn!("SMTP_URL is not set, emails will only be logged");
+    }
 
+    let pool = db::connect(&config.database_url).await?;
     nexus::MIGRATOR.run(&pool).await?;
     tracing::info!("migrations applied");
 
-    let app = nexus::build_app(AppState::new(config.clone(), pool));
+    auth::cleanup::spawn(pool.clone());
+
+    let app = nexus::build_app(AppState::new(config.clone(), pool, mailer));
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!("nexus listening on {}", config.bind_addr);
+    if config.api_docs {
+        tracing::info!("API docs: /docs");
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -1,13 +1,26 @@
 //! Админские эндпоинты: доступны только роли `admin` (extractor `AdminUser`).
 
-use crate::models::{ListUsersQuery, SetRoleRequest, UserView, USER_COLUMNS};
+use crate::models::{ListUsersQuery, SetRoleRequest, SetStatusRequest, UserView, USER_COLUMNS};
+use crate::session;
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use shared::error::ErrorBody;
 use shared::{AdminUser, AppError, AppResult, AppState, Role};
 use uuid::Uuid;
 
 const MAX_PAGE_SIZE: i64 = 100;
 
+/// Список пользователей, старые сверху.
+#[utoipa::path(
+    get, path = "/admin/users", tag = "admin",
+    security(("bearer" = [])),
+    params(ListUsersQuery),
+    responses(
+        (status = 200, description = "Пользователи", body = Vec<UserView>),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+    )
+)]
 pub async fn list_users(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -26,7 +39,19 @@ pub async fn list_users(
     Ok(Json(users))
 }
 
-/// Новая роль попадёт в токены при следующем refresh, то есть не позже чем через 15 минут.
+/// Сменить роль. Новая роль попадёт в токены при следующем refresh (не позже чем через 15 минут).
+#[utoipa::path(
+    patch, path = "/admin/users/{id}/role", tag = "admin",
+    security(("bearer" = [])),
+    params(("id" = Uuid, Path, description = "id пользователя")),
+    request_body = SetRoleRequest,
+    responses(
+        (status = 200, description = "Роль изменена", body = UserView),
+        (status = 400, description = "Админ не может понизить сам себя", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Пользователь не найден", body = ErrorBody),
+    )
+)]
 pub async fn set_role(
     State(state): State<AppState>,
     AdminUser(admin): AdminUser,
@@ -50,5 +75,51 @@ pub async fn set_role(
     let user = user.ok_or(AppError::NotFound)?;
 
     tracing::info!(admin_id = %admin.id, %user_id, role = ?req.role, "user role changed");
+    Ok(Json(user))
+}
+
+/// Заблокировать или разблокировать пользователя.
+///
+/// При блокировке все его сессии сразу отзываются: refresh перестаёт работать, а access-токен
+/// доживает не больше 15 минут.
+#[utoipa::path(
+    patch, path = "/admin/users/{id}/status", tag = "admin",
+    security(("bearer" = [])),
+    params(("id" = Uuid, Path, description = "id пользователя")),
+    request_body = SetStatusRequest,
+    responses(
+        (status = 200, description = "Статус изменён", body = UserView),
+        (status = 400, description = "Админ не может заблокировать сам себя", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Пользователь не найден", body = ErrorBody),
+    )
+)]
+pub async fn set_status(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(user_id): Path<Uuid>,
+    Json(req): Json<SetStatusRequest>,
+) -> AppResult<Json<UserView>> {
+    if user_id == admin.id && !req.is_active {
+        return Err(AppError::BadRequest(
+            "admins cannot block themselves".into(),
+        ));
+    }
+
+    let mut tx = state.db.begin().await?;
+    let user: Option<UserView> = sqlx::query_as(&format!(
+        "UPDATE users SET is_active = $2 WHERE id = $1 RETURNING {USER_COLUMNS}"
+    ))
+    .bind(user_id)
+    .bind(req.is_active)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let user = user.ok_or(AppError::NotFound)?;
+    if !req.is_active {
+        session::revoke_all(&mut tx, user_id, None).await?;
+    }
+    tx.commit().await?;
+
+    tracing::info!(admin_id = %admin.id, %user_id, is_active = req.is_active, "user status changed");
     Ok(Json(user))
 }

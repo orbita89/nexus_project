@@ -1,63 +1,130 @@
-//! Запросы и ответы API модуля.
+//! Запросы и ответы API модуля. Описания полей попадают в Swagger.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use shared::Role;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 /// Колонки `users` для [`UserView`]. citext приводим к text: так sqlx читает их как `String`.
 pub const USER_COLUMNS: &str = "id, email::text AS email, username::text AS username, \
-     display_name, avatar_url, role, is_active, created_at";
+     display_name, avatar_url, role, is_active, email_verified_at, created_at";
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+/// Пользователь. Хеш пароля наружу не отдаётся никогда.
+#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct UserView {
     pub id: Uuid,
+    #[schema(example = "user@nexus.local")]
     pub email: String,
+    #[schema(example = "user")]
     pub username: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub role: Role,
+    /// `false` — заблокирован админом.
     pub is_active: bool,
+    /// `null` — email не подтверждён, вход по паролю запрещён.
+    pub email_verified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RegisterRequest {
+    #[schema(example = "neo@example.com")]
     pub email: String,
+    /// 3–32 символа: латиница, цифры, `_`, `-`, `.`.
+    #[schema(example = "neo")]
     pub username: String,
+    /// 8–128 символов.
+    #[schema(example = "password123")]
     pub password: String,
+    /// До 64 символов.
     pub display_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
-    /// Email или username.
+    /// Email или username, регистр не важен.
+    #[schema(example = "user")]
     pub login: String,
+    #[schema(example = "password123")]
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Serialize)]
+/// Пара токенов. Access — в заголовок `Authorization: Bearer ...`, refresh — для `/refresh`.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TokenResponse {
     pub access_token: String,
-    pub token_type: &'static str,
+    #[schema(example = "Bearer")]
+    pub token_type: String,
     /// Через сколько секунд истекает access-токен.
+    #[schema(example = 900)]
     pub expires_in: i64,
     pub refresh_token: String,
     pub user: UserView,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct EmailRequest {
+    #[schema(example = "neo@example.com")]
+    pub email: String,
+}
+
+/// Токен из ссылки в письме (параметр `token=`).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct EmailTokenRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ResetPasswordRequest {
+    /// Токен из письма о сбросе пароля.
+    pub token: String,
+    /// Новый пароль, 8–128 символов.
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    /// 8–128 символов.
+    pub new_password: String,
+}
+
+/// Активная сессия (устройство).
+#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+pub struct SessionView {
+    pub id: Uuid,
+    pub user_agent: Option<String>,
+    pub ip: Option<String>,
+    /// Когда сессия обновлялась в последний раз (refresh-токен выдаётся заново при каждом обновлении).
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    /// Это сессия, с которой сделан запрос.
+    #[sqlx(skip)]
+    pub current: bool,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct ListUsersQuery {
+    /// Сколько вернуть, 1–100 (по умолчанию 50).
     pub limit: Option<i64>,
+    /// Сколько пропустить (по умолчанию 0).
     pub offset: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SetRoleRequest {
     pub role: Role,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetStatusRequest {
+    /// `false` — заблокировать (все сессии пользователя отзываются), `true` — разблокировать.
+    pub is_active: bool,
 }

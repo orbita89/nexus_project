@@ -4,10 +4,12 @@
 |---|---|
 | [vision.md](vision.md) | **Главная задумка.** Что строим, для кого и чем отличаемся. С ним сверяются все решения |
 | [architecture.md](architecture.md) | Технологии и архитектурный подход: модульный монолит, абстрактная сущность, инфраструктура |
-| [modules/auth.md](modules/auth.md) | Модуль `auth`: пользователи, токены |
+| [modules/auth.md](modules/auth.md) | Модуль `auth`: способы входа, токены, роли, письма, OAuth (+ как подключить провайдера) |
 | [modules/catalog.md](modules/catalog.md) | Модуль `catalog`: сущности (фильмы, книги, ...), люди, теги |
 | [modules/social.md](modules/social.md) | Модуль `social`: подписки, рецензии, коллекции, форум |
 | [modules/realtime.md](modules/realtime.md) | Модуль `realtime`: WebSocket, живые уведомления |
+| [for-other-modules.md](for-other-modules.md) | **Для разработчиков модулей:** как пользоваться авторизацией, встроить модуль, писать тесты + промт для новой сессии |
+| [api/openapi.json](api/openapi.json) | Контракт API (генерируется из кода, проверяется тестом). Удобнее смотреть в Swagger: http://localhost/docs |
 
 Как запустить проект и какие есть команды — в [README в корне](../README.md).
 

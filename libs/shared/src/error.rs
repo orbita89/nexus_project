@@ -6,6 +6,14 @@ use axum::Json;
 
 pub type AppResult<T> = Result<T, AppError>;
 
+/// Тело любого ответа с ошибкой. Нужно для документации API.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct ErrorBody {
+    /// Описание ошибки.
+    #[schema(example = "unauthorized")]
+    pub error: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("not found")]
@@ -20,8 +28,15 @@ pub enum AppError {
     #[error("forbidden")]
     Forbidden,
 
+    /// Вход по паролю до подтверждения email.
+    #[error("email not verified")]
+    EmailNotVerified,
+
     #[error("conflict: {0}")]
     Conflict(String),
+
+    #[error("too many requests, try again later")]
+    TooManyRequests,
 
     #[error(transparent)]
     Database(#[from] sqlx::Error),
@@ -37,8 +52,11 @@ impl IntoResponse for AppError {
             AppError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
-            AppError::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
+            AppError::Forbidden | AppError::EmailNotVerified => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            AppError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             // Детали внутренних ошибок наружу не отдаём — только в лог.
             AppError::Database(e) => {
                 tracing::error!(error = %e, "database error");
@@ -56,7 +74,7 @@ impl IntoResponse for AppError {
             }
         };
 
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        (status, Json(ErrorBody { error: message })).into_response()
     }
 }
 

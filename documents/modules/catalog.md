@@ -2,7 +2,7 @@
 
 **Отвечает за:** контентное ядро — сущности (фильмы, сериалы, книги, игры), людей и их роли,
 теги, поиск через Meilisearch.
-**URL:** `/api/catalog` · **Код:** `modules/catalog/`
+**URL:** `/api/v1/catalog` · **Код:** `modules/catalog/`
 
 **Статус:** таблицы есть, эндпоинтов и индексации в Meilisearch нет.
 
@@ -110,9 +110,9 @@
 
 | Метод | Путь | Что делает |
 |---|---|---|
-| GET | `/api/catalog/entities` | Список с фильтрами (`kind`, тег, год) и пагинацией |
-| GET | `/api/catalog/entities/{slug}` | Карточка: сущность, теги, участники |
-| GET | `/api/catalog/search?q=` | Поиск через Meilisearch |
-| GET | `/api/catalog/people/{slug}` | Человек и его фильмография |
-| GET | `/api/catalog/tags` | Список тегов |
-| POST/PATCH/DELETE | `/api/catalog/...` | Управление контентом (для модераторов) |
+| GET | `/api/v1/catalog/entities` | Список с фильтрами (`kind`, тег, год) и пагинацией |
+| GET | `/api/v1/catalog/entities/{slug}` | Карточка: сущность, теги, участники |
+| GET | `/api/v1/catalog/search?q=` | Поиск через Meilisearch |
+| GET | `/api/v1/catalog/people/{slug}` | Человек и его фильмография |
+| GET | `/api/v1/catalog/tags` | Список тегов |
+| POST/PATCH/DELETE | `/api/v1/catalog/...` | Управление контентом (для модераторов) |

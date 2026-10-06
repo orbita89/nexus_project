@@ -55,7 +55,21 @@ tower = { version = "0.5", features = ["util"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 argon2 = "0.6"
 sha2 = "0.11"
+utoipa = { version = "6", features = ["uuid", "chrono"] }
+utoipa-axum = "0.3"
+# vendored: Swagger UI вшивается в бинарник, сборка не ходит за ним в интернет.
+utoipa-swagger-ui = { version = "10", features = ["axum", "vendored"] }
+governor = "0.10"
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "builder",
+    "hostname",
+    "tokio1-rustls-tls",
+] }
 http-body-util = "0.1"
+# OAuth: обмен кода на токен и запрос профиля у провайдера. rustls на ring, как у lettre.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+base64 = "0.22"
 
 [profile.dev]
 # Меньше отладочной информации -> заметно быстрее линковка и меньше target/ при hot-reload.

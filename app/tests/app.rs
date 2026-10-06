@@ -17,7 +17,7 @@ async fn health_returns_ok() {
 async fn unknown_route_returns_404() {
     let app = nexus::build_app(test_utils::state_without_db());
 
-    let response = test_utils::get(app, "/api/auth/does-not-exist").await;
+    let response = test_utils::get(app, "/api/v1/auth/does-not-exist").await;
 
     assert_eq!(response.status, StatusCode::NOT_FOUND);
 }
@@ -65,4 +65,35 @@ async fn entity_credits_rejects_duplicate_role_without_character(pool: PgPool) {
     let error = duplicate.expect_err("duplicate credit must be rejected");
     let db_error = error.as_database_error().expect("database error");
     assert!(db_error.is_unique_violation(), "{db_error}");
+}
+
+#[tokio::test]
+async fn swagger_ui_and_openapi_spec_are_served() {
+    let app = nexus::build_app(test_utils::state_without_db());
+
+    let response = test_utils::get(app.clone(), "/api-docs/openapi.json").await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(response.json()["paths"]["/api/v1/auth/login"].is_object());
+
+    let response = test_utils::get(app, "/docs/").await;
+    assert_eq!(response.status, StatusCode::OK);
+}
+
+/// `documents/api/openapi.json` — контракт API в репозитории: любое изменение API видно в PR.
+/// Обновить после изменения эндпоинтов: `UPDATE_OPENAPI=1 cargo test -p nexus openapi`.
+#[test]
+fn openapi_spec_file_is_up_to_date() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../documents/api/openapi.json");
+    let actual = nexus::openapi().to_pretty_json().unwrap() + "\n";
+
+    if std::env::var("UPDATE_OPENAPI").is_ok() {
+        std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap()).unwrap();
+        std::fs::write(path, &actual).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(path).unwrap_or_default();
+    assert!(
+        expected == actual,
+        "documents/api/openapi.json is outdated, run: UPDATE_OPENAPI=1 cargo test -p nexus openapi"
+    );
 }

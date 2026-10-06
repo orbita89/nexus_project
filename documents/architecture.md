@@ -15,7 +15,10 @@
 | Reverse proxy | **nginx** 1.27 | Единая точка входа, апгрейд WebSocket |
 | Окружение | **Docker Compose** | Всё окружение одной командой `make up` |
 | CI | **GitHub Actions** | fmt, clippy, тесты, проверка зависимостей, сборка образа |
-| Документация API | **utoipa** + Swagger UI 🕓 | OpenAPI-схема генерируется из кода |
+| Документация API | **utoipa** + Swagger UI | OpenAPI-схема генерируется из кода, UI на `/docs` |
+| Почта | **lettre** (SMTP), в dev — **Mailpit** | Подтверждение email, вход по ссылке, сброс пароля |
+| OAuth | **reqwest** | Вход через Google, GitHub, Яндекс ID |
+| Rate limiting | **governor** | Защита входа и писем от перебора |
 | Фронтенд | React или Flutter 🕓 | Ещё не выбран |
 
 ## Модульный монолит
@@ -25,9 +28,9 @@
 
 | Модуль | Отвечает за | URL |
 |---|---|---|
-| [`auth`](modules/auth.md) | регистрацию, вход, токены, профили, интересы | `/api/auth` |
-| [`catalog`](modules/catalog.md) | контент (фильмы, книги, ...), людей, теги, поиск | `/api/catalog` |
-| [`social`](modules/social.md) | форумы, рецензии, оценки, коллекции, подписки | `/api/social` |
+| [`auth`](modules/auth.md) | регистрацию, вход (пароль, письмо, OAuth), токены, роли | `/api/v1/auth` |
+| [`catalog`](modules/catalog.md) | контент (фильмы, книги, ...), людей, теги, поиск | `/api/v1/catalog` |
+| [`social`](modules/social.md) | форумы, рецензии, оценки, коллекции, подписки | `/api/v1/social` |
 | [`realtime`](modules/realtime.md) | WebSocket: уведомления, чаты | `/ws` |
 
 ```
@@ -119,12 +122,14 @@ JOIN'ы и правки во всех запросах «по всем типа�
         │  http://localhost  (порт 80)
         ▼
      nginx  ──────►  app (nexus :8080)  ──►  PostgreSQL :5432
+                                         ──►  Mailpit :1025 (SMTP, dev)
                                          ──►  Redis :6379 🕓
                                          ──►  Meilisearch :7700 🕓
 ```
 
 - **Монорепозиторий.** Весь код — в одном Cargo workspace: `app/`, `modules/*`, `libs/*`.
-- **nginx — единая точка входа.** Фронтенд ходит на один адрес (`http://localhost/api/...`).
+- **nginx — единая точка входа.** Фронтенд ходит на один адрес (`http://localhost/api/v1/...`).
+  Адрес приложения nginx переспрашивает у DNS Docker, поэтому пересоздание контейнера `app` его не ломает.
   Маршрутизацию по модулям делает само приложение, а nginx проксирует запросы и включает
   апгрейд соединения для WebSocket. Позже на нём же можно делать TLS и раздачу статики.
 - **Hot-reload в Docker.** Исходники монтируются в контейнер, `cargo watch` пересобирает и
