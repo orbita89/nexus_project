@@ -1821,14 +1821,25 @@
             ],
             "example": "CD Projekt"
           },
-          "trailer": {
+          "trailers": {
             "type": [
-              "string",
+              "array",
               "null"
             ],
-            "description": "Официальный трейлер: id видео YouTube. Принимается и ссылка (`youtube.com/watch?v=…`,\n`youtu.be/…`, `/embed/…`), хранится только id.",
-            "example": "n9xhJrPXop4",
-            "pattern": "^[A-Za-z0-9_-]{11}$"
+            "items": {
+              "$ref": "#/components/schemas/TrailerSource"
+            },
+            "description": "Трейлер: источники по приоритету, фронтенд показывает первый доступный у зрителя.",
+            "example": [
+              {
+                "id": "n9xhJrPXop4",
+                "provider": "youtube"
+              },
+              {
+                "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4",
+                "provider": "rutube"
+              }
+            ]
           }
         },
         "additionalProperties": false
@@ -1887,14 +1898,25 @@
             "maximum": 10000,
             "minimum": 1
           },
-          "trailer": {
+          "trailers": {
             "type": [
-              "string",
+              "array",
               "null"
             ],
-            "description": "Официальный трейлер: id видео YouTube. Принимается и ссылка (`youtube.com/watch?v=…`,\n`youtu.be/…`, `/embed/…`), хранится только id.",
-            "example": "n9xhJrPXop4",
-            "pattern": "^[A-Za-z0-9_-]{11}$"
+            "items": {
+              "$ref": "#/components/schemas/TrailerSource"
+            },
+            "description": "Трейлер: источники по приоритету, фронтенд показывает первый доступный у зрителя.",
+            "example": [
+              {
+                "id": "n9xhJrPXop4",
+                "provider": "youtube"
+              },
+              {
+                "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4",
+                "provider": "rutube"
+              }
+            ]
           }
         },
         "additionalProperties": false
@@ -2272,14 +2294,25 @@
               }
             ]
           },
-          "trailer": {
+          "trailers": {
             "type": [
-              "string",
+              "array",
               "null"
             ],
-            "description": "Официальный трейлер: id видео YouTube. Принимается и ссылка (`youtube.com/watch?v=…`,\n`youtu.be/…`, `/embed/…`), хранится только id.",
-            "example": "n9xhJrPXop4",
-            "pattern": "^[A-Za-z0-9_-]{11}$"
+            "items": {
+              "$ref": "#/components/schemas/TrailerSource"
+            },
+            "description": "Трейлер: источники по приоритету, фронтенд показывает первый доступный у зрителя.",
+            "example": [
+              {
+                "id": "n9xhJrPXop4",
+                "provider": "youtube"
+              },
+              {
+                "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4",
+                "provider": "rutube"
+              }
+            ]
           }
         },
         "additionalProperties": false
@@ -2360,6 +2393,31 @@
           "slug": {
             "type": "string",
             "example": "sci-fi"
+          }
+        }
+      },
+      "TrailerProvider": {
+        "type": "string",
+        "description": "Видеосервис трейлера. Фронтенд сам строит адрес плеера по провайдеру и id, поэтому в БД не\nпопадает произвольный URL (и чужой домен в iframe).",
+        "enum": [
+          "youtube",
+          "rutube"
+        ]
+      },
+      "TrailerSource": {
+        "type": "object",
+        "description": "Источник трейлера. На входе можно передать и просто ссылку на видео — провайдер и id\nопределятся сами; в `id` тоже допустима ссылка.",
+        "required": [
+          "provider",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "n9xhJrPXop4"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/TrailerProvider"
           }
         }
       },

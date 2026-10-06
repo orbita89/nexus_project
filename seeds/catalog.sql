@@ -197,25 +197,50 @@ ON CONFLICT (slug) DO NOTHING;
 
 -- Постеры, обложки и трейлеры. Отдельным UPDATE, а не в INSERT выше: ON CONFLICT DO NOTHING
 -- не трогает уже загруженные строки, а так повторный make seed дополняет и старую базу.
--- Картинки — ссылки на CDN (TMDB, Open Library, Steam), файлы не храним. Трейлер — id видео
--- YouTube с канала правообладателя; без трейлера фронтенд показывает только постер.
+-- Картинки — ссылки на CDN (TMDB, Open Library, Steam), файлы не храним.
+-- Трейлеры — источники по приоритету: YouTube с канала правообладателя, затем Rutube для стран,
+-- где YouTube заблокирован (официальных каналов там нет — это загрузки сторонних каналов,
+-- для прода заменить официальными). Фронтенд показывает первый доступный зрителю источник;
+-- нет ни одного — только постер. `- 'trailer'` убирает поле прежнего формата.
 UPDATE entities e
 SET cover_url = v.cover_url,
-    metadata = CASE WHEN v.trailer IS NULL THEN e.metadata
-                    ELSE e.metadata || jsonb_build_object('trailer', v.trailer) END
+    metadata = CASE WHEN v.trailers IS NULL THEN e.metadata - 'trailer'
+                    ELSE (e.metadata - 'trailer') || jsonb_build_object('trailers', v.trailers::jsonb) END
 FROM (VALUES
-    ('dune-1984',               'https://image.tmdb.org/t/p/w780/8F6LqsbPRaZIUFDt7V1Rpyh3O8L.jpg', NULL),
-    ('dune-2021',               'https://image.tmdb.org/t/p/w780/x2Jloj3InKrmTyHJKFviBAdZG0S.jpg', 'n9xhJrPXop4'),
-    ('dune-part-two-2024',      'https://image.tmdb.org/t/p/w780/pB3Hox16z3LqiBLmXZsxV9dE6EJ.jpg', 'Way9Dexny3w'),
-    ('lotr-fellowship-2001',    'https://image.tmdb.org/t/p/w780/plCqhwzN9xw09ImTnnInwSEwJBA.jpg', 'V75dMMIW2B4'),
-    ('lotr-two-towers-2002',    'https://image.tmdb.org/t/p/w780/tGoC0XMAHrDm8iZlDWI4uk80kdo.jpg', NULL),
-    ('the-witcher-series',      'https://image.tmdb.org/t/p/w780/rY2c2LhN07CRKlAbRaDZxN2XjvK.jpg', 'cSqi-8kAMmM'),
-    ('the-witcher-3-wild-hunt', 'https://steamcdn-a.akamaihd.net/steam/apps/292030/library_600x900_2x.jpg', '1-l29HlKkXU'),
-    ('dune-novel',                  'https://covers.openlibrary.org/b/isbn/9780441013593-L.jpg', NULL),
-    ('the-last-wish',               'https://covers.openlibrary.org/b/isbn/9780316029186-L.jpg', NULL),
-    ('the-hobbit-novel',            'https://covers.openlibrary.org/b/isbn/9780618260300-L.jpg', NULL),
-    ('the-lord-of-the-rings-novel', 'https://covers.openlibrary.org/b/isbn/9780544003415-L.jpg', NULL)
-) AS v (slug, cover_url, trailer)
+    ('dune-1984',
+     'https://image.tmdb.org/t/p/w780/8F6LqsbPRaZIUFDt7V1Rpyh3O8L.jpg',
+     NULL),
+    ('dune-2021',
+     'https://image.tmdb.org/t/p/w780/x2Jloj3InKrmTyHJKFviBAdZG0S.jpg',
+     '[{"provider": "youtube", "id": "n9xhJrPXop4"}, {"provider": "rutube", "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4"}]'),
+    ('dune-part-two-2024',
+     'https://image.tmdb.org/t/p/w780/pB3Hox16z3LqiBLmXZsxV9dE6EJ.jpg',
+     '[{"provider": "youtube", "id": "Way9Dexny3w"}, {"provider": "rutube", "id": "264355f929e2781efa3153905b5d5ea3"}]'),
+    ('lotr-fellowship-2001',
+     'https://image.tmdb.org/t/p/w780/plCqhwzN9xw09ImTnnInwSEwJBA.jpg',
+     '[{"provider": "youtube", "id": "V75dMMIW2B4"}, {"provider": "rutube", "id": "a46f055880d7fd9de4db6a8872831deb"}]'),
+    ('lotr-two-towers-2002',
+     'https://image.tmdb.org/t/p/w780/tGoC0XMAHrDm8iZlDWI4uk80kdo.jpg',
+     NULL),
+    ('the-witcher-series',
+     'https://image.tmdb.org/t/p/w780/rY2c2LhN07CRKlAbRaDZxN2XjvK.jpg',
+     '[{"provider": "youtube", "id": "cSqi-8kAMmM"}, {"provider": "rutube", "id": "b75dbc75330a8ffb5b2efc47c052b306"}]'),
+    ('the-witcher-3-wild-hunt',
+     'https://steamcdn-a.akamaihd.net/steam/apps/292030/library_600x900_2x.jpg',
+     '[{"provider": "youtube", "id": "1-l29HlKkXU"}, {"provider": "rutube", "id": "79f9adf82e1df26f6a7053ad49e8b9b1"}]'),
+    ('dune-novel',
+     'https://covers.openlibrary.org/b/isbn/9780441013593-L.jpg',
+     NULL),
+    ('the-last-wish',
+     'https://covers.openlibrary.org/b/isbn/9780316029186-L.jpg',
+     NULL),
+    ('the-hobbit-novel',
+     'https://covers.openlibrary.org/b/isbn/9780618260300-L.jpg',
+     NULL),
+    ('the-lord-of-the-rings-novel',
+     'https://covers.openlibrary.org/b/isbn/9780544003415-L.jpg',
+     NULL)
+) AS v (slug, cover_url, trailers)
 WHERE e.slug = v.slug;
 
 INSERT INTO people (slug, full_name, birth_date, bio) VALUES
