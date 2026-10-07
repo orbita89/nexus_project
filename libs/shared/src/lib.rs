@@ -2,6 +2,7 @@
 //! проверка доступа (JWT, роли), единый тип ошибки.
 
 pub mod auth;
+pub mod cache;
 pub mod config;
 pub mod db;
 pub mod directory;

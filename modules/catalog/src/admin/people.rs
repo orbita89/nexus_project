@@ -1,8 +1,8 @@
 //! Админка людей.
 
-use super::{affected_entities, nullable_param};
+use super::nullable_param;
 use crate::models::{CreatePerson, Person, UpdatePerson, PERSON_COLUMNS};
-use crate::search;
+use crate::search::{self, Touched};
 use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -11,8 +11,6 @@ use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use uuid::Uuid;
-
-const PERSON_ENTITIES: &str = "SELECT DISTINCT entity_id FROM entity_credits WHERE person_id = $1";
 
 /// Добавить человека.
 #[utoipa::path(
@@ -50,6 +48,7 @@ pub async fn create(
     .await
     .map_err(validate::conflict("slug is already taken"))?;
 
+    search::sync(&state, Touched::person(person.id)).await;
     tracing::info!(admin_id = %admin.id, person_id = %person.id, "person created");
     Ok((StatusCode::CREATED, Json(person)))
 }
@@ -93,8 +92,8 @@ pub async fn update(
             .map(|v| validate::optional("bio", v, MAX_LONG_TEXT))
             .transpose()?,
     );
-    let renamed = full_name.is_some();
-
+    // До записи: старый slug и работы человека (их карточки показывают его имя, slug и фото).
+    let touched = Touched::collect(&state.db, &[], &[id]).await?;
     let person: Option<Person> = sqlx::query_as(&format!(
         "UPDATE people AS p SET
              slug = COALESCE($2, slug),
@@ -118,11 +117,7 @@ pub async fn update(
     .map_err(validate::conflict("slug is already taken"))?;
     let person = person.ok_or(AppError::NotFound)?;
 
-    // Имена участников есть в поисковых документах их сущностей.
-    if renamed {
-        let ids = affected_entities(&state.db, PERSON_ENTITIES, id).await?;
-        search::sync(&state, &ids).await;
-    }
+    search::sync(&state, touched).await;
     tracing::info!(admin_id = %admin.id, person_id = %id, "person updated");
     Ok(Json(person))
 }
@@ -144,7 +139,7 @@ pub async fn delete(
     AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let ids = affected_entities(&state.db, PERSON_ENTITIES, id).await?;
+    let touched = Touched::collect(&state.db, &[], &[id]).await?;
     let deleted = sqlx::query("DELETE FROM people WHERE id = $1")
         .bind(id)
         .execute(&state.db)
@@ -152,7 +147,7 @@ pub async fn delete(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    search::sync(&state, &ids).await;
+    search::sync(&state, touched).await;
     tracing::info!(admin_id = %admin.id, person_id = %id, "person deleted");
     Ok(StatusCode::NO_CONTENT)
 }

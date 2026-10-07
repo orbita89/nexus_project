@@ -38,7 +38,7 @@
   | `realtime` | `/ws`          | WebSocket: уведомления, присутствие, чат                  | echo-WebSocket         |
 
 - **Схема БД**: первая миграция `migrations/20260916022500_init_schema.sql` (подробнее ниже).
-- **Dev-окружение в Docker Compose**: PostgreSQL 17, Redis 7, Meilisearch 1.15, приложение с hot-reload через `cargo watch` и nginx в качестве reverse proxy.
+- **Dev-окружение в Docker Compose**: PostgreSQL 18, Redis 7, Meilisearch 1.15, приложение с hot-reload через `cargo watch` и nginx в качестве reverse proxy.
 
 ## Структура
 
@@ -151,6 +151,7 @@ sqlx сверяет контрольные суммы и не даст стар�
 | `make shell`      | bash в контейнере с тулчейном                                 |
 | `make image`      | собрать production-образ                                      |
 | `make seed`       | загрузить пользователей, каталог и social (`seeds/*.sql`), перестроить поиск |
+| `make media`      | постеры и трейлеры каталога (`MODE=check` — проверить ссылки; ключи в `infra/.env`, см. `documents/modules/catalog.md`) |
 | `make http`       | HTTP-проверки против поднятого окружения (после `make seed`)  |
 
 Staging и прод: `infra/docker-compose.prod.yml` с готовым образом из CI — см.
@@ -196,6 +197,8 @@ Dependabot раз в неделю предлагает обновления за
 - [x] `social`: форум, интересы, лента
 - [x] `realtime`: авторизация сокетов и рассылка событий вместо echo (внутри одного процесса
       хватит `tokio::sync::broadcast`, Redis pub/sub понадобится при нескольких инстансах)
+- [x] Кэш карточек каталога (сущности и люди): L1 moka → L2 Redis → L3 Meilisearch, перестройка
+      индексов по расписанию ([architecture.md](documents/architecture.md#кэш-чтения-))
 - [ ] Логи: JSON-формат, request id, `/health/live` и `/health/ready`, graceful shutdown
 - [x] Документация: CONTRIBUTING, architecture, ADR
 - [x] Публикация образа в GHCR, конфигурация staging/прода ([deploy.md](documents/deploy.md))

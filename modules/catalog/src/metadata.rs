@@ -26,6 +26,13 @@ pub struct MovieMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = "PG-13")]
     pub age_rating: Option<String>,
+    /// Трейлер: источники по приоритету, фронтенд показывает первый доступный у зрителя.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = json!([
+        { "provider": "youtube", "id": "n9xhJrPXop4" },
+        { "provider": "rutube", "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4" }
+    ]))]
+    pub trailers: Option<Vec<TrailerSource>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
@@ -55,6 +62,13 @@ pub struct SeriesMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = json!(["US"]))]
     pub countries: Option<Vec<String>>,
+    /// Трейлер: источники по приоритету, фронтенд показывает первый доступный у зрителя.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = json!([
+        { "provider": "youtube", "id": "n9xhJrPXop4" },
+        { "provider": "rutube", "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4" }
+    ]))]
+    pub trailers: Option<Vec<TrailerSource>>,
 }
 
 /// Поля книги.
@@ -86,6 +100,103 @@ pub struct GameMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = "CD Projekt")]
     pub publisher: Option<String>,
+    /// Трейлер: источники по приоритету, фронтенд показывает первый доступный у зрителя.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = json!([
+        { "provider": "youtube", "id": "n9xhJrPXop4" },
+        { "provider": "rutube", "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4" }
+    ]))]
+    pub trailers: Option<Vec<TrailerSource>>,
+}
+
+/// Видеосервис трейлера. Фронтенд сам строит адрес плеера по провайдеру и id, поэтому в БД не
+/// попадает произвольный URL (и чужой домен в iframe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TrailerProvider {
+    /// `https://www.youtube-nocookie.com/embed/{id}`; id — 11 символов.
+    Youtube,
+    /// `https://rutube.ru/play/embed/{id}`; id — 32 hex-символа. Открывается там, где YouTube
+    /// заблокирован.
+    Rutube,
+}
+
+/// Источник трейлера. На входе можно передать и просто ссылку на видео — провайдер и id
+/// определятся сами; в `id` тоже допустима ссылка.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(try_from = "TrailerInput")]
+pub struct TrailerSource {
+    pub provider: TrailerProvider,
+    #[schema(example = "n9xhJrPXop4")]
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TrailerInput {
+    Link(String),
+    Source(RawTrailerSource),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTrailerSource {
+    provider: String,
+    id: String,
+}
+
+impl TryFrom<TrailerInput> for TrailerSource {
+    type Error = String;
+
+    fn try_from(input: TrailerInput) -> Result<Self, String> {
+        match input {
+            TrailerInput::Link(link) => parse_video_link(link.trim()).ok_or_else(|| {
+                format!("metadata.trailers: {link:?} is not a YouTube or Rutube video link")
+            }),
+            TrailerInput::Source(raw) => {
+                let provider = match raw.provider.trim() {
+                    "youtube" => TrailerProvider::Youtube,
+                    "rutube" => TrailerProvider::Rutube,
+                    other => {
+                        return Err(format!(
+                            "metadata.trailers: unknown provider {other:?} (youtube, rutube)"
+                        ))
+                    }
+                };
+                let id = raw.id.trim();
+                if provider.is_id(id) {
+                    return Ok(Self {
+                        provider,
+                        id: id.to_string(),
+                    });
+                }
+                parse_video_link(id)
+                    .filter(|source| source.provider == provider)
+                    .ok_or_else(|| {
+                        format!("metadata.trailers: {id:?} is not a {provider:?} video id or link")
+                    })
+            }
+        }
+    }
+}
+
+impl TrailerProvider {
+    fn is_id(self, id: &str) -> bool {
+        match self {
+            Self::Youtube => {
+                id.len() == 11
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            }
+            Self::Rutube => {
+                id.len() == 32
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }
+        }
+    }
 }
 
 /// Поля, специфичные для типа (`kind`). Все поля необязательны, неизвестные запрещены.
@@ -102,6 +213,7 @@ pub enum Metadata {
 
 const MAX_TEXT: usize = 200;
 const MAX_LIST: usize = 30;
+const MAX_TRAILERS: usize = 5;
 
 /// Проверяет `metadata` для `kind` и возвращает нормализованное значение для записи в БД.
 pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
@@ -114,6 +226,7 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             range("runtime_min", m.runtime_min, 1, 10_000)?;
             m.countries = countries(m.countries)?;
             m.age_rating = text("age_rating", m.age_rating, 16)?;
+            m.trailers = trailers(m.trailers)?;
             to_value(m)
         }
         EntityKind::Series => {
@@ -121,6 +234,7 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             range("seasons", m.seasons, 1, 10_000)?;
             range("episodes", m.episodes, 1, 100_000)?;
             m.countries = countries(m.countries)?;
+            m.trailers = trailers(m.trailers)?;
             to_value(m)
         }
         EntityKind::Book => {
@@ -137,6 +251,7 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             })?;
             m.developer = text("developer", m.developer, MAX_TEXT)?;
             m.publisher = text("publisher", m.publisher, MAX_TEXT)?;
+            m.trailers = trailers(m.trailers)?;
             to_value(m)
         }
     }
@@ -218,6 +333,71 @@ fn countries(values: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> {
     })
 }
 
+/// Источники без повторов, порядок — приоритет. Пустой список — то же, что отсутствие поля.
+fn trailers(values: Option<Vec<TrailerSource>>) -> AppResult<Option<Vec<TrailerSource>>> {
+    let Some(values) = values else {
+        return Ok(None);
+    };
+    if values.len() > MAX_TRAILERS {
+        return Err(bad(format!(
+            "metadata.trailers has more than {MAX_TRAILERS} items"
+        )));
+    }
+    let mut result: Vec<TrailerSource> = Vec::with_capacity(values.len());
+    for value in values {
+        if !result.contains(&value) {
+            result.push(value);
+        }
+    }
+    Ok((!result.is_empty()).then_some(result))
+}
+
+/// Провайдер и id из ссылки: `youtube.com/watch?v=…`, `youtu.be/…`, `/embed/…`, `/shorts/…`,
+/// `rutube.ru/video/…/`, `rutube.ru/play/embed/…`. Другие сайты — `None`.
+fn parse_video_link(link: &str) -> Option<TrailerSource> {
+    let rest = link
+        .strip_prefix("https://")
+        .or_else(|| link.strip_prefix("http://"))
+        .unwrap_or(link);
+    let rest = rest
+        .strip_prefix("www.")
+        .or_else(|| rest.strip_prefix("m."))
+        .unwrap_or(rest);
+    let first_segment = |path: &str| path.split(['?', '&', '/', '#']).next().map(str::to_string);
+
+    let (provider, id) = if let Some(path) = rest.strip_prefix("youtu.be/") {
+        (TrailerProvider::Youtube, first_segment(path)?)
+    } else if let Some(path) = rest
+        .strip_prefix("youtube.com/")
+        .or_else(|| rest.strip_prefix("youtube-nocookie.com/"))
+    {
+        let id = if let Some(query) = path.strip_prefix("watch?") {
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("v="))
+                .and_then(|v| v.split('#').next())
+                .map(str::to_string)?
+        } else {
+            ["embed/", "shorts/", "v/"]
+                .iter()
+                .find_map(|prefix| path.strip_prefix(prefix))
+                .and_then(first_segment)?
+        };
+        (TrailerProvider::Youtube, id)
+    } else {
+        // Не YouTube — только Rutube, другие сайты отбрасываем.
+        let path = rest.strip_prefix("rutube.ru/")?;
+        let id = ["video/", "play/embed/", "shorts/"]
+            .iter()
+            .find_map(|prefix| path.strip_prefix(prefix))
+            .and_then(first_segment)?;
+        (TrailerProvider::Rutube, id)
+    };
+    provider
+        .is_id(&id)
+        .then_some(TrailerSource { provider, id })
+}
+
 /// Убирает дефисы и пробелы, проверяет длину и контрольную цифру ISBN-10/13.
 fn isbn_normalize(isbn: &str) -> AppResult<String> {
     let isbn: String = isbn
@@ -291,6 +471,69 @@ mod tests {
         assert!(validate(EntityKind::Series, json!({ "status": "paused" })).is_err());
         assert!(validate(EntityKind::Game, json!({ "platforms": [""] })).is_err());
         assert!(validate(EntityKind::Book, json!([])).is_err());
+    }
+
+    #[test]
+    fn trailers_accept_links_and_objects_and_keep_order() {
+        let yt = "n9xhJrPXop4";
+        let rt = "0ab1fc1e47f2e9b89e9e59d9db36f2b4";
+        let expected = json!({ "trailers": [
+            { "provider": "youtube", "id": yt },
+            { "provider": "rutube", "id": rt }
+        ] });
+        for input in [
+            json!([
+                format!("https://www.youtube.com/watch?feature=share&v={yt}&t=30"),
+                format!("https://rutube.ru/video/{rt}/?r=wd")
+            ]),
+            json!([{ "provider": "youtube", "id": yt }, { "provider": "rutube", "id": rt }]),
+            json!([{ "provider": "youtube", "id": format!("https://youtu.be/{yt}?si=x") },
+                   format!("https://rutube.ru/play/embed/{rt}"),
+                   format!("https://www.youtube-nocookie.com/embed/{yt}")]),
+        ] {
+            for kind in [EntityKind::Movie, EntityKind::Series, EntityKind::Game] {
+                let value = validate(kind, json!({ "trailers": input })).unwrap();
+                assert_eq!(value, expected, "{kind:?} {input}");
+            }
+        }
+        assert_eq!(
+            validate(EntityKind::Movie, json!({ "trailers": [] })).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn trailers_reject_other_sites_wrong_ids_and_books() {
+        let bad = |kind, trailers: Value| validate(kind, json!({ "trailers": trailers })).is_err();
+        assert!(bad(
+            EntityKind::Movie,
+            json!(["https://vimeo.com/12345678"])
+        ));
+        assert!(bad(
+            EntityKind::Movie,
+            json!(["https://evil.example/watch?v=n9xhJrPXop4"])
+        ));
+        assert!(bad(
+            EntityKind::Movie,
+            json!([{ "provider": "vimeo", "id": "1" }])
+        ));
+        assert!(bad(
+            EntityKind::Movie,
+            json!([{ "provider": "rutube", "id": "n9xhJrPXop4" }])
+        ));
+        assert!(bad(
+            EntityKind::Movie,
+            json!([{ "provider": "youtube", "id": "n9xhJrPXop4", "extra": 1 }])
+        ));
+        assert!(bad(
+            EntityKind::Movie,
+            json!(vec!["https://youtu.be/n9xhJrPXop4"; 6])
+        ));
+        assert!(bad(EntityKind::Movie, json!("n9xhJrPXop4")));
+        assert!(bad(
+            EntityKind::Book,
+            json!(["https://youtu.be/n9xhJrPXop4"])
+        ));
     }
 
     #[test]

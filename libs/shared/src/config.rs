@@ -13,6 +13,15 @@ pub struct Config {
     pub redis_url: String,
     pub meili_url: String,
     pub meili_master_key: Option<String>,
+    /// Кэш карточек каталога ([`crate::cache`]): L1 в памяти процесса, `CACHE_L1_TTL_SECS`.
+    pub cache_l1_ttl_secs: u64,
+    /// Сколько записей держит L1, `CACHE_L1_CAPACITY`.
+    pub cache_l1_capacity: u64,
+    /// L2 в Redis, `CACHE_L2_TTL_SECS`.
+    pub cache_l2_ttl_secs: u64,
+    /// Полная перестройка поискового индекса по расписанию, `SEARCH_REINDEX_INTERVAL_SECS`.
+    /// `0` — только при старте и вручную.
+    pub search_reindex_interval_secs: u64,
     /// Секрет подписи JWT (HS256). Не короче [`MIN_JWT_SECRET_LEN`] байт.
     pub jwt_secret: String,
     /// SMTP для писем, например `smtp://mailpit:1025` или `smtps://user:pass@smtp.example.com`.
@@ -140,6 +149,10 @@ impl Config {
             redis_url: var_or("REDIS_URL", "redis://localhost:6379"),
             meili_url: var_or("MEILI_URL", "http://localhost:7700"),
             meili_master_key: env::var("MEILI_MASTER_KEY").ok(),
+            cache_l1_ttl_secs: number_or("CACHE_L1_TTL_SECS", 30),
+            cache_l1_capacity: number_or("CACHE_L1_CAPACITY", 10_000),
+            cache_l2_ttl_secs: number_or("CACHE_L2_TTL_SECS", 86_400),
+            search_reindex_interval_secs: number_or("SEARCH_REINDEX_INTERVAL_SECS", 86_400),
             jwt_secret: jwt_secret_from_env(),
             smtp_url: env::var("SMTP_URL").ok().filter(|url| !url.is_empty()),
             mail_from: var_or("MAIL_FROM", "Nexus <no-reply@nexus.local>"),
@@ -162,6 +175,16 @@ impl Config {
 
 fn var_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Число из env. Неверное значение — не стартовать, а не молча взять дефолт.
+fn number_or(key: &str, default: u64) -> u64 {
+    match env::var(key) {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|_| panic!("{key} must be a non-negative integer, got {value:?}")),
+        Err(_) => default,
+    }
 }
 
 /// Короткий секрет подбирается перебором — лучше не стартовать вовсе.

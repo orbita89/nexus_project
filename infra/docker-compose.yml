@@ -4,7 +4,7 @@
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nexus_user}
@@ -13,7 +13,9 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # С 18-й версии образ хранит данные в /var/lib/postgresql/18/docker, том — на /var/lib/postgresql.
+      # Новое имя тома: старый (pgdata, PostgreSQL 17) 18-я версия не прочитает.
+      - pgdata18:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus_user} -d ${POSTGRES_DB:-nexus_db}"]
       interval: 5s
@@ -86,6 +88,11 @@ services:
       OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
       OAUTH_YANDEX_CLIENT_ID: ${OAUTH_YANDEX_CLIENT_ID:-}
       OAUTH_YANDEX_CLIENT_SECRET: ${OAUTH_YANDEX_CLIENT_SECRET:-}
+      # Постеры и трейлеры (nexus media fill|check, make media): TMDB — фильмы и сериалы,
+      # IGDB через приложение Twitch — игры. Без ключей ищутся только обложки книг и Rutube.
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID:-}
+      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET:-}
       BIND_ADDR: 0.0.0.0:8080
       RUST_LOG: ${RUST_LOG:-info,tower_http=debug}
       RUST_BACKTRACE: "1"
@@ -119,11 +126,14 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@postgres:5432/${POSTGRES_DB:-nexus_db}
       MEILI_URL: http://meilisearch:7700
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-nexus_dev_master_key}
+      REDIS_URL: redis://redis:6379
       CARGO_BUILD_JOBS: "2"
     depends_on:
       postgres:
         condition: service_healthy
       meilisearch:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   # Ловушка для писем в dev: всё, что отправляет приложение, видно на http://localhost:8025.
@@ -147,7 +157,7 @@ services:
       - app
 
 volumes:
-  pgdata:
+  pgdata18:
   redisdata:
   meilidata:
   cargo-registry:

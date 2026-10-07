@@ -2,12 +2,13 @@
 
 use super::nullable_param;
 use crate::entities::{detail_by_id, tags_of, CREDIT_COLUMNS};
+use crate::metadata;
 use crate::models::{
     AddCredit, CreateEntity, EntityCredit, EntityCreditRow, EntityDetail, EntityKind, SetTags, Tag,
     UpdateEntity,
 };
+use crate::search::{self, Touched};
 use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
-use crate::{metadata, search};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
@@ -63,7 +64,7 @@ pub async fn create(
     replace_tags(&mut tx, id, &req.tags).await?;
     tx.commit().await?;
 
-    search::sync(&state, &[id]).await;
+    search::sync(&state, Touched::entity(id)).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, slug = %req.slug, "entity created");
     Ok((
         StatusCode::CREATED,
@@ -127,6 +128,8 @@ pub async fn update(
         .map(|value| metadata::validate(kind, value))
         .transpose()?;
 
+    // До записи: старый slug, если он меняется.
+    let touched = Touched::collect(&state.db, &[id], &[]).await?;
     let updated = sqlx::query(
         "UPDATE entities SET
              slug = COALESCE($2, slug),
@@ -157,7 +160,7 @@ pub async fn update(
         return Err(AppError::NotFound);
     }
 
-    search::sync(&state, &[id]).await;
+    search::sync(&state, touched).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, "entity updated");
     Ok(Json(detail_by_id(&state.db, id).await?))
 }
@@ -179,6 +182,8 @@ pub async fn delete(
     AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
+    // До удаления: slug и участники (их карточки показывают сущность).
+    let touched = Touched::collect(&state.db, &[id], &[]).await?;
     let deleted = sqlx::query("DELETE FROM entities WHERE id = $1")
         .bind(id)
         .execute(&state.db)
@@ -186,7 +191,7 @@ pub async fn delete(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    search::sync(&state, &[id]).await;
+    search::sync(&state, touched).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, "entity deleted");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -222,7 +227,7 @@ pub async fn set_tags(
     replace_tags(&mut tx, id, &req.tags).await?;
     tx.commit().await?;
 
-    search::sync(&state, &[id]).await;
+    search::sync(&state, Touched::collect(&state.db, &[id], &[]).await?).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, tags = ?req.tags, "entity tags set");
     Ok(Json(tags_of(&state.db, id).await?))
 }
@@ -322,7 +327,8 @@ pub async fn add_credit(
     .fetch_one(&state.db)
     .await?;
 
-    search::sync(&state, &[id]).await;
+    let touched = Touched::collect(&state.db, &[id], &[req.person_id]).await?;
+    search::sync(&state, touched).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, %credit_id, "credit added");
     Ok((StatusCode::CREATED, Json(row.into())))
 }
@@ -347,6 +353,8 @@ pub async fn delete_credit(
     AdminUser(admin): AdminUser,
     Path((id, credit_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<StatusCode> {
+    // До удаления: участник ещё связан с сущностью, его карточку тоже надо обновить.
+    let touched = Touched::collect(&state.db, &[id], &[]).await?;
     let deleted = sqlx::query("DELETE FROM entity_credits WHERE id = $2 AND entity_id = $1")
         .bind(id)
         .bind(credit_id)
@@ -355,7 +363,7 @@ pub async fn delete_credit(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    search::sync(&state, &[id]).await;
+    search::sync(&state, touched).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, %credit_id, "credit deleted");
     Ok(StatusCode::NO_CONTENT)
 }

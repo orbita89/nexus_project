@@ -1124,6 +1124,7 @@
           "catalog"
         ],
         "summary": "Карточка сущности: поля, теги и участники в порядке титров.",
+        "description": "Читается из кэша (память, Redis) и Meilisearch, после правок в админке — сразу свежая.",
         "operationId": "get_entity",
         "parameters": [
           {
@@ -1150,6 +1151,16 @@
           },
           "404": {
             "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Карточки нет в кэше, а Meilisearch недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -1220,6 +1231,7 @@
           "catalog"
         ],
         "summary": "Карточка человека: данные и все его работы любых типов, новые сверху.",
+        "description": "Читается из кэша (память, Redis) и Meilisearch, после правок в админке — сразу свежая.",
         "operationId": "get_person",
         "parameters": [
           {
@@ -1246,6 +1258,16 @@
           },
           "404": {
             "description": "Не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Карточки нет в кэше, а Meilisearch недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -1820,6 +1842,26 @@
               "null"
             ],
             "example": "CD Projekt"
+          },
+          "trailers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TrailerSource"
+            },
+            "description": "Трейлер: источники по приоритету, фронтенд показывает первый доступный у зрителя.",
+            "example": [
+              {
+                "id": "n9xhJrPXop4",
+                "provider": "youtube"
+              },
+              {
+                "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4",
+                "provider": "rutube"
+              }
+            ]
           }
         },
         "additionalProperties": false
@@ -1877,6 +1919,26 @@
             "example": 155,
             "maximum": 10000,
             "minimum": 1
+          },
+          "trailers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TrailerSource"
+            },
+            "description": "Трейлер: источники по приоритету, фронтенд показывает первый доступный у зрителя.",
+            "example": [
+              {
+                "id": "n9xhJrPXop4",
+                "provider": "youtube"
+              },
+              {
+                "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4",
+                "provider": "rutube"
+              }
+            ]
           }
         },
         "additionalProperties": false
@@ -2253,6 +2315,26 @@
                 "type": "null"
               }
             ]
+          },
+          "trailers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TrailerSource"
+            },
+            "description": "Трейлер: источники по приоритету, фронтенд показывает первый доступный у зрителя.",
+            "example": [
+              {
+                "id": "n9xhJrPXop4",
+                "provider": "youtube"
+              },
+              {
+                "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4",
+                "provider": "rutube"
+              }
+            ]
           }
         },
         "additionalProperties": false
@@ -2333,6 +2415,31 @@
           "slug": {
             "type": "string",
             "example": "sci-fi"
+          }
+        }
+      },
+      "TrailerProvider": {
+        "type": "string",
+        "description": "Видеосервис трейлера. Фронтенд сам строит адрес плеера по провайдеру и id, поэтому в БД не\nпопадает произвольный URL (и чужой домен в iframe).",
+        "enum": [
+          "youtube",
+          "rutube"
+        ]
+      },
+      "TrailerSource": {
+        "type": "object",
+        "description": "Источник трейлера. На входе можно передать и просто ссылку на видео — провайдер и id\nопределятся сами; в `id` тоже допустима ссылка.",
+        "required": [
+          "provider",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "n9xhJrPXop4"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/TrailerProvider"
           }
         }
       },

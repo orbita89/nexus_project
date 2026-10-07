@@ -98,7 +98,7 @@ state.events.publish(Event::new(
 - Новая миграция — новый файл `migrations/<YYYYMMDDHHMMSS>_<name>.sql`. Применяется при старте.
   **Применённые файлы не редактировать**, только новая миграция.
 - Модуль работает **только со своими таблицами**. Чьи таблицы чьи — в `documents/modules/*.md`.
-- Соглашения: `uuid` PK (`gen_random_uuid()`), `timestamptz`, триггер `set_updated_at()`, `slug` для URL,
+- Соглашения: `uuid` PK (`DEFAULT uuidv7()`), `timestamptz`, триггер `set_updated_at()`, `slug` для URL,
   поиск по подстроке — `pg_trgm`. citext-колонки в `SELECT` приводить к `::text`, а в `WHERE` сравнивать с `$1::citext`.
 
 ## Тесты (обязательны на каждый эндпоинт)
@@ -135,6 +135,100 @@ state.events.publish(Event::new(
 ## Промт для новой сессии
 
 Скопируйте в новую сессию Claude Code, открытую в `/home/dev/nexus_project`.
+
+### catalog: трёхуровневый кэш карточек (готов, для истории)
+
+```
+Проект Nexus — модульный монолит на Rust (axum 0.8, sqlx 0.8, PostgreSQL 17, Meilisearch 1.15,
+Redis 7). Перед работой прочитай: documents/architecture.md («Кэш чтения» — решение),
+documents/modules/catalog.md («Кэш карточек» — уровни, ключи, ошибки, таблица записи; «Поиск» —
+как сейчас устроен индекс), documents/for-other-modules.md (правила, тесты, DoD).
+Работаем в новой ветке от main.
+
+Задача: трёхуровневый кэш для карточек GET /catalog/entities/{slug} и GET /catalog/people/{slug}.
+
+РЕШЕНИЯ ПРИНЯТЫ, НЕ ПЕРЕСМАТРИВАТЬ И НЕ ПРЕДЛАГАТЬ АЛЬТЕРНАТИВЫ:
+- цепочка строго L1 moka → L2 Redis → L3 Meilisearch. В PostgreSQL чтение карточки НЕ ходит:
+  * есть в L1 → ответ;
+  * нет в L1, есть в L2 → записать в L1, ответ;
+  * нет в L2, есть в L3 → записать в L2 и L1, ответ;
+  * нет в L3 → 404 (не кэшировать); Meilisearch недоступен/ошибка/поиск выключен → 503
+    (AppError::Unavailable), при этом попадания в L1/L2 отдаются как обычно;
+- L1: moka::future::Cache, TTL 30 с, до 10 000 записей. L2: Redis, JSON, TTL 24 ч;
+- запись в Meili после правки в админке — как сейчас через search::sync, плюс редкий полный
+  реиндекс по расписанию как страховка;
+- кэшируем только карточки сущностей и людей; списки, теги и EntityDirectory читают из БД;
+- схема ответа карточек и GET /search не меняются (в OpenAPI только новый ответ 503).
+
+L3 — Meilisearch:
+- в документ индекса entities (search.rs: SearchDoc, load_docs) добавить поле card — полный
+  EntityDetail, собранный теми же запросами, что сейчас entities::get + detail (SQL не дублировать,
+  вынести общую функцию); card не в searchableAttributes; slug добавить в filterableAttributes;
+- GET /search запрашивает только поля выдачи (attributesToRetrieve), card в ответ не попадает;
+- чтение карточки: POST /indexes/{index}/documents/fetch, filter slug = "…", limit 1,
+  fields ["card"] (экранировать кавычки в slug);
+- люди — отдельный индекс people: документ { id, slug, full_name, card }, где card — PersonDetail
+  (как GET /people/{slug}: человек и фильмография); slug filterable, full_name searchable;
+  ключ кэша nexus:v1:catalog:person:{slug};
+- связи: карточка человека показывает его работы, карточка сущности — участников, поэтому
+  правка сущности обновляет и карточки её участников, правка человека — карточки его работ.
+
+shared (libs/shared/src/cache.rs, по образцу shared::search: Option<Arc<Inner>>, disabled(),
+is_enabled()):
+- трейты для подмены в тестах (через async-trait, см. shared::directory;
+  #[cfg_attr(test, mockall::automock)]): L2Store { get, set_ex, del, del_pattern } и источник L3
+  (в catalog — трейт EntityProvider { get_entity(slug) -> Result<Option<EntityDetail>, _> },
+  реализация MeiliEntityProvider);
+- RedisStore на deadpool-redis, каждая операция с таймаутом ~100 мс; ошибка, таймаут или битый
+  JSON → tracing::warn! и переход к L3 (битый ключ — DEL), без паник и без 5xx из-за Redis;
+- запись в L1 сразу, в L2 — tokio::spawn через TaskTracker (ответ не ждёт Redis; в тестах
+  wait_pending() вместо sleep); одновременные промахи по ключу схлопываются (try_get_with);
+- invalidate(keys): L1 + DEL в Redis, повторный DEL через ~2 с в фоне;
+- ключи nexus:v1:catalog:entity:{slug}; префикс ключей настраивается (для тестов);
+- Config через var_or: CACHE_L1_TTL_SECS=30, CACHE_L1_CAPACITY=10000, CACHE_L2_TTL_SECS=86400,
+  SEARCH_REINDEX_INTERVAL_SECS=86400 (0 — выключено); redis_url уже есть; поле cache в AppState.
+Зависимости: moka (future), deadpool-redis, tokio-util (TaskTracker), dev — mockall.
+
+Запись (порядок обязателен): commit в БД → search::sync обновляет Meili и ЖДЁТ применения задачи
+(call_and_wait, сейчас sync задачу не ждёт) → invalidate L1/L2 → ответ. Иначе промах между
+сбросом и применением снова положит в L2 старую карточку из Meili на сутки. Ошибка sync — warning,
+запись остаётся (как сейчас). Точки — таблица в catalog.md; особо:
+- смена slug → сбросить и старый ключ; при удалении slug'и взять до удаления;
+- человек: sync и сброс при ЛЮБОМ update (сейчас sync только при смене имени, а slug и фото
+  человека есть в card);
+- nexus media (отдельный процесс) — так же через sync + invalidate.
+
+Реиндекс: при старте (уже есть), по расписанию (tokio interval, SEARCH_REINDEX_INTERVAL_SECS) и
+POST /admin/search/reindex. По расписанию — только один инстанс: блокировка в Redis SET NX EX.
+После swap — del_pattern nexus:v1:catalog:entity:* в Redis и очистка L1.
+
+Тесты (главное — доказать, что цепочка работает):
+- unit на моках mockall (MockL2Store, MockEntityProvider), проверять число вызовов (times):
+  1) холодный старт: L1 пусто, L2 get → None, L3 вызван ровно 1 раз; после wait_pending ключ
+     в L1 и вызван set_ex в L2 с этим JSON;
+  2) L1 hit: второй запрос — ни L2, ни L3 не вызываются;
+  3) L1 истёк, L2 hit: TTL L1 50 мс из конфига + sleep (tokio::time::advance на часы moka НЕ
+     влияет); L2 get вызван, L3 НЕ вызван, значение снова в L1;
+  4) L2 miss → L3 hit → записано и в L2, и в L1; следующий запрос из L1;
+  5) L3 None → 404, ничего не записано ни в L1, ни в L2;
+  6) L3 ошибка → 503; L1/L2 hit при упавшем L3 → 200;
+  7) L2 ошибка/таймаут → идём в L3, 200, без паники; битый JSON в L2 → L3 + DEL;
+  8) N параллельных промахов → L3 ровно 1 раз;
+  9) invalidate → следующий запрос снова в L2/L3.
+- интеграционные в app/tests/catalog.rs с настоящими Postgres, Redis и Meili (test-utils:
+  with_cache с префиксом test_{uuid}_ как with_search; все тесты, читающие карточку, теперь
+  через Ctx::with_search, иначе 503):
+  создание в админке → карточка сразу 200; admin update → свежая карточка (не из L1/L2);
+  смена slug → старый 404; правка фото человека видна в карточке; удаление → 404;
+  данные в Redis под ключом после первого запроса; Redis по недоступному адресу → 200 из Meili;
+  поиск выключен → 503; ответ GET /search не содержит card; реиндекс сбрасывает ключи Redis.
+- CI: сервис redis:7-alpine и REDIS_URL в .github/workflows/ci.yml, значение по умолчанию в Makefile.
+
+Готово, когда: DoD этого файла, make ci проходит, documents/api/*.json без изменений, в
+architecture.md и catalog.md 🕓 заменены на ✅, описано, что получилось, и поправлена строка
+«Остальной каталог от Meilisearch не зависит». Перед кодом покажи план и спроси о неясном
+(в рамках принятых решений).
+```
 
 ### social: форум (готов, для истории)
 

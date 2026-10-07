@@ -21,3 +21,4 @@ sqlx = { workspace = true }
 tower = { workspace = true }
 http-body-util = { workspace = true }
 uuid = { workspace = true }
+tokio = { workspace = true }
