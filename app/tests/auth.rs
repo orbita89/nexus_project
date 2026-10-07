@@ -101,6 +101,17 @@ impl Ctx {
             .await
     }
 
+    /// Сдвигает замены refresh-токенов за окно повтора: повтор старого токена — уже кража.
+    async fn age_rotations(&self) {
+        sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = revoked_at - interval '1 minute'
+             WHERE revoked_at IS NOT NULL",
+        )
+        .execute(&self.pool)
+        .await
+        .unwrap();
+    }
+
     /// Пользователь с ролью; возвращает access-токен с этой ролью.
     async fn login_as(&self, username: &str, role: &str) -> String {
         self.register_verified(username).await;
@@ -424,6 +435,8 @@ async fn reusing_revoked_refresh_token_revokes_all_sessions(pool: PgPool) {
         .json()["refresh_token"]
         .clone();
 
+    ctx.age_rotations().await;
+
     let response = ctx
         .post("/refresh", json!({ "refresh_token": stolen }))
         .await;
@@ -433,6 +446,36 @@ async fn reusing_revoked_refresh_token_revokes_all_sessions(pool: PgPool) {
         .post("/refresh", json!({ "refresh_token": fresh }))
         .await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+}
+
+/// Ответ на `/refresh` потерян (вкладку перезагрузили) — повтор старого токена в окне
+/// выдаёт новую пару, а неполученные токены отзываются. Сессия остаётся одна.
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn refresh_retry_within_grace_window_rotates_lost_token(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let first = ctx.register_verified("neo").await["refresh_token"].clone();
+    let refresh =
+        |token: &serde_json::Value| ctx.post("/refresh", json!({ "refresh_token": token }));
+
+    // Ответы потеряны дважды подряд.
+    let lost = refresh(&first).await.json()["refresh_token"].clone();
+    let lost_again = refresh(&first).await.json()["refresh_token"].clone();
+
+    let response = refresh(&first).await;
+    assert_eq!(response.status, StatusCode::OK);
+    let current = response.json()["refresh_token"].clone();
+    let access_token = access(&response.json());
+
+    let response = ctx
+        .call(Method::GET, "/sessions", None, &access_token)
+        .await;
+    assert_eq!(response.json().as_array().unwrap().len(), 1);
+
+    // Окно прошло — тот же повтор уже кража.
+    ctx.age_rotations().await;
+    assert_eq!(refresh(&lost).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(refresh(&current).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(refresh(&lost_again).await.status, StatusCode::UNAUTHORIZED);
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR")]

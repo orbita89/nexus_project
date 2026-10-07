@@ -155,19 +155,25 @@ pub async fn refresh(
         return Err(AppError::Unauthorized);
     };
 
-    if token.revoked_at.is_some() {
-        // Заменённый при обновлении токен пришёл снова — его украли (или клиент сломан).
-        // Отозванный выходом — просто недействителен.
-        if token.replaced_by.is_some() {
-            session::revoke_all(&mut tx, token.user_id, None).await?;
-            tx.commit().await?;
-            tracing::warn!(user_id = %token.user_id, "rotated refresh token reused, all sessions revoked");
+    // Какую строку заменяет новая пара: обычно сам токен, при повторе в окне — живой конец цепочки.
+    let rotated = match (token.revoked_at, token.replaced_by) {
+        (None, _) if token.expires_at > Utc::now() => token.id,
+        (None, _) => return Err(AppError::Unauthorized),
+        // Отозванный выходом или завершением сессии — просто недействителен.
+        (Some(_), None) => return Err(AppError::Unauthorized),
+        (Some(revoked_at), Some(successor)) => {
+            match reusable_chain_tail(&mut tx, revoked_at, successor).await? {
+                Some(tail) => tail,
+                None => {
+                    // Заменённый токен пришёл снова — его украли (или клиент сломан).
+                    session::revoke_all(&mut tx, token.user_id, None).await?;
+                    tx.commit().await?;
+                    tracing::warn!(user_id = %token.user_id, "rotated refresh token reused, all sessions revoked");
+                    return Err(AppError::Unauthorized);
+                }
+            }
         }
-        return Err(AppError::Unauthorized);
-    }
-    if token.expires_at <= Utc::now() {
-        return Err(AppError::Unauthorized);
-    }
+    };
 
     let Some(user) = users::by_id(&mut tx, token.user_id)
         .await?
@@ -182,12 +188,44 @@ pub async fn refresh(
              replaced_by = (SELECT id FROM refresh_tokens WHERE token_hash = $2)
          WHERE id = $1",
     )
-    .bind(token.id)
+    .bind(rotated)
     .bind(crypto::hash_token(&tokens.refresh_token))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
     Ok(Json(tokens))
+}
+
+/// Повтор заменённого токена в течение [`session::REFRESH_REUSE_GRACE_SECS`] после замены —
+/// не кража: клиент не получил ответ (вкладку закрыли или перезагрузили, пока `/refresh` был
+/// в пути), возможно несколько раз подряд. Тогда заменяется живой конец цепочки `replaced_by`,
+/// сессия остаётся одна. Возвращает его id, если повтор допустим.
+async fn reusable_chain_tail(
+    conn: &mut sqlx::PgConnection,
+    revoked_at: DateTime<Utc>,
+    successor: Uuid,
+) -> AppResult<Option<Uuid>> {
+    let grace = chrono::Duration::seconds(session::REFRESH_REUSE_GRACE_SECS);
+    if revoked_at + grace <= Utc::now() {
+        return Ok(None);
+    }
+    let id = sqlx::query_scalar(
+        "WITH RECURSIVE chain AS (
+             SELECT id, revoked_at, replaced_by, 1 AS depth FROM refresh_tokens WHERE id = $1
+             UNION ALL
+             SELECT r.id, r.revoked_at, r.replaced_by, c.depth + 1
+             FROM refresh_tokens r JOIN chain c ON r.id = c.replaced_by
+             WHERE c.revoked_at IS NOT NULL AND c.depth < 16
+         )
+         SELECT id FROM refresh_tokens
+         WHERE id = (SELECT id FROM chain WHERE revoked_at IS NULL)
+           AND revoked_at IS NULL AND expires_at > now()
+         FOR UPDATE",
+    )
+    .bind(successor)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(id)
 }
 
 /// Выход: отзывает refresh-токен. Access-токен доживает свои ≤15 минут.
