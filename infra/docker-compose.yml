@@ -43,6 +43,10 @@ services:
     environment:
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-nexus_dev_master_key}
       MEILI_ENV: development
+      # Без ограничений индексация берёт до 2/3 RAM и потоки на все ядра, а память после пика
+      # не отдаёт: прогон тестов каталога поднимал Meilisearch с 50 MiB до 2,8 GiB.
+      MEILI_MAX_INDEXING_MEMORY: ${MEILI_MAX_INDEXING_MEMORY:-256Mb}
+      MEILI_MAX_INDEXING_THREADS: ${MEILI_MAX_INDEXING_THREADS:-2}
     ports:
       - "7700:7700"
     volumes:
