@@ -98,7 +98,7 @@ state.events.publish(Event::new(
 - Новая миграция — новый файл `migrations/<YYYYMMDDHHMMSS>_<name>.sql`. Применяется при старте.
   **Применённые файлы не редактировать**, только новая миграция.
 - Модуль работает **только со своими таблицами**. Чьи таблицы чьи — в `documents/modules/*.md`.
-- Соглашения: `uuid` PK (`gen_random_uuid()`), `timestamptz`, триггер `set_updated_at()`, `slug` для URL,
+- Соглашения: `uuid` PK (`DEFAULT uuidv7()`), `timestamptz`, триггер `set_updated_at()`, `slug` для URL,
   поиск по подстроке — `pg_trgm`. citext-колонки в `SELECT` приводить к `::text`, а в `WHERE` сравнивать с `$1::citext`.
 
 ## Тесты (обязательны на каждый эндпоинт)

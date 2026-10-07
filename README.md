@@ -38,7 +38,7 @@
   | `realtime` | `/ws`          | WebSocket: уведомления, присутствие, чат                  | echo-WebSocket         |
 
 - **Схема БД**: первая миграция `migrations/20260916022500_init_schema.sql` (подробнее ниже).
-- **Dev-окружение в Docker Compose**: PostgreSQL 17, Redis 7, Meilisearch 1.15, приложение с hot-reload через `cargo watch` и nginx в качестве reverse proxy.
+- **Dev-окружение в Docker Compose**: PostgreSQL 18, Redis 7, Meilisearch 1.15, приложение с hot-reload через `cargo watch` и nginx в качестве reverse proxy.
 
 ## Структура
 

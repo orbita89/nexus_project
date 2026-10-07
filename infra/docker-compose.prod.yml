@@ -12,14 +12,16 @@ name: "nexus-${NEXUS_ENV:?NEXUS_ENV is required (staging or production)}"
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nexus}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-nexus}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # С 18-й версии образ хранит данные в /var/lib/postgresql/18/docker, том — на /var/lib/postgresql.
+      # Новое имя тома: старый (pgdata, PostgreSQL 17) 18-я версия не прочитает.
+      - pgdata18:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus}"]
       interval: 5s
@@ -105,6 +107,6 @@ services:
       - app
 
 volumes:
-  pgdata:
+  pgdata18:
   redisdata:
   meilidata:

@@ -43,6 +43,41 @@ async fn migrations_create_schema(pool: PgPool) {
     }
 }
 
+/// Первичные ключи — UUID v7: у всех uuid-колонок с генерацией по умолчанию — `uuidv7()`.
+/// Новая таблица с `gen_random_uuid()` (v4) уронит тест.
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn uuid_keys_default_to_v7(pool: PgPool) {
+    let defaults: Vec<(String, String)> = sqlx::query_as(
+        "SELECT table_name || '.' || column_name, column_default
+         FROM information_schema.columns
+         WHERE table_schema = 'public' AND data_type = 'uuid' AND column_default IS NOT NULL
+         ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(defaults.len() >= 11, "{defaults:?}");
+    for (column, default) in &defaults {
+        assert_eq!(default, "uuidv7()", "{column}");
+    }
+
+    // Новые строки получают v7, и ключи растут в порядке вставки.
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let id: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO tags (slug, name) VALUES ($1, $1) RETURNING id")
+                .bind(format!("tag-{i}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(id.get_version_num(), 7, "{id}");
+        ids.push(id);
+    }
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(ids, sorted);
+}
+
 /// Одного и того же режиссёра (роль без персонажа) нельзя добавить к фильму дважды.
 #[sqlx::test(migrator = "nexus::MIGRATOR")]
 async fn entity_credits_rejects_duplicate_role_without_character(pool: PgPool) {

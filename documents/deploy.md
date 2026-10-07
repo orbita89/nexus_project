@@ -78,6 +78,22 @@ docker compose -f infra/docker-compose.prod.yml --env-file infra/.env.prod up -d
 `ignore_missing` (схема при этом должна оставаться совместимой со старым кодом — миграции только
 добавляют, как и требует правило проекта).
 
+### Мажорное обновление PostgreSQL
+
+Данные одной мажорной версии другая не читает. Поэтому у каждой версии свой том (`pgdata18` для
+PostgreSQL 18), и старый том новая версия не подхватит по ошибке.
+
+- **Dev:** после `make up` база пустая — `make seed`. Старый том (`infra_pgdata`) можно удалить:
+  `docker volume rm infra_pgdata`.
+- **Сервер с данными:** перед сменой образа выгрузить базу старой версией, после — загрузить в новую:
+
+  ```bash
+  docker compose ... exec -T postgres pg_dumpall -U "$POSTGRES_USER" > nexus-pg17.sql   # старый образ
+  # сменить образ в docker-compose.prod.yml, docker compose ... up -d postgres
+  docker compose ... exec -T postgres psql -U "$POSTGRES_USER" -d postgres < nexus-pg17.sql
+  docker compose ... up -d app
+  ```
+
 ### Проверка локально (без сервера)
 
 Собрать образ и поднять прод-конфигурацию рядом с dev, на другом порту:

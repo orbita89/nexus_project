@@ -4,7 +4,7 @@
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nexus_user}
@@ -13,7 +13,9 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # С 18-й версии образ хранит данные в /var/lib/postgresql/18/docker, том — на /var/lib/postgresql.
+      # Новое имя тома: старый (pgdata, PostgreSQL 17) 18-я версия не прочитает.
+      - pgdata18:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus_user} -d ${POSTGRES_DB:-nexus_db}"]
       interval: 5s
@@ -155,7 +157,7 @@ services:
       - app
 
 volumes:
-  pgdata:
+  pgdata18:
   redisdata:
   meilidata:
   cargo-registry:
