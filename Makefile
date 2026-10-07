@@ -3,10 +3,11 @@
 
 DATABASE_URL ?= postgres://nexus_user:nexus_password@localhost:5432/nexus_db
 export DATABASE_URL
-# Тесты поиска ходят в Meilisearch из make up.
+# Тесты поиска и карточек каталога ходят в Meilisearch и Redis из make up.
 MEILI_URL ?= http://localhost:7700
 MEILI_MASTER_KEY ?= nexus_dev_master_key
-export MEILI_URL MEILI_MASTER_KEY
+REDIS_URL ?= redis://localhost:6379
+export MEILI_URL MEILI_MASTER_KEY REDIS_URL
 
 COMPOSE = docker compose -f infra/docker-compose.yml
 # Контейнер с тулчейном (сервис tools) от пользователя хоста: Rust на машине не нужен.

@@ -21,3 +21,9 @@ tokio = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 reqwest = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+shared = { workspace = true, features = ["mock"] }
+mockall = { workspace = true }
+futures-util = { workspace = true }

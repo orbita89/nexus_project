@@ -124,11 +124,14 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@postgres:5432/${POSTGRES_DB:-nexus_db}
       MEILI_URL: http://meilisearch:7700
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-nexus_dev_master_key}
+      REDIS_URL: redis://redis:6379
       CARGO_BUILD_JOBS: "2"
     depends_on:
       postgres:
         condition: service_healthy
       meilisearch:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   # Ловушка для писем в dev: всё, что отправляет приложение, видно на http://localhost:8025.

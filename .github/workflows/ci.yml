@@ -41,7 +41,7 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      # Тесты поиска каталога (app/tests/catalog.rs).
+      # Поиск и карточки каталога (app/tests/catalog.rs).
       meilisearch:
         image: getmeili/meilisearch:v1.15
         env:
@@ -54,10 +54,21 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      # Кэш карточек каталога (L2).
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     env:
       DATABASE_URL: postgres://nexus_user:nexus_password@localhost:5432/nexus_db
       MEILI_URL: http://localhost:7700
       MEILI_MASTER_KEY: nexus_ci_master_key
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v5
       - run: rustup show active-toolchain || rustup toolchain install

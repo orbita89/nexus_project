@@ -34,6 +34,8 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         print!("{report}");
+        // Повторное удаление карточек из Redis (см. shared::cache) — до выхода процесса.
+        state.cache.wait_pending().await;
         return Ok(());
     }
 

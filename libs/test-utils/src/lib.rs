@@ -4,12 +4,14 @@ use axum::body::Body;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
+use shared::cache::{Cache, CacheSettings, L2Store, RedisStore};
 use shared::directory::Directories;
 use shared::mail::{Mailer, Outbox};
 use shared::search::Search;
 use shared::{AppState, Config};
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::time::Duration;
 use tower::ServiceExt;
 
 /// Состояние приложения поверх тестовой БД (например, из `#[sqlx::test]`).
@@ -48,6 +50,84 @@ pub fn with_search(mut state: AppState) -> AppState {
         &prefix,
     );
     state
+}
+
+/// Включает кэш карточек с Redis из `REDIS_URL` и своим префиксом ключей.
+pub fn with_cache(state: AppState) -> AppState {
+    let url = state.config.redis_url.clone();
+    with_cache_at(state, &url)
+}
+
+/// То же с другим адресом Redis (например, недоступным).
+pub fn with_cache_at(mut state: AppState, redis_url: &str) -> AppState {
+    let mut settings = CacheSettings::from_config(&state.config);
+    settings.prefix = format!("test_{}:", uuid::Uuid::new_v4().simple());
+    // Повторное удаление при инвалидации не должно задерживать тесты.
+    settings.redelete_after = Duration::from_millis(20);
+    // Фоновая запись, завершившаяся после Cleanup, не останется в Redis надолго.
+    settings.l2_ttl = Duration::from_secs(300);
+    state.cache = Cache::redis(settings, redis_url);
+    state
+}
+
+/// Удаляет индексы Meilisearch и ключи Redis теста при drop — и когда тест упал.
+/// Drop синхронный, поэтому очистка идёт в отдельном потоке со своим runtime.
+pub struct Cleanup {
+    meili_url: String,
+    meili_key: Option<String>,
+    index_prefix: Option<String>,
+    redis_url: String,
+    key_prefix: Option<String>,
+}
+
+impl Cleanup {
+    pub fn new(state: &AppState) -> Self {
+        Self {
+            meili_url: state.config.meili_url.clone(),
+            meili_key: state.config.meili_master_key.clone(),
+            index_prefix: state.search.is_enabled().then(|| state.search.index("")),
+            redis_url: state.config.redis_url.clone(),
+            key_prefix: state.cache.is_enabled().then(|| state.cache.full_key("")),
+        }
+    }
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let meili_url = self.meili_url.clone();
+        let meili_key = self.meili_key.clone();
+        let index_prefix = self.index_prefix.clone().filter(|p| !p.is_empty());
+        let redis_url = self.redis_url.clone();
+        let key_prefix = self.key_prefix.clone().filter(|p| !p.is_empty());
+        let cleanup = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("cleanup runtime");
+            runtime.block_on(async {
+                if let Some(prefix) = index_prefix {
+                    let search = Search::new(&meili_url, meili_key, "");
+                    if let Ok(indexes) = search.call(Method::GET, "/indexes?limit=1000", None).await
+                    {
+                        let uids = indexes["results"].as_array().cloned().unwrap_or_default();
+                        for uid in uids.iter().filter_map(|index| index["uid"].as_str()) {
+                            if uid.starts_with(&prefix) {
+                                let _ = search
+                                    .call(Method::DELETE, &format!("/indexes/{uid}"), None)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+                if let Some(prefix) = key_prefix {
+                    if let Ok(store) = RedisStore::new(&redis_url) {
+                        let _ = store.del_prefix(&prefix).await;
+                    }
+                }
+            });
+        });
+        let _ = cleanup.join();
+    }
 }
 
 /// Пул, который никогда не подключается. Для тестов, которым БД не нужна.

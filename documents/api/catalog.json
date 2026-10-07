@@ -1124,6 +1124,7 @@
           "catalog"
         ],
         "summary": "Карточка сущности: поля, теги и участники в порядке титров.",
+        "description": "Читается из кэша (память, Redis) и Meilisearch, после правок в админке — сразу свежая.",
         "operationId": "get_entity",
         "parameters": [
           {
@@ -1150,6 +1151,16 @@
           },
           "404": {
             "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Карточки нет в кэше, а Meilisearch недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -1220,6 +1231,7 @@
           "catalog"
         ],
         "summary": "Карточка человека: данные и все его работы любых типов, новые сверху.",
+        "description": "Читается из кэша (память, Redis) и Meilisearch, после правок в админке — сразу свежая.",
         "operationId": "get_person",
         "parameters": [
           {
@@ -1246,6 +1258,16 @@
           },
           "404": {
             "description": "Не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Карточки нет в кэше, а Meilisearch недоступен",
             "content": {
               "application/json": {
                 "schema": {

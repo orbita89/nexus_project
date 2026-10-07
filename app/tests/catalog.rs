@@ -1,34 +1,56 @@
-//! Каталог: чтение без авторизации, админка, поиск через Meilisearch.
+//! Каталог: чтение без авторизации, админка, поиск и карточки через Meilisearch и кэш.
 //!
-//! Данные — `fixtures/catalog.sql`. Тесты поиска ходят в настоящий Meilisearch (`MEILI_URL`,
-//! `MEILI_MASTER_KEY`, поднимается `make up`), у каждого теста свой префикс индексов.
+//! Данные — `fixtures/catalog.sql`. Карточки (`/entities/{slug}`, `/people/{slug}`) читаются
+//! L1 → Redis → Meilisearch, поэтому тесты ходят в настоящие Meilisearch и Redis (`MEILI_URL`,
+//! `MEILI_MASTER_KEY`, `REDIS_URL`, поднимаются `make up`). У каждого теста свои префиксы
+//! индексов и ключей; [`test_utils::Cleanup`] удаляет их и при падении теста.
 
 use axum::http::{Method, StatusCode};
 use serde_json::{json, Value};
 use shared::{AppState, Config};
 use sqlx::PgPool;
 use std::time::Duration;
-use test_utils::{request, TestResponse};
+use test_utils::{request, Cleanup, TestResponse};
 
 const CATALOG: &str = "/api/v1/catalog";
 
 struct Ctx {
     state: AppState,
+    _cleanup: Cleanup,
 }
 
 impl Ctx {
-    fn new(pool: PgPool) -> Self {
-        let mut config = Config::from_env();
-        config.dev_login = true;
-        let (state, _) = test_utils::state_with_config(pool, config);
-        Self { state }
+    fn from_state(state: AppState) -> Self {
+        Self {
+            _cleanup: Cleanup::new(&state),
+            state,
+        }
     }
 
-    fn with_search(pool: PgPool) -> Self {
-        let ctx = Self::new(pool);
-        Self {
-            state: test_utils::with_search(ctx.state),
-        }
+    fn base(pool: PgPool) -> AppState {
+        let mut config = Config::from_env();
+        config.dev_login = true;
+        test_utils::state_with_config(pool, config).0
+    }
+
+    /// Как в проде: Meilisearch и Redis включены, индексы построены из фикстур.
+    async fn new(pool: PgPool) -> Self {
+        let ctx = Self::unindexed(pool);
+        catalog::search::reindex(&ctx.state)
+            .await
+            .expect("reindex fixtures");
+        ctx
+    }
+
+    /// Meilisearch и Redis включены, индексов ещё нет.
+    fn unindexed(pool: PgPool) -> Self {
+        let state = test_utils::with_cache(test_utils::with_search(Self::base(pool)));
+        Self::from_state(state)
+    }
+
+    /// Без Meilisearch и кэша.
+    fn without_search(pool: PgPool) -> Self {
+        Self::from_state(Self::base(pool))
     }
 
     async fn send(
@@ -122,16 +144,6 @@ impl Ctx {
             .to_string()
     }
 
-    /// Удаляет индексы теста в Meilisearch.
-    async fn drop_search_index(&self) {
-        let index = self.state.search.index(catalog::search::INDEX);
-        let _ = self
-            .state
-            .search
-            .call(Method::DELETE, &format!("/indexes/{index}"), None)
-            .await;
-    }
-
     /// Ждёт, пока поиск вернёт ожидаемое: индексация в Meilisearch асинхронная.
     async fn search_until(&self, path: &str, done: impl Fn(&Value) -> bool) -> Value {
         for _ in 0..100 {
@@ -161,7 +173,7 @@ fn slugs(page: &Value) -> Vec<&str> {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn list_entities_newest_first_with_pagination(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
 
     let page = ctx.get_ok("/entities").await;
     assert_eq!(page["total"], 5);
@@ -194,7 +206,7 @@ async fn list_entities_newest_first_with_pagination(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn list_entities_filters(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
 
     let page = ctx.get_ok("/entities?kind=movie").await;
     assert_eq!(slugs(&page), ["dune-part-two-2024", "dune-2021"]);
@@ -230,7 +242,7 @@ async fn list_entities_filters(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn list_entities_rejects_bad_filters(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
 
     assert_eq!(
         ctx.get("/entities?kind=comic").await.status,
@@ -250,7 +262,7 @@ async fn list_entities_rejects_bad_filters(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn entity_card_with_tags_and_credits(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
 
     let card = ctx.get_ok("/entities/dune-2021").await;
     assert_eq!(card["kind"], "movie");
@@ -279,7 +291,7 @@ async fn entity_card_with_tags_and_credits(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn people_list_and_search(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
 
     let page = ctx.get_ok("/people").await;
     assert_eq!(page["total"], 4);
@@ -305,7 +317,7 @@ async fn people_list_and_search(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn person_card_with_filmography(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
 
     let card = ctx.get_ok("/people/denis-villeneuve").await;
     assert_eq!(card["full_name"], "Дени Вильнёв");
@@ -328,7 +340,7 @@ async fn person_card_with_filmography(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn tags_list_with_counts(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
 
     let tags = ctx.get_ok("/tags").await;
     let tags: Vec<(&str, i64)> = tags
@@ -350,7 +362,7 @@ async fn tags_list_with_counts(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn admin_endpoints_require_admin(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
     let user = ctx.token("reader@example.com", "user").await;
     let author = ctx.token("writer@example.com", "author").await;
     let id = ctx.entity_id("dune-2021").await;
@@ -393,7 +405,7 @@ async fn admin_endpoints_require_admin(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn create_entity(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
 
     let (status, card) = ctx
         .admin_send(
@@ -442,7 +454,7 @@ async fn create_entity(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn create_entity_validates(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
     let base = json!({ "kind": "movie", "slug": "new-movie", "title": "Фильм" });
     let with = |patch: Value| {
         let mut body = base.clone();
@@ -508,7 +520,7 @@ async fn create_entity_validates(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn update_entity(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
     let id = ctx.entity_id("dune-2021").await;
     let path = format!("/admin/entities/{id}");
 
@@ -580,7 +592,7 @@ async fn update_entity(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn delete_entity(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
     let id = ctx.entity_id("dune-2021").await;
 
     let (status, body) = ctx
@@ -604,7 +616,7 @@ async fn delete_entity(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn set_entity_tags(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
     let id = ctx.entity_id("dune-2021").await;
     let path = format!("/admin/entities/{id}/tags");
 
@@ -659,7 +671,7 @@ async fn set_entity_tags(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn add_and_delete_credits(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
     let entity = ctx.entity_id("dune-part-two-2024").await;
     let person = ctx.person_id("timothee-chalamet").await;
     let path = format!("/admin/entities/{entity}/credits");
@@ -739,7 +751,7 @@ async fn add_and_delete_credits(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn people_crud(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
 
     let (status, person) = ctx
         .admin_send(
@@ -814,7 +826,7 @@ async fn people_crud(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn tags_crud(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
 
     let (status, tag) = ctx
         .admin_send(
@@ -879,7 +891,7 @@ async fn tags_crud(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn search_returns_503_when_meilisearch_is_off(pool: PgPool) {
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::without_search(pool);
 
     let response = ctx.get("/search?q=dune").await;
     assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -905,7 +917,7 @@ async fn search_returns_503_when_meilisearch_is_off(pool: PgPool) {
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn search_after_reindex(pool: PgPool) {
-    let ctx = Ctx::with_search(pool);
+    let ctx = Ctx::unindexed(pool);
 
     // Индекса ещё нет — пустая выдача, а не ошибка.
     let page = ctx.get_ok("/search?q=dune").await;
@@ -961,13 +973,11 @@ async fn search_after_reindex(pool: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["indexed"], 5);
     assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 3);
-
-    ctx.drop_search_index().await;
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn search_follows_admin_changes(pool: PgPool) {
-    let ctx = Ctx::with_search(pool);
+    let ctx = Ctx::new(pool).await;
     let (status, _) = ctx
         .admin_send(Method::POST, "/admin/search/reindex", None)
         .await;
@@ -1011,8 +1021,278 @@ async fn search_follows_admin_changes(pool: PgPool) {
         .await;
     ctx.search_until("/search?q=neuromancer", |p| p["total"] == 0)
         .await;
+}
 
-    ctx.drop_search_index().await;
+// ---------------------------------------------------------------- кэш карточек
+
+impl Ctx {
+    /// Значение ключа карточки в Redis.
+    async fn redis_card(&self, key: &str) -> Option<String> {
+        use shared::cache::L2Store;
+        self.state.cache.wait_pending().await;
+        let store = shared::cache::RedisStore::new(&self.state.config.redis_url).unwrap();
+        store.get(&self.state.cache.full_key(key)).await.unwrap()
+    }
+
+    /// Второй инстанс приложения: те же Meilisearch и Redis, свой пустой L1.
+    fn other_instance(&self) -> AppState {
+        let mut state = self.state.clone();
+        let mut settings = shared::cache::CacheSettings::from_config(&state.config);
+        settings.prefix = self.state.cache.full_key("");
+        state.cache = shared::cache::Cache::redis(settings, &state.config.redis_url);
+        state
+    }
+}
+
+async fn get_on(state: &AppState, path: &str) -> TestResponse {
+    let app = nexus::build_app(state.clone());
+    request(app, Method::GET, &format!("{CATALOG}{path}"), None, None).await
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn card_goes_l1_then_l2_then_meilisearch(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let key = "catalog:entity:dune-2021";
+    assert_eq!(ctx.redis_card(key).await, None);
+
+    // Холодный старт: из Meilisearch, копия в L1 и Redis.
+    let card = ctx.get_ok("/entities/dune-2021").await;
+    assert_eq!(card["title"], "Дюна");
+    assert!(card["credits"].as_array().unwrap().len() >= 2, "{card}");
+    assert!(ctx.state.cache.peek_l1(key).await.is_some());
+    let cached: Value = serde_json::from_str(&ctx.redis_card(key).await.unwrap()).unwrap();
+    assert_eq!(cached, card);
+
+    // Без Meilisearch: этот инстанс отдаёт из L1, второй (пустой L1) — из Redis.
+    let index = ctx.state.search.index(catalog::search::INDEX);
+    ctx.state
+        .search
+        .call_and_wait(Method::DELETE, &format!("/indexes/{index}"), None)
+        .await
+        .unwrap();
+    assert_eq!(ctx.get_ok("/entities/dune-2021").await, card);
+    let other = ctx.other_instance();
+    let response = get_on(&other, "/entities/dune-2021").await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.json(), card);
+    assert!(other.cache.peek_l1(key).await.is_some(), "L2 hit fills L1");
+
+    // Есть в БД, но нет ни в кэше, ни в Meilisearch — 404 (в БД чтение не ходит), не кэшируется.
+    assert_eq!(
+        ctx.get("/entities/dune-part-two-2024").await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        ctx.redis_card("catalog:entity:dune-part-two-2024").await,
+        None
+    );
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn admin_changes_are_visible_in_cached_cards(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let other = ctx.other_instance();
+    let id = ctx.entity_id("dune-2021").await;
+    ctx.get_ok("/people/denis-villeneuve").await;
+
+    // Правка сущности: свежая карточка сразу, и на другом инстансе (Redis сброшен).
+    let (status, _) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}"),
+            Some(json!({ "title": "Дюна (2021)" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        ctx.get_ok("/entities/dune-2021").await["title"],
+        "Дюна (2021)"
+    );
+    assert_eq!(
+        get_on(&other, "/entities/dune-2021").await.json()["title"],
+        "Дюна (2021)"
+    );
+    // Карточка режиссёра показывает название сущности.
+    let person = ctx.get_ok("/people/denis-villeneuve").await;
+    let titles: Vec<&str> = person["credits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["entity"]["title"].as_str().unwrap())
+        .collect();
+    assert!(titles.contains(&"Дюна (2021)"), "{person}");
+
+    // Смена slug: старый адрес — 404, новый — 200.
+    ctx.admin_send(
+        Method::PATCH,
+        &format!("/admin/entities/{id}"),
+        Some(json!({ "slug": "dune-movie" })),
+    )
+    .await;
+    assert_eq!(
+        ctx.get("/entities/dune-2021").await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(ctx.redis_card("catalog:entity:dune-2021").await, None);
+    assert_eq!(ctx.get_ok("/entities/dune-movie").await["id"], id.as_str());
+
+    // Фото человека (не имя) видно в карточке сущности.
+    let villeneuve = ctx.person_id("denis-villeneuve").await;
+    ctx.admin_send(
+        Method::PATCH,
+        &format!("/admin/people/{villeneuve}"),
+        Some(json!({ "photo_url": "https://example.com/dv.jpg" })),
+    )
+    .await;
+    let card = ctx.get_ok("/entities/dune-movie").await;
+    let photo = card["credits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["person"]["slug"] == "denis-villeneuve")
+        .unwrap()["person"]["photo_url"]
+        .clone();
+    assert_eq!(photo, "https://example.com/dv.jpg");
+    assert_eq!(
+        ctx.get_ok("/people/denis-villeneuve").await["photo_url"],
+        "https://example.com/dv.jpg"
+    );
+
+    // Удаление: 404, и из фильмографии пропала.
+    ctx.admin_send(Method::DELETE, &format!("/admin/entities/{id}"), None)
+        .await;
+    assert_eq!(
+        ctx.get("/entities/dune-movie").await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_on(&other, "/entities/dune-movie").await.status,
+        StatusCode::NOT_FOUND
+    );
+    let person = ctx.get_ok("/people/denis-villeneuve").await;
+    assert!(
+        !person["credits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["entity"]["id"] == id.as_str()),
+        "{person}"
+    );
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn new_cards_are_available_right_after_create(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    // 404 не кэшируется: после создания карточка сразу есть.
+    assert_eq!(
+        ctx.get("/entities/neuromancer").await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        ctx.get("/people/william-gibson").await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    let (status, entity) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/entities",
+            Some(json!({ "kind": "book", "slug": "neuromancer", "title": "Нейромант" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, person) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/people",
+            Some(json!({ "slug": "william-gibson", "full_name": "Уильям Гибсон" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        ctx.get_ok("/entities/neuromancer").await["title"],
+        "Нейромант"
+    );
+    assert_eq!(
+        ctx.get_ok("/people/william-gibson").await["credits"],
+        json!([])
+    );
+
+    // Участник: обе карточки обновлены.
+    let (status, _) = ctx
+        .admin_send(
+            Method::POST,
+            &format!("/admin/entities/{}/credits", entity["id"].as_str().unwrap()),
+            Some(json!({ "person_id": person["id"], "role": "author" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let card = ctx.get_ok("/entities/neuromancer").await;
+    assert_eq!(card["credits"][0]["person"]["slug"], "william-gibson");
+    let card = ctx.get_ok("/people/william-gibson").await;
+    assert_eq!(card["credits"][0]["entity"]["slug"], "neuromancer");
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn cards_work_without_redis(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let mut state = ctx.state.clone();
+    state = test_utils::with_cache_at(state, "redis://127.0.0.1:1");
+    let started = std::time::Instant::now();
+    let response = get_on(&state, "/entities/dune-2021").await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.json()["title"], "Дюна");
+    assert_eq!(
+        get_on(&state, "/people/denis-villeneuve").await.status,
+        StatusCode::OK
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "waited for Redis"
+    );
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn cards_are_503_without_meilisearch(pool: PgPool) {
+    let ctx = Ctx::without_search(pool);
+    for path in ["/entities/dune-2021", "/people/denis-villeneuve"] {
+        let response = ctx.get(path).await;
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+    }
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn search_hits_have_no_card_and_reindex_clears_cache(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let page = ctx.get_ok("/search?q=dune").await;
+    for item in page["items"].as_array().unwrap() {
+        assert!(item.get("card").is_none(), "{item}");
+    }
+
+    ctx.get_ok("/entities/dune-2021").await;
+    ctx.get_ok("/people/denis-villeneuve").await;
+    assert!(ctx.redis_card("catalog:entity:dune-2021").await.is_some());
+    assert!(ctx
+        .redis_card("catalog:person:denis-villeneuve")
+        .await
+        .is_some());
+
+    let (status, _) = ctx
+        .admin_send(Method::POST, "/admin/search/reindex", None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ctx.redis_card("catalog:entity:dune-2021").await, None);
+    assert_eq!(
+        ctx.redis_card("catalog:person:denis-villeneuve").await,
+        None
+    );
+    assert!(ctx
+        .state
+        .cache
+        .peek_l1("catalog:entity:dune-2021")
+        .await
+        .is_none());
+    ctx.get_ok("/entities/dune-2021").await;
 }
 
 // ---------------------------------------------------------------- дамп
@@ -1032,7 +1312,7 @@ async fn seed_catalog_is_valid(pool: PgPool) {
         assert_eq!(normalized, metadata, "{slug}: metadata is not normalized");
     }
 
-    let ctx = Ctx::new(pool);
+    let ctx = Ctx::new(pool).await;
     for kind in ["movie", "series", "book", "game"] {
         let page = ctx.get_ok(&format!("/entities?kind={kind}")).await;
         assert!(page["total"].as_i64().unwrap() >= 5, "few {kind}s");

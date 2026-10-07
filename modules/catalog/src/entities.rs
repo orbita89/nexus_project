@@ -1,10 +1,12 @@
 //! Сущности: список с фильтрами и карточка. Чтение без авторизации.
 
+use crate::cards::{self, CardKind, MeiliCards};
 use crate::models::{
     page_bounds, Entity, EntityCredit, EntityCreditRow, EntityDetail, EntitySummary,
     ListEntitiesQuery, Page, Tag, ENTITY_COLUMNS, ENTITY_SUMMARY_COLUMNS,
 };
 use axum::extract::State;
+use axum::response::Response;
 use axum::Json;
 use shared::error::ErrorBody;
 use shared::extract::{Path, Query};
@@ -72,29 +74,24 @@ pub async fn list(
 }
 
 /// Карточка сущности: поля, теги и участники в порядке титров.
+///
+/// Читается из кэша (память, Redis) и Meilisearch, после правок в админке — сразу свежая.
 #[utoipa::path(
     get, operation_id = "get_entity", path = "/entities/{slug}", tag = "catalog",
     params(("slug" = String, Path, description = "slug сущности", example = "dune-2021")),
     responses(
         (status = 200, description = "Карточка", body = EntityDetail),
         (status = 404, description = "Не найдена", body = ErrorBody),
+        (status = 503, description = "Карточки нет в кэше, а Meilisearch недоступен", body = ErrorBody),
     )
 )]
-pub async fn get(
-    State(state): State<AppState>,
-    Path(slug): Path<String>,
-) -> AppResult<Json<EntityDetail>> {
-    let entity: Option<Entity> = sqlx::query_as(&format!(
-        "SELECT {ENTITY_COLUMNS} FROM entities e WHERE e.slug = $1"
-    ))
-    .bind(&slug)
-    .fetch_optional(&state.db)
-    .await?;
-    let entity = entity.ok_or(AppError::NotFound)?;
-    Ok(Json(detail(&state.db, entity).await?))
+pub async fn get(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
+    let source = MeiliCards(state.search.clone());
+    let card = cards::read(&state.cache, &source, CardKind::Entity, &slug).await?;
+    Ok(cards::json_response(card))
 }
 
-/// Карточка по id (для админских ответов).
+/// Карточка по id из БД: для админских ответов и для документа поискового индекса.
 pub(crate) async fn detail_by_id(
     db: impl PgExecutor<'_> + Copy,
     id: Uuid,

@@ -197,6 +197,8 @@ Dependabot раз в неделю предлагает обновления за
 - [x] `social`: форум, интересы, лента
 - [x] `realtime`: авторизация сокетов и рассылка событий вместо echo (внутри одного процесса
       хватит `tokio::sync::broadcast`, Redis pub/sub понадобится при нескольких инстансах)
+- [x] Кэш карточек каталога (сущности и люди): L1 moka → L2 Redis → L3 Meilisearch, перестройка
+      индексов по расписанию ([architecture.md](documents/architecture.md#кэш-чтения-))
 - [ ] Логи: JSON-формат, request id, `/health/live` и `/health/ready`, graceful shutdown
 - [x] Документация: CONTRIBUTING, architecture, ADR
 - [x] Публикация образа в GHCR, конфигурация staging/прода ([deploy.md](documents/deploy.md))

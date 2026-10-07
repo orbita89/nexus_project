@@ -255,7 +255,12 @@ pub async fn run_with<F: Finder>(
         }
         report.changes.push(change);
     }
-    search::sync(state, &touched).await;
+    // Обложки есть и в карточках людей: Touched добавит участников.
+    search::sync(
+        state,
+        search::Touched::collect(&state.db, &touched, &[]).await?,
+    )
+    .await;
     Ok(report)
 }
 
