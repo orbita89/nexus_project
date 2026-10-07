@@ -8,6 +8,7 @@
 | [modules/catalog.md](modules/catalog.md) | Модуль `catalog`: сущности (фильмы, книги, ...), люди, теги |
 | [modules/social.md](modules/social.md) | Модуль `social`: подписки, рецензии, коллекции, форум |
 | [modules/realtime.md](modules/realtime.md) | Модуль `realtime`: WebSocket, живые уведомления |
+| [benchmarks/catalog-cards.md](benchmarks/catalog-cards.md) | Замер карточек каталога: кэш L1/L2/L3 против PostgreSQL, dev и release |
 | [for-other-modules.md](for-other-modules.md) | **Для разработчиков модулей:** как пользоваться авторизацией, встроить модуль, писать тесты + промт для новой сессии |
 | [api/openapi.json](api/openapi.json), [api/catalog.json](api/catalog.json) | Контракт API: основной и каталог, по файлу на вкладку Swagger (генерируются из кода, проверяются тестом). Удобнее смотреть в Swagger: http://localhost/docs |
 
