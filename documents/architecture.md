@@ -20,7 +20,7 @@
 | Почта | **lettre** (SMTP), в dev — **Mailpit** | Подтверждение email, вход по ссылке, сброс пароля |
 | OAuth | **reqwest** | Вход через Google, GitHub, Яндекс ID |
 | Rate limiting | **governor** | Защита входа и писем от перебора |
-| Фронтенд | SvelteKit 3 (Svelte 5), TypeScript, Tailwind CSS + DaisyUI. 🕓 | Ещё не выбран |
+| Фронтенд | SvelteKit 3 (Svelte 5), TypeScript, Tailwind CSS + DaisyUI. | Как самые простой и быстрый вариант |
 
 ## Модульный монолит
 
@@ -183,6 +183,6 @@ PostgreSQL без кэша: публичные страницы отдаёт ф�
 
 - Отдельные Postgres-схемы для модулей (`auth.users`, `catalog.entities`, ...): граница модулей
   будет видна и на уровне БД. Решить до появления реальных данных.
-- Фронтенд: React или Flutter.
+- Фронтенд: SvelteKit 3 (Svelte 5), TypeScript, Tailwind CSS + DaisyUI.
 - Где деплоить: на старте — VPS с `docker-compose.prod.yml` ([deploy.md](deploy.md)); Kubernetes —
   когда одной машины станет мало. Сервера пока нет.
