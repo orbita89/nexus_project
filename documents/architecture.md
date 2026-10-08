@@ -20,7 +20,7 @@
 | Почта | **lettre** (SMTP), в dev — **Mailpit** | Подтверждение email, вход по ссылке, сброс пароля |
 | OAuth | **reqwest** | Вход через Google, GitHub, Яндекс ID |
 | Rate limiting | **governor** | Защита входа и писем от перебора |
-| Фронтенд | React или Flutter 🕓 | Ещё не выбран |
+| Фронтенд | SvelteKit 3 (Svelte 5), TypeScript, Tailwind CSS + DaisyUI. 🕓 | Ещё не выбран |
 
 ## Модульный монолит
 
