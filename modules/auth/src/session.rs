@@ -12,6 +12,8 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 pub const REFRESH_TOKEN_TTL_DAYS: i32 = 30;
+/// Сколько секунд после замены повтор старого refresh-токена не считается кражей.
+pub const REFRESH_REUSE_GRACE_SECS: i64 = 30;
 
 /// Откуда пришёл запрос — для списка активных сессий.
 pub struct ClientInfo {
