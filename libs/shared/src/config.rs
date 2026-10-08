@@ -31,6 +31,11 @@ pub struct Config {
     pub mail_from: String,
     /// Адрес фронтенда: из него строятся ссылки в письмах.
     pub app_base_url: String,
+    /// Фронтенд для ревалидации статики ([`crate::isr`]), как его видит бэкенд:
+    /// `ISR_URL=http://web:3000`. Не задан (или нет `ISR_SECRET`) — ревалидация пропускается.
+    pub isr_url: Option<String>,
+    /// `Authorization: Bearer` для `/_isr/revalidate`, `ISR_SECRET`.
+    pub isr_secret: Option<String>,
     /// Swagger UI на `/docs` и схема на `/api-docs/openapi.json`. `API_DOCS=false` — выключить.
     pub api_docs: bool,
     /// Публичный адрес API (как его видит браузер): из него строится redirect_uri для OAuth.
@@ -159,6 +164,10 @@ impl Config {
             app_base_url: var_or("APP_BASE_URL", "http://localhost")
                 .trim_end_matches('/')
                 .to_string(),
+            isr_url: env::var("ISR_URL").ok().filter(|url| !url.is_empty()),
+            isr_secret: env::var("ISR_SECRET")
+                .ok()
+                .filter(|secret| !secret.is_empty()),
             api_docs: var_or("API_DOCS", "true") != "false",
             public_url: var_or("PUBLIC_URL", "http://localhost")
                 .trim_end_matches('/')

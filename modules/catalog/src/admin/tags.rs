@@ -2,7 +2,7 @@
 
 use super::affected_entities;
 use crate::models::{CreateTag, Tag, UpdateTag};
-use crate::search::{self, Touched};
+use crate::publish::{self, Touched};
 use crate::validate::{self, MAX_TITLE};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -90,7 +90,12 @@ pub async fn update(
 
     // slug и название тега есть в поисковых документах сущностей.
     let ids = affected_entities(&state.db, TAG_ENTITIES, id).await?;
-    search::sync(&state, Touched::collect(&state.db, &ids, &[]).await?).await;
+    publish::run(
+        &state,
+        Touched::collect(&state.db, &ids, &[]).await?,
+        |_| {},
+    )
+    .await;
     tracing::info!(admin_id = %admin.id, tag_id = %id, "tag updated");
     Ok(Json(tag))
 }
@@ -121,7 +126,7 @@ pub async fn delete(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    search::sync(&state, touched).await;
+    publish::run(&state, touched, |_| {}).await;
     tracing::info!(admin_id = %admin.id, tag_id = %id, "tag deleted");
     Ok(StatusCode::NO_CONTENT)
 }

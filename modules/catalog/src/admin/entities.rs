@@ -7,16 +7,18 @@ use crate::models::{
     AddCredit, CreateEntity, EntityCredit, EntityCreditRow, EntityDetail, EntityKind, SetTags, Tag,
     UpdateEntity,
 };
-use crate::search::{self, Touched};
+use crate::publish::{self, PublishEvent, Step, StepEvent, StepStatus, Touched};
 use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::Response;
 use axum::Json;
 use serde_json::json;
 use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use sqlx::PgConnection;
+use std::time::Instant;
 use uuid::Uuid;
 
 /// Создать сущность. `metadata` проверяется по схеме своего `kind`.
@@ -64,7 +66,7 @@ pub async fn create(
     replace_tags(&mut tx, id, &req.tags).await?;
     tx.commit().await?;
 
-    search::sync(&state, Touched::entity(id)).await;
+    publish::run(&state, Touched::entity(id), |_| {}).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, slug = %req.slug, "entity created");
     Ok((
         StatusCode::CREATED,
@@ -94,6 +96,53 @@ pub async fn update(
     Path(id): Path<Uuid>,
     JsonBody(req): JsonBody<UpdateEntity>,
 ) -> AppResult<Json<EntityDetail>> {
+    let touched = write_update(&state, id, req).await?;
+    tracing::info!(admin_id = %admin.id, entity_id = %id, "entity updated");
+    publish::run(&state, touched, |_| {}).await;
+    Ok(Json(detail_by_id(&state.db, id).await?))
+}
+
+/// То же, что `PATCH /admin/entities/{id}`, но ход публикации приходит потоком
+/// `text/event-stream` — для лога в админке.
+///
+/// Неверные поля, чужой slug и отсутствующая сущность — обычные `400`/`409`/`404` с JSON, до
+/// потока. Если запись в БД прошла — `200` и поток событий [`PublishEvent`]: `plan` (все шаги),
+/// `step` (`running`, затем `done`/`skipped`/`failed` для `db`, `search`, `isr`), последним
+/// `done` с карточкой. Тип события — и в поле `event:`, и в `type` внутри `data:`.
+///
+/// Публикация доводится до конца, даже если клиент закрыл соединение. `EventSource` не умеет
+/// PATCH и заголовки: читать через `fetch` и `response.body`.
+#[utoipa::path(
+    patch, operation_id = "update_entity_stream", path = "/admin/entities/{id}/stream",
+    tag = "catalog-admin",
+    security(("bearer" = [])),
+    params(("id" = Uuid, Path, description = "id сущности")),
+    request_body = UpdateEntity,
+    responses(
+        (status = 200, description = "Записано в БД; дальше поток событий публикации",
+            content_type = "text/event-stream", body = PublishEvent),
+        (status = 400, description = "Неверные поля или metadata", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Не найдена", body = ErrorBody),
+        (status = 409, description = "slug занят", body = ErrorBody),
+    )
+)]
+pub async fn update_stream(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<Uuid>,
+    JsonBody(req): JsonBody<UpdateEntity>,
+) -> AppResult<Response> {
+    let started = Instant::now();
+    let touched = write_update(&state, id, req).await?;
+    tracing::info!(admin_id = %admin.id, entity_id = %id, "entity updated");
+    let db = StepEvent::finished(Step::Db, StepStatus::Done, "БД обновлена", started);
+    Ok(publish::stream_entity(state, touched, db, id))
+}
+
+/// Проверка и запись правки в БД. Возвращает затронутое (собрано до записи: старый slug).
+async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResult<Touched> {
     let kind: Option<EntityKind> = sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
@@ -159,10 +208,7 @@ pub async fn update(
     if updated.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-
-    search::sync(&state, touched).await;
-    tracing::info!(admin_id = %admin.id, entity_id = %id, "entity updated");
-    Ok(Json(detail_by_id(&state.db, id).await?))
+    Ok(touched)
 }
 
 /// Удалить сущность. Теги, участники, рецензии и элементы коллекций удаляются каскадно.
@@ -191,7 +237,7 @@ pub async fn delete(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    search::sync(&state, touched).await;
+    publish::run(&state, touched, |_| {}).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, "entity deleted");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -227,7 +273,12 @@ pub async fn set_tags(
     replace_tags(&mut tx, id, &req.tags).await?;
     tx.commit().await?;
 
-    search::sync(&state, Touched::collect(&state.db, &[id], &[]).await?).await;
+    publish::run(
+        &state,
+        Touched::collect(&state.db, &[id], &[]).await?,
+        |_| {},
+    )
+    .await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, tags = ?req.tags, "entity tags set");
     Ok(Json(tags_of(&state.db, id).await?))
 }
@@ -328,7 +379,7 @@ pub async fn add_credit(
     .await?;
 
     let touched = Touched::collect(&state.db, &[id], &[req.person_id]).await?;
-    search::sync(&state, touched).await;
+    publish::run(&state, touched, |_| {}).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, %credit_id, "credit added");
     Ok((StatusCode::CREATED, Json(row.into())))
 }
@@ -363,7 +414,7 @@ pub async fn delete_credit(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    search::sync(&state, touched).await;
+    publish::run(&state, touched, |_| {}).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, %credit_id, "credit deleted");
     Ok(StatusCode::NO_CONTENT)
 }

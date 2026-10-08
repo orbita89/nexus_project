@@ -69,6 +69,10 @@ services:
       SMTP_URL: ${SMTP_URL:?SMTP_URL is required (smtps://user:pass@host:465)}
       MAIL_FROM: ${MAIL_FROM:?MAIL_FROM is required}
       APP_BASE_URL: ${APP_BASE_URL:?APP_BASE_URL is required (адрес фронтенда)}
+      # Ревалидация статики фронтенда (POST {ISR_URL}/_isr/revalidate). Без них страницы
+      # карточек не пересобираются после правок в админке.
+      ISR_URL: ${ISR_URL:-}
+      ISR_SECRET: ${ISR_SECRET:-}
       PUBLIC_URL: ${PUBLIC_URL:?PUBLIC_URL is required (адрес API)}
       # Swagger UI: на staging удобно, на проде можно выключить.
       API_DOCS: ${API_DOCS:-false}

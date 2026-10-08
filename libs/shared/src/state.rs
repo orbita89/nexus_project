@@ -4,6 +4,7 @@ use crate::auth::Jwt;
 use crate::cache::{Cache, CacheSettings};
 use crate::directory::{Directories, EntityDirectory, InterestDirectory, UserDirectory};
 use crate::events::EventBus;
+use crate::isr::Isr;
 use crate::mail::Mailer;
 use crate::search::Search;
 use crate::Config;
@@ -19,8 +20,10 @@ pub struct AppState {
     pub mailer: Mailer,
     /// Meilisearch. В тестах по умолчанию выключен (`Search::disabled`).
     pub search: Search,
-    /// Кэш L1 (память) + L2 (Redis) для карточек каталога. В тестах по умолчанию выключен.
+    /// Кэш L1 (память) + L2 (Redis) для карточек людей. В тестах по умолчанию выключен.
     pub cache: Cache,
+    /// Ревалидация статики фронтенда. Выключена, если не заданы `ISR_URL` и `ISR_SECRET`.
+    pub isr: Isr,
     /// Сущности каталога для других модулей (реализует `catalog`).
     pub entities: Arc<dyn EntityDirectory>,
     /// Пользователи для других модулей (реализует `auth`).
@@ -36,6 +39,7 @@ impl AppState {
         let jwt = Jwt::new(config.jwt_secret.as_bytes());
         let search = Search::new(&config.meili_url, config.meili_master_key.clone(), "");
         let cache = Cache::redis(CacheSettings::from_config(&config), &config.redis_url);
+        let isr = Isr::from_config(&config);
         Self {
             config: Arc::new(config),
             db,
@@ -43,6 +47,7 @@ impl AppState {
             mailer,
             search,
             cache,
+            isr,
             entities: directories.entities,
             users: directories.users,
             interests: directories.interests,

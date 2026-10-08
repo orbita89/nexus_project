@@ -77,6 +77,10 @@ services:
       MAIL_FROM: ${MAIL_FROM:-Nexus <no-reply@nexus.local>}
       # Фронтенд: из него строятся ссылки в письмах.
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
+      # Ревалидация статики фронтенда после правок в админке: POST {ISR_URL}/_isr/revalidate.
+      # Пусто — шаг пропускается. Адрес — как его видит контейнер (dev-сервер на хосте:5173).
+      ISR_URL: ${ISR_URL:-}
+      ISR_SECRET: ${ISR_SECRET:-}
       # Публичный адрес API: из него строится redirect_uri для OAuth-провайдеров.
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost}
       # POST /api/v1/auth/dev/login — вход под любым пользователем. Только для dev, в проде false.

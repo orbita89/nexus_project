@@ -22,8 +22,9 @@ utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 reqwest = { workspace = true }
 async-trait = { workspace = true }
+# Поток событий публикации (SSE) из канала.
+futures-util = { workspace = true }
 
 [dev-dependencies]
 shared = { workspace = true, features = ["mock"] }
 mockall = { workspace = true }
-futures-util = { workspace = true }

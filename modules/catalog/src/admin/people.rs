@@ -2,7 +2,7 @@
 
 use super::nullable_param;
 use crate::models::{CreatePerson, Person, UpdatePerson, PERSON_COLUMNS};
-use crate::search::{self, Touched};
+use crate::publish::{self, Touched};
 use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -48,7 +48,7 @@ pub async fn create(
     .await
     .map_err(validate::conflict("slug is already taken"))?;
 
-    search::sync(&state, Touched::person(person.id)).await;
+    publish::run(&state, Touched::person(person.id), |_| {}).await;
     tracing::info!(admin_id = %admin.id, person_id = %person.id, "person created");
     Ok((StatusCode::CREATED, Json(person)))
 }
@@ -117,7 +117,7 @@ pub async fn update(
     .map_err(validate::conflict("slug is already taken"))?;
     let person = person.ok_or(AppError::NotFound)?;
 
-    search::sync(&state, touched).await;
+    publish::run(&state, touched, |_| {}).await;
     tracing::info!(admin_id = %admin.id, person_id = %id, "person updated");
     Ok(Json(person))
 }
@@ -147,7 +147,7 @@ pub async fn delete(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    search::sync(&state, touched).await;
+    publish::run(&state, touched, |_| {}).await;
     tracing::info!(admin_id = %admin.id, person_id = %id, "person deleted");
     Ok(StatusCode::NO_CONTENT)
 }

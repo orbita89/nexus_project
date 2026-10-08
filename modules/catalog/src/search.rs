@@ -1,22 +1,24 @@
-//! Поиск по каталогу через Meilisearch и L3 для карточек ([`crate::cards`]).
+//! Поиск по каталогу через Meilisearch и L3 для карточек людей ([`crate::cards`]).
 //!
 //! Источник правды — PostgreSQL, индексы производные:
-//! - `entities`: поля для поиска и выдачи и готовая карточка `card` (как `GET /entities/{slug}`);
+//! - `entities`: поля для поиска и выдачи. Индекс только для поиска: карточку сущности
+//!   (`GET /entities/{slug}`) он не отдаёт. Поле `card` в документе пока остаётся;
 //! - `people`: готовая карточка человека `card` (как `GET /people/{slug}`).
 //!
 //! После каждой записи в админке затронутые сущности и люди переотправляются в индексы
-//! ([`sync`]), sync ждёт, пока Meilisearch их применит, и только потом сбрасывает кэш карточек.
-//! Ошибка Meilisearch запись не отменяет, только пишется в лог.
+//! ([`update_index`] из [`crate::publish::run`]) с ожиданием применения. Ошибка Meilisearch
+//! запись не отменяет, только пишется в лог и в поток публикации.
 //!
 //! Полная перестройка ([`reindex`]) — при старте, по расписанию и `POST /admin/search/reindex`.
 //! Новые индексы строятся рядом и подменяют старые (swap), поиск не пустеет.
 
-use crate::cards::{CardKind, KEY_PREFIX};
+use crate::cards::KEY_PREFIX;
 use crate::entities::{check_year, detail_by_id};
 use crate::models::{
     page_bounds, EntityDetail, EntityKind, EntitySummary, Page, Person, PersonDetail,
     ReindexResult, SearchQuery, PERSON_COLUMNS,
 };
+use crate::publish::Touched;
 use crate::{people, validate};
 use axum::extract::State;
 use axum::http::Method;
@@ -63,7 +65,8 @@ struct SearchDoc {
     tag_names: Vec<String>,
     /// Имена участников: поиск («вильнёв» находит его фильмы).
     people: Vec<String>,
-    /// Карточка целиком: L3 для `GET /entities/{slug}`. Не ищется и не отдаётся поиском.
+    /// Карточка целиком. Никем не читается (карточка сущности — из БД и статики), пока
+    /// остаётся в документе. Не ищется и не отдаётся поиском.
     #[sqlx(skip)]
     card: Option<EntityDetail>,
 }
@@ -82,7 +85,6 @@ fn entity_settings() -> Value {
     json!({
         // Порядок задаёт вес: совпадение в названии важнее, чем в описании.
         "searchableAttributes": ["title", "original_title", "people", "tag_names", "description"],
-        // slug — для чтения карточки по slug.
         "filterableAttributes": ["kind", "tags", "year", "slug"],
     })
 }
@@ -153,117 +155,9 @@ async fn load_people_docs(
     Ok(docs)
 }
 
-/// Что затронула запись в каталоге: какие документы переотправить и какие карточки сбросить.
-///
-/// Связи раскрываются сами: у сущности — её участники (их карточки показывают сущность),
-/// у человека — его работы (их карточки показывают человека). Собирать **до** записи, если
-/// запись удаляет или меняет slug: старые slug'и запоминаются, чтобы сбросить их ключи.
-#[derive(Debug, Default)]
-pub struct Touched {
-    entities: Vec<Uuid>,
-    people: Vec<Uuid>,
-    /// Ключи кэша по slug'ам на момент сбора.
-    keys: Vec<String>,
-}
-
-impl Touched {
-    pub async fn collect(
-        db: &sqlx::PgPool,
-        entities: &[Uuid],
-        people: &[Uuid],
-    ) -> Result<Self, sqlx::Error> {
-        let people_of: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT person_id FROM entity_credits WHERE entity_id = ANY($1)",
-        )
-        .bind(entities)
-        .fetch_all(db)
-        .await?;
-        let entities_of: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT entity_id FROM entity_credits WHERE person_id = ANY($1)",
-        )
-        .bind(people)
-        .fetch_all(db)
-        .await?;
-        let mut touched = Self {
-            entities: merge(entities, entities_of),
-            people: merge(people, people_of),
-            keys: Vec::new(),
-        };
-        touched.keys = touched.current_keys(db).await?;
-        Ok(touched)
-    }
-
-    /// Новая сущность (до неё ничего не было в кэше).
-    pub fn entity(id: Uuid) -> Self {
-        Self {
-            entities: vec![id],
-            ..Self::default()
-        }
-    }
-
-    /// Новый человек.
-    pub fn person(id: Uuid) -> Self {
-        Self {
-            people: vec![id],
-            ..Self::default()
-        }
-    }
-
-    /// Ключи карточек по slug'ам, которые сейчас в БД.
-    async fn current_keys(&self, db: &sqlx::PgPool) -> Result<Vec<String>, sqlx::Error> {
-        let entity_slugs: Vec<String> =
-            sqlx::query_scalar("SELECT slug FROM entities WHERE id = ANY($1)")
-                .bind(&self.entities)
-                .fetch_all(db)
-                .await?;
-        let person_slugs: Vec<String> =
-            sqlx::query_scalar("SELECT slug FROM people WHERE id = ANY($1)")
-                .bind(&self.people)
-                .fetch_all(db)
-                .await?;
-        Ok(entity_slugs
-            .iter()
-            .map(|slug| CardKind::Entity.key(slug))
-            .chain(person_slugs.iter().map(|slug| CardKind::Person.key(slug)))
-            .collect())
-    }
-}
-
-fn merge(a: &[Uuid], b: Vec<Uuid>) -> Vec<Uuid> {
-    let mut ids: Vec<Uuid> = a.iter().copied().chain(b).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    ids
-}
-
-/// Переотправляет затронутое в индексы и ждёт применения, затем сбрасывает карточки в кэше
-/// (старые и новые slug'и). Вызывать после коммита. Ошибки только логируются: индекс догонит
-/// [`reindex`] по расписанию.
-pub async fn sync(state: &AppState, touched: Touched) {
-    if touched.entities.is_empty() && touched.people.is_empty() {
-        return;
-    }
-    if state.search.is_enabled() {
-        if let Err(error) = try_sync(state, &touched).await {
-            tracing::warn!(
-                %error,
-                entities = touched.entities.len(),
-                people = touched.people.len(),
-                "search index sync failed, run reindex"
-            );
-        }
-    }
-    let mut keys = touched.keys.clone();
-    match touched.current_keys(&state.db).await {
-        Ok(current) => keys.extend(current),
-        Err(error) => tracing::warn!(%error, "card cache keys lookup failed"),
-    }
-    keys.sort_unstable();
-    keys.dedup();
-    state.cache.invalidate(&keys).await;
-}
-
-async fn try_sync(state: &AppState, touched: &Touched) -> Result<(), BoxError> {
+/// Переотправляет затронутое в индексы и ждёт применения; удалённое из БД удаляет из индексов.
+/// Вызывается из [`crate::publish::run`] после коммита.
+pub(crate) async fn update_index(state: &AppState, touched: &Touched) -> Result<(), BoxError> {
     if !touched.entities.is_empty() {
         let docs = load_docs(&state.db, Some(&touched.entities)).await?;
         let present: Vec<Uuid> = docs.iter().map(|doc| doc.id).collect();

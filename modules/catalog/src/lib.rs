@@ -11,6 +11,7 @@ pub mod media;
 pub mod metadata;
 pub mod models;
 pub mod people;
+pub mod publish;
 pub mod search;
 pub mod tags;
 mod validate;
@@ -29,6 +30,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(search::search))
         .routes(routes!(admin::entities::create))
         .routes(routes!(admin::entities::update, admin::entities::delete))
+        .routes(routes!(admin::entities::update_stream))
         .routes(routes!(admin::entities::set_tags))
         .routes(routes!(admin::entities::add_credit))
         .routes(routes!(admin::entities::delete_credit))

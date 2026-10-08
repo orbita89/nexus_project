@@ -9,6 +9,7 @@ pub mod directory;
 pub mod error;
 pub mod events;
 pub mod extract;
+pub mod isr;
 pub mod mail;
 pub mod pagination;
 pub mod search;

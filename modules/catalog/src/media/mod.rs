@@ -16,7 +16,7 @@ pub use providers::{HttpFinder, Keys};
 
 use crate::metadata::{self, TrailerProvider, TrailerSource};
 use crate::models::EntityKind;
-use crate::search;
+use crate::publish::{self, Touched};
 use serde_json::Value;
 use shared::AppState;
 use std::fmt::{self, Write as _};
@@ -256,11 +256,8 @@ pub async fn run_with<F: Finder>(
         report.changes.push(change);
     }
     // Обложки есть и в карточках людей: Touched добавит участников.
-    search::sync(
-        state,
-        search::Touched::collect(&state.db, &touched, &[]).await?,
-    )
-    .await;
+    let touched = Touched::collect(&state.db, &touched, &[]).await?;
+    publish::run(state, touched, |_| {}).await;
     Ok(report)
 }
 

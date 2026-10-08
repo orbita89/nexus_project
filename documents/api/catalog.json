@@ -412,6 +412,105 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/entities/{id}/stream": {
+      "patch": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "То же, что `PATCH /admin/entities/{id}`, но ход публикации приходит потоком\n`text/event-stream` — для лога в админке.",
+        "description": "Неверные поля, чужой slug и отсутствующая сущность — обычные `400`/`409`/`404` с JSON, до\nпотока. Если запись в БД прошла — `200` и поток событий [`PublishEvent`]: `plan` (все шаги),\n`step` (`running`, затем `done`/`skipped`/`failed` для `db`, `search`, `isr`), последним\n`done` с карточкой. Тип события — и в поле `event:`, и в `type` внутри `data:`.\n\nПубликация доводится до конца, даже если клиент закрыл соединение. `EventSource` не умеет\nPATCH и заголовки: читать через `fetch` и `response.body`.",
+        "operationId": "update_entity_stream",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сущности",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEntity"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Записано в БД; дальше поток событий публикации",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishEvent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля или metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/entities/{id}/tags": {
       "put": {
         "tags": [
@@ -1124,7 +1223,7 @@
           "catalog"
         ],
         "summary": "Карточка сущности: поля, теги и участники в порядке титров.",
-        "description": "Читается из кэша (память, Redis) и Meilisearch, после правок в админке — сразу свежая.",
+        "description": "Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика\nфронтенда (SSG/ISR), сюда приходят её пересборка и админка.",
         "operationId": "get_entity",
         "parameters": [
           {
@@ -1151,16 +1250,6 @@
           },
           "404": {
             "description": "Не найдена",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Карточки нет в кэше, а Meilisearch недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -2255,6 +2344,102 @@
           }
         }
       },
+      "PlannedStep": {
+        "type": "object",
+        "description": "Шаг в событии `plan`.",
+        "required": [
+          "step",
+          "title"
+        ],
+        "properties": {
+          "step": {
+            "$ref": "#/components/schemas/Step"
+          },
+          "title": {
+            "type": "string",
+            "example": "Обновление поиска (Meilisearch)"
+          }
+        }
+      },
+      "PublishEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Первое: все шаги по порядку, чтобы сразу показать их ожидающими.",
+            "required": [
+              "steps",
+              "type"
+            ],
+            "properties": {
+              "steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PlannedStep"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan"
+                ]
+              }
+            }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/StepEvent",
+                "description": "Шаг начался или закончился."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "step"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Шаг начался или закончился."
+          },
+          {
+            "type": "object",
+            "description": "Последнее. `ok` — ни один шаг не упал; `entity` — карточка после записи (`null`, если\nсущность успели удалить).",
+            "required": [
+              "ok",
+              "type"
+            ],
+            "properties": {
+              "entity": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/EntityDetail"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "done"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Событие потока публикации (`text/event-stream`): `event:` — значение `type`, `data:` — весь\nэтот JSON."
+      },
       "ReindexResult": {
         "type": "object",
         "required": [
@@ -2366,6 +2551,55 @@
           }
         },
         "additionalProperties": false
+      },
+      "Step": {
+        "type": "string",
+        "description": "Шаг публикации.",
+        "enum": [
+          "db",
+          "search",
+          "isr"
+        ]
+      },
+      "StepEvent": {
+        "type": "object",
+        "description": "Состояние шага. На каждый шаг приходит `running`, затем итог.",
+        "required": [
+          "step",
+          "status",
+          "message"
+        ],
+        "properties": {
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Сколько шёл шаг; только у итога.",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string",
+            "description": "Строка для лога в админке.",
+            "example": "Meilisearch обновлён"
+          },
+          "status": {
+            "$ref": "#/components/schemas/StepStatus"
+          },
+          "step": {
+            "$ref": "#/components/schemas/Step"
+          }
+        }
+      },
+      "StepStatus": {
+        "type": "string",
+        "enum": [
+          "running",
+          "done",
+          "skipped",
+          "failed"
+        ]
       },
       "Tag": {
         "type": "object",

@@ -1,14 +1,16 @@
-//! Каталог: чтение без авторизации, админка, поиск и карточки через Meilisearch и кэш.
+//! Каталог: чтение без авторизации, админка, поиск, карточки людей через Meilisearch и кэш,
+//! публикация правок (поток событий и ревалидация статики фронтенда).
 //!
-//! Данные — `fixtures/catalog.sql`. Карточки (`/entities/{slug}`, `/people/{slug}`) читаются
+//! Данные — `fixtures/catalog.sql`. Карточки сущностей читаются из PostgreSQL, карточки людей —
 //! L1 → Redis → Meilisearch, поэтому тесты ходят в настоящие Meilisearch и Redis (`MEILI_URL`,
-//! `MEILI_MASTER_KEY`, `REDIS_URL`, поднимаются `make up`). У каждого теста свои префиксы
+//! `MEILI_MASTER_KEY`, `REDIS_URL`, поднимаются `make up`). Фронтенд для ISR — [`FakeIsr`]. У каждого теста свои префиксы
 //! индексов и ключей; [`test_utils::Cleanup`] удаляет их и при падении теста.
 
 use axum::http::{Method, StatusCode};
 use serde_json::{json, Value};
 use shared::{AppState, Config};
 use sqlx::PgPool;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use test_utils::{request, Cleanup, TestResponse};
 
@@ -1050,41 +1052,81 @@ async fn get_on(state: &AppState, path: &str) -> TestResponse {
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn card_goes_l1_then_l2_then_meilisearch(pool: PgPool) {
+async fn person_card_goes_l1_then_l2_then_meilisearch(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
-    let key = "catalog:entity:dune-2021";
+    let key = "catalog:person:denis-villeneuve";
     assert_eq!(ctx.redis_card(key).await, None);
 
     // Холодный старт: из Meilisearch, копия в L1 и Redis.
-    let card = ctx.get_ok("/entities/dune-2021").await;
-    assert_eq!(card["title"], "Дюна");
-    assert!(card["credits"].as_array().unwrap().len() >= 2, "{card}");
+    let card = ctx.get_ok("/people/denis-villeneuve").await;
+    assert_eq!(card["full_name"], "Дени Вильнёв");
+    assert!(!card["credits"].as_array().unwrap().is_empty(), "{card}");
     assert!(ctx.state.cache.peek_l1(key).await.is_some());
     let cached: Value = serde_json::from_str(&ctx.redis_card(key).await.unwrap()).unwrap();
     assert_eq!(cached, card);
 
     // Без Meilisearch: этот инстанс отдаёт из L1, второй (пустой L1) — из Redis.
-    let index = ctx.state.search.index(catalog::search::INDEX);
+    let index = ctx.state.search.index(catalog::search::PEOPLE_INDEX);
     ctx.state
         .search
         .call_and_wait(Method::DELETE, &format!("/indexes/{index}"), None)
         .await
         .unwrap();
-    assert_eq!(ctx.get_ok("/entities/dune-2021").await, card);
+    assert_eq!(ctx.get_ok("/people/denis-villeneuve").await, card);
     let other = ctx.other_instance();
-    let response = get_on(&other, "/entities/dune-2021").await;
+    let response = get_on(&other, "/people/denis-villeneuve").await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.json(), card);
     assert!(other.cache.peek_l1(key).await.is_some(), "L2 hit fills L1");
 
     // Есть в БД, но нет ни в кэше, ни в Meilisearch — 404 (в БД чтение не ходит), не кэшируется.
     assert_eq!(
-        ctx.get("/entities/dune-part-two-2024").await.status,
+        ctx.get("/people/timothee-chalamet").await.status,
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        ctx.redis_card("catalog:entity:dune-part-two-2024").await,
+        ctx.redis_card("catalog:person:timothee-chalamet").await,
         None
+    );
+}
+
+/// Карточка сущности — из PostgreSQL: ни кэша, ни Meilisearch, ни Redis.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn entity_card_reads_postgres_only(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let card = ctx.get_ok("/entities/dune-2021").await;
+    assert_eq!(card["title"], "Дюна");
+    assert!(ctx
+        .state
+        .cache
+        .peek_l1("catalog:entity:dune-2021")
+        .await
+        .is_none());
+    assert_eq!(ctx.redis_card("catalog:entity:dune-2021").await, None);
+
+    // Правка в обход API и без индекса видна сразу.
+    let index = ctx.state.search.index(catalog::search::INDEX);
+    ctx.state
+        .search
+        .call_and_wait(Method::DELETE, &format!("/indexes/{index}"), None)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE entities SET title = 'Дюна (SQL)' WHERE slug = 'dune-2021'")
+        .execute(&ctx.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        ctx.get_ok("/entities/dune-2021").await["title"],
+        "Дюна (SQL)"
+    );
+
+    // Без Meilisearch и с недоступным Redis — тоже 200.
+    let state = test_utils::with_cache_at(Ctx::base(ctx.state.db.clone()), "redis://127.0.0.1:1");
+    let response = get_on(&state, "/entities/dune-2021").await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        get_on(&state, "/entities/nope").await.status,
+        StatusCode::NOT_FOUND
     );
 }
 
@@ -1133,7 +1175,6 @@ async fn admin_changes_are_visible_in_cached_cards(pool: PgPool) {
         ctx.get("/entities/dune-2021").await.status,
         StatusCode::NOT_FOUND
     );
-    assert_eq!(ctx.redis_card("catalog:entity:dune-2021").await, None);
     assert_eq!(ctx.get_ok("/entities/dune-movie").await["id"], id.as_str());
 
     // Фото человека (не имя) видно в карточке сущности.
@@ -1253,12 +1294,12 @@ async fn cards_work_without_redis(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn cards_are_503_without_meilisearch(pool: PgPool) {
+async fn person_cards_are_503_without_meilisearch(pool: PgPool) {
     let ctx = Ctx::without_search(pool);
-    for path in ["/entities/dune-2021", "/people/denis-villeneuve"] {
-        let response = ctx.get(path).await;
-        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
-    }
+    let response = ctx.get("/people/denis-villeneuve").await;
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    // Сущности от Meilisearch не зависят.
+    ctx.get_ok("/entities/dune-2021").await;
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
@@ -1269,9 +1310,7 @@ async fn search_hits_have_no_card_and_reindex_clears_cache(pool: PgPool) {
         assert!(item.get("card").is_none(), "{item}");
     }
 
-    ctx.get_ok("/entities/dune-2021").await;
     ctx.get_ok("/people/denis-villeneuve").await;
-    assert!(ctx.redis_card("catalog:entity:dune-2021").await.is_some());
     assert!(ctx
         .redis_card("catalog:person:denis-villeneuve")
         .await
@@ -1281,7 +1320,6 @@ async fn search_hits_have_no_card_and_reindex_clears_cache(pool: PgPool) {
         .admin_send(Method::POST, "/admin/search/reindex", None)
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(ctx.redis_card("catalog:entity:dune-2021").await, None);
     assert_eq!(
         ctx.redis_card("catalog:person:denis-villeneuve").await,
         None
@@ -1289,10 +1327,296 @@ async fn search_hits_have_no_card_and_reindex_clears_cache(pool: PgPool) {
     assert!(ctx
         .state
         .cache
-        .peek_l1("catalog:entity:dune-2021")
+        .peek_l1("catalog:person:denis-villeneuve")
         .await
         .is_none());
-    ctx.get_ok("/entities/dune-2021").await;
+    ctx.get_ok("/people/denis-villeneuve").await;
+}
+
+// ---------------------------------------------------------------- публикация: поток и ISR
+
+/// Запросы к [`FakeIsr`]: заголовок `Authorization` и тело.
+type IsrRequests = Arc<Mutex<Vec<(Option<String>, Value)>>>;
+
+/// Фронтенд для ревалидации: принимает `POST /_isr/revalidate` и запоминает запросы.
+#[derive(Clone)]
+struct FakeIsr {
+    url: String,
+    requests: IsrRequests,
+}
+
+impl FakeIsr {
+    /// Отвечает `status` на каждый запрос.
+    async fn start(status: StatusCode) -> Self {
+        let requests = IsrRequests::default();
+        let recorded = requests.clone();
+        let app = axum::Router::new().route(
+            "/_isr/revalidate",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+                    let recorded = recorded.clone();
+                    async move {
+                        let auth = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        recorded.lock().unwrap().push((auth, body));
+                        status
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Self { url, requests }
+    }
+
+    fn attach(&self, ctx: &mut Ctx) {
+        ctx.state.isr = shared::isr::Isr::new(&self.url, "isr-test-secret");
+    }
+
+    /// Все пути из всех запросов, по порядку.
+    fn paths(&self) -> Vec<String> {
+        let requests = self.requests.lock().unwrap();
+        requests
+            .iter()
+            .flat_map(|(auth, body)| {
+                assert_eq!(auth.as_deref(), Some("Bearer isr-test-secret"));
+                body["paths"].as_array().unwrap().clone()
+            })
+            .map(|path| path.as_str().unwrap().to_string())
+            .collect()
+    }
+}
+
+/// События `text/event-stream`: `(event, data)`. Комментарии keep-alive пропускаются.
+fn sse_events(response: &TestResponse) -> Vec<(String, Value)> {
+    let text = String::from_utf8(response.body.clone()).unwrap();
+    text.split("\n\n")
+        .filter_map(|block| {
+            let mut event = None;
+            let mut data = None;
+            for line in block.lines() {
+                if let Some(value) = line.strip_prefix("event: ") {
+                    event = Some(value.to_string());
+                } else if let Some(value) = line.strip_prefix("data: ") {
+                    data = Some(serde_json::from_str(value).unwrap());
+                }
+            }
+            Some((event?, data?))
+        })
+        .collect()
+}
+
+/// `(step, status)` событий `step`.
+fn steps(events: &[(String, Value)]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter(|(event, _)| event == "step")
+        .map(|(_, data)| {
+            (
+                data["step"].as_str().unwrap().to_string(),
+                data["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+    items
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+}
+
+impl Ctx {
+    async fn patch_stream(&self, id: &str, body: Value) -> TestResponse {
+        let token = self.admin().await;
+        self.send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}/stream"),
+            Some(body),
+            Some(&token),
+        )
+        .await
+    }
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn update_stream_reports_db_search_and_isr(pool: PgPool) {
+    let mut ctx = Ctx::new(pool).await;
+    let isr = FakeIsr::start(StatusCode::OK).await;
+    isr.attach(&mut ctx);
+    let id = ctx.entity_id("dune-2021").await;
+
+    let response = ctx
+        .patch_stream(&id, json!({ "title": "Дюна (2021)", "slug": "dune-movie" }))
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.headers["content-type"].to_str().unwrap(),
+        "text/event-stream"
+    );
+    assert_eq!(response.headers["x-accel-buffering"], "no");
+
+    let events = sse_events(&response);
+    let names: Vec<&str> = events.iter().map(|(event, _)| event.as_str()).collect();
+    assert_eq!(names.first(), Some(&"plan"));
+    assert_eq!(names.last(), Some(&"done"));
+    for (event, data) in &events {
+        assert_eq!(&data["type"], event.as_str(), "{data}");
+    }
+    let plan: Vec<&str> = events[0].1["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["step"].as_str().unwrap())
+        .collect();
+    assert_eq!(plan, ["db", "search", "isr"]);
+    assert_eq!(
+        steps(&events),
+        pairs(&[
+            ("db", "done"),
+            ("search", "running"),
+            ("search", "done"),
+            ("isr", "running"),
+            ("isr", "done"),
+        ])
+    );
+    let db = &events[1].1;
+    assert_eq!(db["message"], "БД обновлена");
+    assert!(db["duration_ms"].is_u64(), "{db}");
+    let done = &events.last().unwrap().1;
+    assert_eq!(done["ok"], true);
+    assert_eq!(done["entity"]["title"], "Дюна (2021)");
+    assert_eq!(done["entity"]["slug"], "dune-movie");
+
+    // Старый и новый адрес карточки и страницы участников (они показывают название).
+    let paths = isr.paths();
+    for path in [
+        "/films/dune-2021",
+        "/films/dune-movie",
+        "/people/denis-villeneuve",
+        "/people/timothee-chalamet",
+    ] {
+        assert!(paths.contains(&path.to_string()), "{path} not in {paths:?}");
+    }
+
+    // Поиск уже знает новое название: шаг search ждёт применения.
+    let page = ctx.get_ok("/search?q=Дюна").await;
+    assert!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["title"] == "Дюна (2021)"),
+        "{page}"
+    );
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn update_stream_rejects_bad_input_before_streaming(pool: PgPool) {
+    let ctx = Ctx::without_search(pool);
+    let id = ctx.entity_id("dune-2021").await;
+
+    let response = ctx.patch_stream(&id, json!({ "title": "  " })).await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert!(response.json()["error"].is_string());
+
+    let response = ctx
+        .patch_stream(&id, json!({ "slug": "dune-part-two-2024" }))
+        .await;
+    assert_eq!(response.status, StatusCode::CONFLICT);
+
+    let response = ctx
+        .patch_stream(
+            "00000000-0000-4000-8000-000000000000",
+            json!({ "title": "x" }),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+
+    let response = ctx
+        .send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}/stream"),
+            Some(json!({ "title": "x" })),
+            None,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+}
+
+/// Выключенные Meilisearch и ISR — `skipped`, упавший ISR — `failed` и `ok: false`;
+/// запись в БД при этом остаётся.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn update_stream_reports_skipped_and_failed_steps(pool: PgPool) {
+    let mut ctx = Ctx::without_search(pool);
+    let id = ctx.entity_id("dune-2021").await;
+
+    let events = sse_events(&ctx.patch_stream(&id, json!({ "title": "A" })).await);
+    assert_eq!(
+        steps(&events),
+        pairs(&[
+            ("db", "done"),
+            ("search", "running"),
+            ("search", "skipped"),
+            ("isr", "running"),
+            ("isr", "skipped"),
+        ])
+    );
+    assert_eq!(events.last().unwrap().1["ok"], true);
+
+    let isr = FakeIsr::start(StatusCode::INTERNAL_SERVER_ERROR).await;
+    isr.attach(&mut ctx);
+    let events = sse_events(&ctx.patch_stream(&id, json!({ "title": "B" })).await);
+    let failed = events
+        .iter()
+        .find(|(_, data)| data["step"] == "isr" && data["status"] == "failed")
+        .expect("isr failed event");
+    assert!(
+        failed.1["message"].as_str().unwrap().contains("500"),
+        "{}",
+        failed.1
+    );
+    let done = &events.last().unwrap().1;
+    assert_eq!(done["ok"], false);
+    assert_eq!(done["entity"]["title"], "B");
+    assert_eq!(ctx.get_ok("/entities/dune-2021").await["title"], "B");
+}
+
+/// Обычные админские эндпоинты тоже пересобирают статику: удаление — старый адрес.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn admin_writes_revalidate_static_pages(pool: PgPool) {
+    let mut ctx = Ctx::without_search(pool);
+    let isr = FakeIsr::start(StatusCode::OK).await;
+    isr.attach(&mut ctx);
+    let id = ctx.entity_id("dune-novel").await;
+
+    let (status, _) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}"),
+            Some(json!({ "title": "Дюна (роман)" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(isr.paths().contains(&"/books/dune-novel".to_string()));
+
+    let (status, _) = ctx
+        .admin_send(Method::DELETE, &format!("/admin/entities/{id}"), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let paths = isr.paths();
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| *path == "/books/dune-novel")
+            .count(),
+        2,
+        "{paths:?}"
+    );
 }
 
 // ---------------------------------------------------------------- дамп

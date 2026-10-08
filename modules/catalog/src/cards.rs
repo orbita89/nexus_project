@@ -1,10 +1,13 @@
-//! Карточки сущностей и людей для чтения: L1 (память) → L2 (Redis) → L3 (Meilisearch).
+//! Карточки людей для чтения: L1 (память) → L2 (Redis) → L3 (Meilisearch).
 //!
-//! В PostgreSQL чтение карточки не ходит. Готовая карточка (`card`) лежит в документе
+//! Карточки сущностей сюда не ходят: их отдаёт статика фронтенда (SSG/ISR), а
+//! `GET /entities/{slug}` читает PostgreSQL ([`crate::entities::get`]).
+//!
+//! В PostgreSQL чтение карточки человека не ходит. Готовая карточка (`card`) лежит в документе
 //! поискового индекса, его собирает и обновляет [`crate::search`]. Нет в Meilisearch — 404,
 //! Meilisearch недоступен — 503; то, что уже в L1 и L2, отдаётся и без него.
 
-use crate::search::{self, INDEX as ENTITIES_INDEX, PEOPLE_INDEX};
+use crate::search::{self, PEOPLE_INDEX};
 use crate::validate;
 use async_trait::async_trait;
 use axum::body::{Body, Bytes};
@@ -16,19 +19,17 @@ use shared::search::{Search, SearchError};
 use shared::{AppError, AppResult};
 use std::sync::Arc;
 
-/// Префикс ключей карточек в кэше: `catalog:entity:{slug}`, `catalog:person:{slug}`.
+/// Префикс ключей карточек в кэше: `catalog:person:{slug}`.
 pub const KEY_PREFIX: &str = "catalog:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardKind {
-    Entity,
     Person,
 }
 
 impl CardKind {
     fn index(self) -> &'static str {
         match self {
-            Self::Entity => ENTITIES_INDEX,
             Self::Person => PEOPLE_INDEX,
         }
     }
@@ -36,7 +37,6 @@ impl CardKind {
     /// Ключ карточки в кэше (без общего префикса кэша).
     pub fn key(self, slug: &str) -> String {
         match self {
-            Self::Entity => format!("{KEY_PREFIX}entity:{slug}"),
             Self::Person => format!("{KEY_PREFIX}person:{slug}"),
         }
     }
@@ -127,8 +127,8 @@ mod tests {
     use shared::cache::{CacheError, CacheSettings, MockL2Store};
     use std::time::Duration;
 
-    const CARD: &str = r#"{"slug":"dune-2021","title":"Дюна"}"#;
-    const KEY: &str = "t:catalog:entity:dune-2021";
+    const CARD: &str = r#"{"slug":"denis-villeneuve","full_name":"Дени Вильнёв"}"#;
+    const KEY: &str = "t:catalog:person:denis-villeneuve";
 
     fn settings(l1_ttl: Duration) -> CacheSettings {
         CacheSettings {
@@ -149,14 +149,14 @@ mod tests {
         let mut source = MockCardSource::new();
         source
             .expect_card()
-            .with(eq(CardKind::Entity), eq("dune-2021"))
+            .with(eq(CardKind::Person), eq("denis-villeneuve"))
             .times(times)
             .returning(move |_, _| Ok(card.map(str::to_string)));
         source
     }
 
-    async fn read_dune(cache: &Cache, source: &MockCardSource) -> AppResult<Arc<str>> {
-        read(cache, source, CardKind::Entity, "dune-2021").await
+    async fn read_villeneuve(cache: &Cache, source: &MockCardSource) -> AppResult<Arc<str>> {
+        read(cache, source, CardKind::Person, "denis-villeneuve").await
     }
 
     fn status(error: AppError) -> StatusCode {
@@ -182,10 +182,13 @@ mod tests {
         let cache = cache(store);
         let source = source_returning(1, Some(CARD));
 
-        assert_eq!(&*read_dune(&cache, &source).await.unwrap(), CARD);
+        assert_eq!(&*read_villeneuve(&cache, &source).await.unwrap(), CARD);
         cache.wait_pending().await;
         assert_eq!(
-            cache.peek_l1("catalog:entity:dune-2021").await.as_deref(),
+            cache
+                .peek_l1("catalog:person:denis-villeneuve")
+                .await
+                .as_deref(),
             Some(CARD)
         );
     }
@@ -199,11 +202,11 @@ mod tests {
         let cache = cache(store);
         let source = source_returning(1, Some(CARD));
 
-        read_dune(&cache, &source).await.unwrap();
+        read_villeneuve(&cache, &source).await.unwrap();
         cache.wait_pending().await;
         // times(1) выше: повторный вызов L2 или L3 уронит тест.
-        assert_eq!(&*read_dune(&cache, &source).await.unwrap(), CARD);
-        assert_eq!(&*read_dune(&cache, &source).await.unwrap(), CARD);
+        assert_eq!(&*read_villeneuve(&cache, &source).await.unwrap(), CARD);
+        assert_eq!(&*read_villeneuve(&cache, &source).await.unwrap(), CARD);
     }
 
     /// 3) L1 истёк, в L2 есть: запрос идёт в Redis, но не в Meilisearch, и снова кладётся в L1.
@@ -227,13 +230,19 @@ mod tests {
         let cache = Cache::new(settings(Duration::from_millis(50)), Arc::new(store));
         let source = source_returning(1, Some(CARD));
 
-        read_dune(&cache, &source).await.unwrap();
+        read_villeneuve(&cache, &source).await.unwrap();
         cache.wait_pending().await;
         tokio::time::sleep(Duration::from_millis(120)).await;
-        assert!(cache.peek_l1("catalog:entity:dune-2021").await.is_none());
+        assert!(cache
+            .peek_l1("catalog:person:denis-villeneuve")
+            .await
+            .is_none());
 
-        assert_eq!(&*read_dune(&cache, &source).await.unwrap(), CARD);
-        assert!(cache.peek_l1("catalog:entity:dune-2021").await.is_some());
+        assert_eq!(&*read_villeneuve(&cache, &source).await.unwrap(), CARD);
+        assert!(cache
+            .peek_l1("catalog:person:denis-villeneuve")
+            .await
+            .is_some());
     }
 
     /// 4) L2 miss → L3 hit → записано в L2 и L1; следующий запрос из L1.
@@ -249,9 +258,9 @@ mod tests {
         let cache = cache(store);
         let source = source_returning(1, Some(CARD));
 
-        read_dune(&cache, &source).await.unwrap();
+        read_villeneuve(&cache, &source).await.unwrap();
         cache.wait_pending().await;
-        read_dune(&cache, &source).await.unwrap();
+        read_villeneuve(&cache, &source).await.unwrap();
     }
 
     /// 5) В L3 нет → 404, ничего не кэшируется: следующий запрос снова идёт в L2 и L3.
@@ -264,11 +273,14 @@ mod tests {
         let source = source_returning(2, None);
 
         for _ in 0..2 {
-            let error = read_dune(&cache, &source).await.unwrap_err();
+            let error = read_villeneuve(&cache, &source).await.unwrap_err();
             assert_eq!(status(error), StatusCode::NOT_FOUND);
         }
         cache.wait_pending().await;
-        assert!(cache.peek_l1("catalog:entity:dune-2021").await.is_none());
+        assert!(cache
+            .peek_l1("catalog:person:denis-villeneuve")
+            .await
+            .is_none());
     }
 
     /// 6) Meilisearch упал → 503; но то, что уже в L1 или L2, отдаётся.
@@ -278,7 +290,7 @@ mod tests {
         store.expect_get().with(eq(KEY)).returning(|_| Ok(None));
         store
             .expect_get()
-            .with(eq("t:catalog:entity:dune-1984"))
+            .with(eq("t:catalog:person:david-lynch"))
             .times(1)
             .returning(|_| Ok(Some(CARD.to_string())));
         store.expect_set_ex().never();
@@ -286,17 +298,17 @@ mod tests {
         let mut source = MockCardSource::new();
         source
             .expect_card()
-            .with(eq(CardKind::Entity), eq("dune-2021"))
+            .with(eq(CardKind::Person), eq("denis-villeneuve"))
             .times(1)
             .returning(|_, _| Err(SearchError::Disabled));
 
-        let error = read_dune(&cache, &source).await.unwrap_err();
+        let error = read_villeneuve(&cache, &source).await.unwrap_err();
         assert_eq!(status(error), StatusCode::SERVICE_UNAVAILABLE);
-        // dune-1984 есть в L2: Meilisearch не нужен (expect_card для него не задан).
-        let card = read(&cache, &source, CardKind::Entity, "dune-1984").await;
+        // david-lynch есть в L2: Meilisearch не нужен (expect_card для него не задан).
+        let card = read(&cache, &source, CardKind::Person, "david-lynch").await;
         assert_eq!(&*card.unwrap(), CARD);
         // А теперь и в L1.
-        let card = read(&cache, &source, CardKind::Entity, "dune-1984").await;
+        let card = read(&cache, &source, CardKind::Person, "david-lynch").await;
         assert_eq!(&*card.unwrap(), CARD);
     }
 
@@ -314,7 +326,7 @@ mod tests {
             .returning(|_, _, _| Err(CacheError::Redis("connection refused".into())));
         let cache = cache(store);
         let source = source_returning(1, Some(CARD));
-        assert_eq!(&*read_dune(&cache, &source).await.unwrap(), CARD);
+        assert_eq!(&*read_villeneuve(&cache, &source).await.unwrap(), CARD);
         cache.wait_pending().await;
 
         let mut store = MockL2Store::new();
@@ -330,7 +342,7 @@ mod tests {
         store.expect_set_ex().times(1).returning(|_, _, _| Ok(()));
         let cache = self::cache(store);
         let source = source_returning(1, Some(CARD));
-        assert_eq!(&*read_dune(&cache, &source).await.unwrap(), CARD);
+        assert_eq!(&*read_villeneuve(&cache, &source).await.unwrap(), CARD);
         cache.wait_pending().await;
     }
 
@@ -343,7 +355,7 @@ mod tests {
         let cache = cache(store);
         let source = source_returning(1, Some(CARD));
 
-        let reads = (0..20).map(|_| read_dune(&cache, &source));
+        let reads = (0..20).map(|_| read_villeneuve(&cache, &source));
         for card in futures_util::future::join_all(reads).await {
             assert_eq!(&*card.unwrap(), CARD);
         }
@@ -365,11 +377,13 @@ mod tests {
         let cache = cache(store);
         let source = source_returning(2, Some(CARD));
 
-        read_dune(&cache, &source).await.unwrap();
+        read_villeneuve(&cache, &source).await.unwrap();
         cache.wait_pending().await;
-        cache.invalidate(&[CardKind::Entity.key("dune-2021")]).await;
+        cache
+            .invalidate(&[CardKind::Person.key("denis-villeneuve")])
+            .await;
         cache.wait_pending().await;
-        read_dune(&cache, &source).await.unwrap();
+        read_villeneuve(&cache, &source).await.unwrap();
         cache.wait_pending().await;
     }
 
@@ -381,7 +395,7 @@ mod tests {
         let cache = cache(store);
         let mut source = MockCardSource::new();
         source.expect_card().never();
-        let error = read(&cache, &source, CardKind::Entity, "x\" OR slug = \"y")
+        let error = read(&cache, &source, CardKind::Person, "x\" OR slug = \"y")
             .await
             .unwrap_err();
         assert_eq!(status(error), StatusCode::NOT_FOUND);

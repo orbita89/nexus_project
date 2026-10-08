@@ -28,6 +28,17 @@ impl EntityKind {
             Self::Game => "game",
         }
     }
+
+    /// Раздел в адресе страницы на фронтенде: `/films/dune-2021`
+    /// (`KINDS` в nexus_web `src/lib/catalog/kinds.ts`).
+    pub fn url_segment(self) -> &'static str {
+        match self {
+            Self::Movie => "films",
+            Self::Series => "series",
+            Self::Book => "books",
+            Self::Game => "games",
+        }
+    }
 }
 
 pub use shared::pagination::{page_bounds, Page, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};

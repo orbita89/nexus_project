@@ -6,6 +6,7 @@ use axum::Router;
 use http_body_util::BodyExt;
 use shared::cache::{Cache, CacheSettings, L2Store, RedisStore};
 use shared::directory::Directories;
+use shared::isr::Isr;
 use shared::mail::{Mailer, Outbox};
 use shared::search::Search;
 use shared::{AppState, Config};
@@ -21,12 +22,14 @@ pub fn state(pool: PgPool) -> (AppState, Outbox) {
 }
 
 /// То же, но с изменённой конфигурацией (включить dev login, добавить OAuth-провайдера, ...).
-/// Поиск выключен: тесты не пишут в Meilisearch. Включить — [`with_search`].
+/// Поиск и ревалидация статики выключены: тесты не пишут в Meilisearch и не ходят во фронтенд.
+/// Включить поиск — [`with_search`].
 pub fn state_with_config(pool: PgPool, config: Config) -> (AppState, Outbox) {
     let (mailer, outbox) = Mailer::memory();
     let directories = directories(pool.clone());
     let mut state = AppState::new(config, pool, mailer, directories);
     state.search = Search::disabled();
+    state.isr = Isr::disabled();
     (state, outbox)
 }
 
