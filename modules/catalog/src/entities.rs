@@ -10,6 +10,7 @@ use shared::error::ErrorBody;
 use shared::extract::{Path, Query};
 use shared::{AppError, AppResult, AppState};
 use sqlx::PgExecutor;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Общий WHERE списка: $1 kind, $2 slug тега, $3 год, $4 шаблон ILIKE.
@@ -113,13 +114,61 @@ pub(crate) async fn detail_by_id(
 }
 
 async fn detail(db: impl PgExecutor<'_> + Copy, entity: Entity) -> AppResult<EntityDetail> {
-    let tags = tags_of(db, entity.id).await?;
-    let credits = credits_of(db, entity.id).await?;
-    Ok(EntityDetail {
-        entity,
-        tags,
-        credits,
-    })
+    let mut cards = details(db, vec![entity]).await?;
+    Ok(cards.pop().expect("one card per entity"))
+}
+
+/// Карточки пачкой: два запроса на любое число сущностей (перестройка индекса). Порядок — как у
+/// `entities`.
+pub(crate) async fn details(
+    db: impl PgExecutor<'_> + Copy,
+    entities: Vec<Entity>,
+) -> AppResult<Vec<EntityDetail>> {
+    #[derive(sqlx::FromRow)]
+    struct TagOf {
+        entity_id: Uuid,
+        #[sqlx(flatten)]
+        tag: Tag,
+    }
+    #[derive(sqlx::FromRow)]
+    struct CreditOf {
+        entity_id: Uuid,
+        #[sqlx(flatten)]
+        row: EntityCreditRow,
+    }
+
+    let ids: Vec<Uuid> = entities.iter().map(|entity| entity.id).collect();
+    let tags: Vec<TagOf> = sqlx::query_as(
+        "SELECT et.entity_id, t.id, t.slug, t.name FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+         WHERE et.entity_id = ANY($1) ORDER BY t.name",
+    )
+    .bind(&ids)
+    .fetch_all(db)
+    .await?;
+    let credits: Vec<CreditOf> = sqlx::query_as(&format!(
+        "SELECT c.entity_id, {CREDIT_COLUMNS} FROM entity_credits c JOIN people p ON p.id = c.person_id
+         WHERE c.entity_id = ANY($1) ORDER BY c.position, p.full_name, c.id"
+    ))
+    .bind(&ids)
+    .fetch_all(db)
+    .await?;
+
+    let mut tags_by: HashMap<Uuid, Vec<Tag>> = HashMap::new();
+    for TagOf { entity_id, tag } in tags {
+        tags_by.entry(entity_id).or_default().push(tag);
+    }
+    let mut credits_by: HashMap<Uuid, Vec<EntityCredit>> = HashMap::new();
+    for CreditOf { entity_id, row } in credits {
+        credits_by.entry(entity_id).or_default().push(row.into());
+    }
+    Ok(entities
+        .into_iter()
+        .map(|entity| EntityDetail {
+            tags: tags_by.remove(&entity.id).unwrap_or_default(),
+            credits: credits_by.remove(&entity.id).unwrap_or_default(),
+            entity,
+        })
+        .collect())
 }
 
 pub(crate) async fn tags_of(db: impl PgExecutor<'_>, entity_id: Uuid) -> AppResult<Vec<Tag>> {
@@ -130,17 +179,6 @@ pub(crate) async fn tags_of(db: impl PgExecutor<'_>, entity_id: Uuid) -> AppResu
     .bind(entity_id)
     .fetch_all(db)
     .await?)
-}
-
-async fn credits_of(db: impl PgExecutor<'_>, entity_id: Uuid) -> AppResult<Vec<EntityCredit>> {
-    let rows: Vec<EntityCreditRow> = sqlx::query_as(&format!(
-        "SELECT {CREDIT_COLUMNS} FROM entity_credits c JOIN people p ON p.id = c.person_id
-         WHERE c.entity_id = $1 ORDER BY c.position, p.full_name, c.id"
-    ))
-    .bind(entity_id)
-    .fetch_all(db)
-    .await?;
-    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 /// Колонки для [`EntityCreditRow`]: `entity_credits c JOIN people p`.

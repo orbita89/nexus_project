@@ -298,6 +298,19 @@ impl Cache {
         .map_err(|_| CacheError::Timeout)?
     }
 
+    /// Снять блокировку [`Cache::try_lock`] раньше TTL. Таймаут длинный, как у массовых операций:
+    /// не снятая блокировка держится до конца TTL. Ошибка Redis — только warning.
+    pub async fn unlock(&self, key: &str) {
+        let Some(inner) = &self.inner else { return };
+        let key = inner.key(key);
+        let del = inner.l2.del(std::slice::from_ref(&key));
+        match tokio::time::timeout(L2_BULK_TIMEOUT, del).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, %key, "unlock failed"),
+            Err(_) => tracing::warn!(%key, "unlock timed out"),
+        }
+    }
+
     /// Значение в L1, без похода в L2 и загрузчик. Для тестов и диагностики.
     pub async fn peek_l1(&self, key: &str) -> Option<Arc<str>> {
         let inner = self.inner.as_ref()?;

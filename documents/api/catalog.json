@@ -418,7 +418,7 @@
           "catalog-admin"
         ],
         "summary": "То же, что `PATCH /admin/entities/{id}`, но ход публикации приходит потоком\n`text/event-stream` — для лога в админке.",
-        "description": "Неверные поля, чужой slug и отсутствующая сущность — обычные `400`/`409`/`404` с JSON, до\nпотока. Если запись в БД прошла — `200` и поток событий [`PublishEvent`]: `plan` (все шаги),\n`step` (`running`, затем `done`/`skipped`/`failed` для `db`, `search`, `isr`), последним\n`done` с карточкой. Тип события — и в поле `event:`, и в `type` внутри `data:`.\n\nПубликация доводится до конца, даже если клиент закрыл соединение. `EventSource` не умеет\nPATCH и заголовки: читать через `fetch` и `response.body`.",
+        "description": "Неверные поля, чужой slug и отсутствующая сущность — обычные `400`/`409`/`404` с JSON, до\nпотока. Если запись в БД прошла — `200` и поток событий [`JobEvent`]: `plan` (все шаги),\n`step` (`running`, затем `done`/`skipped`/`failed` для `db`, `search`, `isr`), последним\n`done` с карточкой. Тип события — и в поле `event:`, и в `type` внутри `data:`.\n\nПубликация доводится до конца, даже если клиент закрыл соединение. `EventSource` не умеет\nPATCH и заголовки: читать через `fetch` и `response.body`.",
         "operationId": "update_entity_stream",
         "parameters": [
           {
@@ -448,7 +448,7 @@
             "content": {
               "text/event-stream": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublishEvent"
+                  "$ref": "#/components/schemas/JobEvent"
                 }
               }
             }
@@ -840,11 +840,23 @@
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Перестроить поисковый индекс из PostgreSQL. Нужно после загрузки данных в БД в обход API\n(`make seed`) или если индекс отстал. Ждёт завершения.",
+        "summary": "Перестроить поисковый индекс из PostgreSQL без простоя: теневой индекс, проверка размера,\nswap, ротация версий, пересборка статики. Ждёт завершения. Лог шагов — `.../reindex/stream`.",
+        "description": "Нужно после загрузки данных в БД в обход API (`make seed`) или если индекс отстал.",
         "operationId": "reindex_handler",
+        "parameters": [
+          {
+            "name": "force",
+            "in": "query",
+            "description": "Переключить поиск, даже если новый индекс меньше 80% текущего (сущности удалены намеренно).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Индекс перестроен",
+            "description": "Индекс перестроен, поиск переключён",
             "content": {
               "application/json": {
                 "schema": {
@@ -865,6 +877,94 @@
           },
           "403": {
             "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Перестройка уже идёт или новый индекс меньше 80% текущего (поиск не переключён)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/search/reindex/stream": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "То же, ход перестройки потоком `text/event-stream`: `plan`, `step` по шагам `create_index`,\n`fill` (с `progress`: `done`/`total`), `check`, `swap`, `rotate`, `isr`, затем `done`\n(`reindex` — итог, если поиск переключён).",
+        "description": "Перестройка уже идёт — `409` JSON до потока. Новый индекс меньше 80% текущего — шаг `check`\n`failed`, поиск не переключается; `?force=true` — переключить всё равно. Перестройка\nдоводится до конца, даже если клиент закрыл соединение.",
+        "operationId": "reindex_stream",
+        "parameters": [
+          {
+            "name": "force",
+            "in": "query",
+            "description": "Переключить поиск, даже если новый индекс меньше 80% текущего (сущности удалены намеренно).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Поток событий перестройки",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobEvent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Перестройка уже идёт",
             "content": {
               "application/json": {
                 "schema": {
@@ -1320,7 +1420,7 @@
           "catalog"
         ],
         "summary": "Карточка человека: данные и все его работы любых типов, новые сверху.",
-        "description": "Читается из кэша (память, Redis) и Meilisearch, после правок в админке — сразу свежая.",
+        "description": "Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика\nфронтенда (SSG/ISR), сюда приходят её пересборка и админка.",
         "operationId": "get_person",
         "parameters": [
           {
@@ -1347,16 +1447,6 @@
           },
           "404": {
             "description": "Не найден",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Карточки нет в кэше, а Meilisearch недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -1687,6 +1777,41 @@
         },
         "additionalProperties": false
       },
+      "DoneEvent": {
+        "type": "object",
+        "description": "Итог операции.",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "entity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EntityDetail",
+                "description": "Публикация: карточка после записи (`null`, если сущность успели удалить)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Ни один шаг не упал (пропущенные не считаются)."
+          },
+          "reindex": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReindexResult",
+                "description": "Перестройка: что получилось (нет, если она прервалась)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "Entity": {
         "type": "object",
         "description": "Сущность целиком (строка `entities`).",
@@ -1954,6 +2079,102 @@
           }
         },
         "additionalProperties": false
+      },
+      "JobEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Первое: все шаги по порядку, чтобы сразу показать их ожидающими.",
+            "required": [
+              "steps",
+              "type"
+            ],
+            "properties": {
+              "steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PlannedStep"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan"
+                ]
+              }
+            }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/StepEvent",
+                "description": "Шаг начался или закончился."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "step"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Шаг начался или закончился."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProgressEvent",
+                "description": "Продвинулся длинный шаг."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "progress"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Продвинулся длинный шаг."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DoneEvent",
+                "description": "Последнее."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "done"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "Последнее."
+          }
+        ],
+        "description": "Событие потока."
       },
       "Metadata": {
         "oneOf": [
@@ -2357,100 +2578,72 @@
           },
           "title": {
             "type": "string",
-            "example": "Обновление поиска (Meilisearch)"
+            "example": "Индексация сущностей"
           }
         }
       },
-      "PublishEvent": {
-        "oneOf": [
-          {
-            "type": "object",
-            "description": "Первое: все шаги по порядку, чтобы сразу показать их ожидающими.",
-            "required": [
-              "steps",
-              "type"
-            ],
-            "properties": {
-              "steps": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/PlannedStep"
-                }
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "plan"
-                ]
-              }
-            }
-          },
-          {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/StepEvent",
-                "description": "Шаг начался или закончился."
-              },
-              {
-                "type": "object",
-                "required": [
-                  "type"
-                ],
-                "properties": {
-                  "type": {
-                    "type": "string",
-                    "enum": [
-                      "step"
-                    ]
-                  }
-                }
-              }
-            ],
-            "description": "Шаг начался или закончился."
-          },
-          {
-            "type": "object",
-            "description": "Последнее. `ok` — ни один шаг не упал; `entity` — карточка после записи (`null`, если\nсущность успели удалить).",
-            "required": [
-              "ok",
-              "type"
-            ],
-            "properties": {
-              "entity": {
-                "oneOf": [
-                  {
-                    "$ref": "#/components/schemas/EntityDetail"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "ok": {
-                "type": "boolean"
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "done"
-                ]
-              }
-            }
-          }
+      "ProgressEvent": {
+        "type": "object",
+        "description": "Счётчик длинного шага: «Проиндексировано 500/100000».",
+        "required": [
+          "step",
+          "done",
+          "total"
         ],
-        "description": "Событие потока публикации (`text/event-stream`): `event:` — значение `type`, `data:` — весь\nэтот JSON."
+        "properties": {
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "example": 500,
+            "minimum": 0
+          },
+          "step": {
+            "$ref": "#/components/schemas/Step"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "example": 100000,
+            "minimum": 0
+          }
+        }
       },
       "ReindexResult": {
         "type": "object",
         "required": [
-          "indexed"
+          "indexed",
+          "previous_count",
+          "previous_version",
+          "deleted"
         ],
         "properties": {
+          "deleted": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Удалённые устаревшие версии.",
+            "example": [
+              "entities_v1759800000000"
+            ]
+          },
           "indexed": {
             "type": "integer",
             "description": "Сколько сущностей в новом индексе.",
-            "example": 45,
+            "example": 100000,
             "minimum": 0
+          },
+          "previous_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько документов было в индексе до перестройки.",
+            "example": 99870,
+            "minimum": 0
+          },
+          "previous_version": {
+            "type": "string",
+            "description": "Где сохранена предыдущая версия (откат — swap обратно).",
+            "example": "entities_v1759912345123"
           }
         }
       },
@@ -2554,16 +2747,21 @@
       },
       "Step": {
         "type": "string",
-        "description": "Шаг публикации.",
+        "description": "Шаг операции.",
         "enum": [
           "db",
           "search",
+          "create_index",
+          "fill",
+          "check",
+          "swap",
+          "rotate",
           "isr"
         ]
       },
       "StepEvent": {
         "type": "object",
-        "description": "Состояние шага. На каждый шаг приходит `running`, затем итог.",
+        "description": "Состояние шага. На каждый шаг приходит `running`, затем итог (у `db` — сразу итог).",
         "required": [
           "step",
           "status",

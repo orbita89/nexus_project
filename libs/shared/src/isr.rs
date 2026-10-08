@@ -68,27 +68,40 @@ impl Isr {
         self.inner.is_some()
     }
 
+    /// Пересобрать всю статику: `{"all": true}` (после перестройки индекса).
+    pub async fn revalidate_all(&self) -> Result<(), IsrError> {
+        let inner = self.inner.as_ref().ok_or(IsrError::Disabled)?;
+        inner.post(&json!({ "all": true })).await
+    }
+
     /// Пересобрать страницы `paths` (`/films/dune-2021`). Пачками по [`PATHS_PER_REQUEST`];
     /// первая же ошибка прерывает отправку. Пустой список — без запросов.
     pub async fn revalidate(&self, paths: &[String]) -> Result<(), IsrError> {
         let inner = self.inner.as_ref().ok_or(IsrError::Disabled)?;
         for chunk in paths.chunks(PATHS_PER_REQUEST) {
-            let response = inner
-                .http
-                .post(&inner.url)
-                .bearer_auth(&inner.secret)
-                .json(&json!({ "paths": chunk }))
-                .send()
-                .await?;
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(IsrError::Status {
-                    status: status.as_u16(),
-                    body: body.chars().take(500).collect(),
-                });
-            }
+            inner.post(&json!({ "paths": chunk })).await?;
         }
         Ok(())
+    }
+}
+
+impl Inner {
+    async fn post(&self, body: &serde_json::Value) -> Result<(), IsrError> {
+        let response = self
+            .http
+            .post(&self.url)
+            .bearer_auth(&self.secret)
+            .json(body)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let body = response.text().await.unwrap_or_default();
+        Err(IsrError::Status {
+            status: status.as_u16(),
+            body: body.chars().take(500).collect(),
+        })
     }
 }

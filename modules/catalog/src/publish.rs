@@ -1,200 +1,32 @@
-//! Публикация правки каталога после коммита в БД: поисковый индекс, кэш карточек людей,
-//! статика фронтенда (ISR).
+//! Публикация правки каталога после коммита в БД: поисковый индекс и статика фронтенда (ISR).
 //!
 //! Шаги идут по порядку: [`Step::Search`] — документы в Meilisearch (с ожиданием применения),
-//! затем сброс карточек людей в кэше, затем [`Step::Isr`] — пересборка страниц затронутых
-//! сущностей и людей (`/films/dune-2021`, `/people/denis-villeneuve`), старых и новых адресов.
-//! Ошибка шага запись не отменяет и следующие шаги не останавливает: индекс догонит
-//! перестройка, статику — следующая правка или полная ревалидация.
+//! затем [`Step::Isr`] — пересборка страниц затронутых сущностей и людей (`/films/dune-2021`,
+//! `/people/denis-villeneuve`), старых и новых адресов. Ошибка шага запись не отменяет и следующий
+//! шаг не останавливает: индекс догонит перестройка, статику — следующая правка.
 //!
-//! Обычные админские эндпоинты вызывают [`run`] молча, `.../stream` транслирует шаги в SSE.
+//! Обычные админские эндпоинты вызывают [`run`] молча, `.../stream` — с потоком ([`crate::jobs`]).
 
 use crate::entities::detail_by_id;
-use crate::models::{EntityDetail, EntityKind};
+use crate::jobs::{self, DoneEvent, Reporter, Step, StepStatus};
+use crate::models::EntityKind;
 use crate::search;
-use axum::http::HeaderName;
-use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
-use serde::Serialize;
+use axum::response::Response;
 use shared::AppState;
-use std::convert::Infallible;
 use std::time::Instant;
-use tokio::sync::mpsc;
-use utoipa::ToSchema;
 use uuid::Uuid;
 
-/// Шаг публикации.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Step {
-    /// Запись в PostgreSQL (выполняется до публикации, в потоке приходит первым).
-    Db,
-    /// Документы в Meilisearch.
-    Search,
-    /// Пересборка статических страниц фронтенда.
-    Isr,
-}
-
-impl Step {
-    pub const ALL: [Step; 3] = [Self::Db, Self::Search, Self::Isr];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Db => "Сохранение в БД",
-            Self::Search => "Обновление поиска (Meilisearch)",
-            Self::Isr => "Пересборка статики (ISR)",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum StepStatus {
-    Running,
-    Done,
-    /// Не настроено (Meilisearch или ISR выключены).
-    Skipped,
-    Failed,
-}
-
-/// Состояние шага. На каждый шаг приходит `running`, затем итог.
-#[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct StepEvent {
-    pub step: Step,
-    pub status: StepStatus,
-    /// Строка для лога в админке.
-    #[schema(example = "Meilisearch обновлён")]
-    pub message: String,
-    /// Сколько шёл шаг; только у итога.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-}
-
-impl StepEvent {
-    fn running(step: Step) -> Self {
-        Self {
-            step,
-            status: StepStatus::Running,
-            message: step.title().to_string(),
-            duration_ms: None,
-        }
-    }
-
-    pub(crate) fn finished(
-        step: Step,
-        status: StepStatus,
-        message: impl Into<String>,
-        started: Instant,
-    ) -> Self {
-        Self {
-            step,
-            status,
-            message: message.into(),
-            duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
-        }
-    }
-}
-
-/// Шаг в событии `plan`.
-#[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct PlannedStep {
-    pub step: Step,
-    #[schema(example = "Обновление поиска (Meilisearch)")]
-    pub title: &'static str,
-}
-
-/// Событие потока публикации (`text/event-stream`): `event:` — значение `type`, `data:` — весь
-/// этот JSON.
-#[derive(Debug, Serialize, ToSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PublishEvent {
-    /// Первое: все шаги по порядку, чтобы сразу показать их ожидающими.
-    Plan { steps: Vec<PlannedStep> },
-    /// Шаг начался или закончился.
-    Step(StepEvent),
-    /// Последнее. `ok` — ни один шаг не упал; `entity` — карточка после записи (`null`, если
-    /// сущность успели удалить).
-    Done {
-        ok: bool,
-        entity: Option<Box<EntityDetail>>,
-    },
-}
-
-impl PublishEvent {
-    fn plan() -> Self {
-        Self::Plan {
-            steps: Step::ALL
-                .into_iter()
-                .map(|step| PlannedStep {
-                    step,
-                    title: step.title(),
-                })
-                .collect(),
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Plan { .. } => "plan",
-            Self::Step(_) => "step",
-            Self::Done { .. } => "done",
-        }
-    }
-
-    fn to_sse(&self) -> Event {
-        Event::default()
-            .event(self.name())
-            .json_data(self)
-            .expect("publish event serializes to JSON")
-    }
-}
-
-/// Ответ `text/event-stream` с публикацией правки сущности `id`. Запись в БД уже прошла: `db` —
-/// её итог. Публикация идёт в отдельной задаче и доводится до конца, даже если клиент ушёл.
-pub fn stream_entity(state: AppState, touched: Touched, db: StepEvent, id: Uuid) -> Response {
-    let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        // Ошибка отправки — клиент закрыл соединение; публикация всё равно доводится до конца.
-        let send = |event: PublishEvent| {
-            let _ = tx.send(event);
-        };
-        send(PublishEvent::plan());
-        send(PublishEvent::Step(db));
-        let ok = run(&state, touched, |event| send(PublishEvent::Step(event))).await;
-        let entity = match detail_by_id(&state.db, id).await {
-            Ok(entity) => Some(Box::new(entity)),
-            Err(error) => {
-                tracing::debug!(%error, entity_id = %id, "no card for the done event");
-                None
-            }
-        };
-        send(PublishEvent::Done { ok, entity });
-    });
-
-    let events = futures_util::stream::unfold(rx, |mut rx| async move {
-        let event = rx.recv().await?;
-        Some((Ok::<_, Infallible>(event.to_sse()), rx))
-    });
-    (
-        // nginx иначе копит поток в буфере и отдаёт одним куском в конце.
-        [(HeaderName::from_static("x-accel-buffering"), "no")],
-        Sse::new(events).keep_alive(KeepAlive::default()),
-    )
-        .into_response()
-}
-
-/// Что затронула запись в каталоге: какие документы переотправить, какие карточки сбросить и
-/// какие страницы пересобрать.
+/// Что затронула запись в каталоге: какие документы переотправить и какие страницы пересобрать.
 ///
-/// Связи раскрываются сами: у сущности — её участники (их карточки показывают сущность),
-/// у человека — его работы (их карточки показывают человека). Собирать **до** записи, если
-/// запись удаляет или меняет slug: старые адреса запоминаются, чтобы сбросить и их.
+/// Связи раскрываются сами: у сущности — её участники (их страницы показывают сущность),
+/// у человека — его работы (их страницы и документы показывают человека). Собирать **до**
+/// записи, если запись удаляет или меняет slug: старые адреса запоминаются, чтобы пересобрать и их.
 #[derive(Debug, Default)]
 pub struct Touched {
     pub(crate) entities: Vec<Uuid>,
     pub(crate) people: Vec<Uuid>,
-    /// Slug'и на момент сбора.
-    before: Slugs,
+    /// Адреса на момент сбора.
+    before: Vec<String>,
 }
 
 impl Touched {
@@ -218,13 +50,13 @@ impl Touched {
         let mut touched = Self {
             entities: merge(entities, entities_of),
             people: merge(people, people_of),
-            before: Slugs::default(),
+            before: Vec::new(),
         };
-        touched.before = Slugs::load(db, &touched).await?;
+        touched.before = touched.paths(db).await?;
         Ok(touched)
     }
 
-    /// Новая сущность (до неё ничего не было ни в кэше, ни в статике).
+    /// Новая сущность (до неё ничего не было ни в индексе, ни в статике).
     pub fn entity(id: Uuid) -> Self {
         Self {
             entities: vec![id],
@@ -243,45 +75,34 @@ impl Touched {
     fn is_empty(&self) -> bool {
         self.entities.is_empty() && self.people.is_empty()
     }
+
+    /// Страницы фронтенда по slug'ам, которые сейчас в БД.
+    async fn paths(&self, db: &sqlx::PgPool) -> Result<Vec<String>, sqlx::Error> {
+        let entities: Vec<(EntityKind, String)> =
+            sqlx::query_as("SELECT kind, slug FROM entities WHERE id = ANY($1)")
+                .bind(&self.entities)
+                .fetch_all(db)
+                .await?;
+        let people: Vec<String> = sqlx::query_scalar("SELECT slug FROM people WHERE id = ANY($1)")
+            .bind(&self.people)
+            .fetch_all(db)
+            .await?;
+        Ok(entities
+            .iter()
+            .map(|(kind, slug)| entity_path(*kind, slug))
+            .chain(people.iter().map(|slug| person_path(slug)))
+            .collect())
+    }
 }
 
-/// Адреса затронутого на один момент времени.
-#[derive(Debug, Default)]
-struct Slugs {
-    entities: Vec<(EntityKind, String)>,
-    people: Vec<String>,
+/// Страница сущности на фронтенде: `/films/dune-2021`.
+pub fn entity_path(kind: EntityKind, slug: &str) -> String {
+    format!("/{}/{slug}", kind.url_segment())
 }
 
-impl Slugs {
-    async fn load(db: &sqlx::PgPool, touched: &Touched) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            entities: sqlx::query_as("SELECT kind, slug FROM entities WHERE id = ANY($1)")
-                .bind(&touched.entities)
-                .fetch_all(db)
-                .await?,
-            people: sqlx::query_scalar("SELECT slug FROM people WHERE id = ANY($1)")
-                .bind(&touched.people)
-                .fetch_all(db)
-                .await?,
-        })
-    }
-
-    /// Ключи карточек в кэше (там только люди).
-    fn cache_keys(&self) -> impl Iterator<Item = String> + '_ {
-        self.people
-            .iter()
-            .map(|slug| crate::cards::CardKind::Person.key(slug))
-    }
-
-    /// Страницы фронтенда.
-    fn paths(&self) -> impl Iterator<Item = String> + '_ {
-        let entities = self
-            .entities
-            .iter()
-            .map(|(kind, slug)| format!("/{}/{slug}", kind.url_segment()));
-        let people = self.people.iter().map(|slug| format!("/people/{slug}"));
-        entities.chain(people)
-    }
+/// Страница человека на фронтенде.
+pub fn person_path(slug: &str) -> String {
+    format!("/people/{slug}")
 }
 
 fn merge(a: &[Uuid], b: Vec<Uuid>) -> Vec<Uuid> {
@@ -289,13 +110,6 @@ fn merge(a: &[Uuid], b: Vec<Uuid>) -> Vec<Uuid> {
     ids.sort_unstable();
     ids.dedup();
     ids
-}
-
-fn sorted(items: impl Iterator<Item = String>) -> Vec<String> {
-    let mut items: Vec<String> = items.collect();
-    items.sort_unstable();
-    items.dedup();
-    items
 }
 
 /// Пути для лога: несколько — списком, много (переименован тег) — числом.
@@ -307,26 +121,25 @@ fn list(paths: &[String]) -> String {
     }
 }
 
-/// Публикует запись: шаги [`Step::Search`] и [`Step::Isr`], каждый сообщает о себе в `report`.
-/// Вызывать после коммита. `true` — ни один шаг не упал (пропущенные не считаются).
-pub async fn run(state: &AppState, touched: Touched, mut report: impl FnMut(StepEvent)) -> bool {
+/// Публикует запись: шаги [`Step::Search`] и [`Step::Isr`]. Вызывать после коммита.
+/// `true` — ни один шаг не упал (пропущенные не считаются).
+pub async fn run(state: &AppState, touched: Touched, report: &Reporter) -> bool {
     if touched.is_empty() {
         return true;
     }
     let mut ok = true;
 
-    report(StepEvent::running(Step::Search));
-    let started = Instant::now();
-    let event = if !state.search.is_enabled() {
-        StepEvent::finished(
+    let started = report.start(Step::Search);
+    if !state.search.is_enabled() {
+        report.finish(
             Step::Search,
             StepStatus::Skipped,
             "Meilisearch выключен",
             started,
-        )
+        );
     } else {
         match search::update_index(state, &touched).await {
-            Ok(()) => StepEvent::finished(
+            Ok(()) => report.finish(
                 Step::Search,
                 StepStatus::Done,
                 "Meilisearch обновлён",
@@ -336,45 +149,38 @@ pub async fn run(state: &AppState, touched: Touched, mut report: impl FnMut(Step
                 tracing::warn!(
                     %error,
                     entities = touched.entities.len(),
-                    people = touched.people.len(),
                     "search index sync failed, run reindex"
                 );
                 ok = false;
-                StepEvent::finished(
+                report.finish(
                     Step::Search,
                     StepStatus::Failed,
                     format!("Meilisearch не обновлён: {error}"),
                     started,
-                )
+                );
             }
         }
-    };
+    }
 
-    // Адреса после записи: новые slug'и. Кэш сбрасывается только после применения индекса,
-    // иначе промах, начатый до правки, положит в кэш старую карточку.
-    let after = Slugs::load(&state.db, &touched)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "slugs lookup after write failed");
-            Slugs::default()
-        });
-    let keys = sorted(touched.before.cache_keys().chain(after.cache_keys()));
-    state.cache.invalidate(&keys).await;
-    report(event);
-
-    report(StepEvent::running(Step::Isr));
-    let started = Instant::now();
-    let paths = sorted(touched.before.paths().chain(after.paths()));
-    let event = if !state.isr.is_enabled() {
-        StepEvent::finished(
+    let started = report.start(Step::Isr);
+    // Старые адреса (смена slug, удаление) и новые.
+    let mut paths = touched.before.clone();
+    match touched.paths(&state.db).await {
+        Ok(after) => paths.extend(after),
+        Err(error) => tracing::warn!(%error, "page paths lookup after write failed"),
+    }
+    paths.sort_unstable();
+    paths.dedup();
+    if !state.isr.is_enabled() {
+        report.finish(
             Step::Isr,
             StepStatus::Skipped,
             "ISR не настроен (ISR_URL, ISR_SECRET)",
             started,
-        )
+        );
     } else {
         match state.isr.revalidate(&paths).await {
-            Ok(()) => StepEvent::finished(
+            Ok(()) => report.finish(
                 Step::Isr,
                 StepStatus::Done,
                 format!("Статический HTML/JSON пересобран: {}", list(&paths)),
@@ -383,17 +189,39 @@ pub async fn run(state: &AppState, touched: Touched, mut report: impl FnMut(Step
             Err(error) => {
                 tracing::warn!(%error, paths = paths.len(), "isr revalidation failed");
                 ok = false;
-                StepEvent::finished(
+                report.finish(
                     Step::Isr,
                     StepStatus::Failed,
                     format!("Статика не пересобрана: {error}"),
                     started,
-                )
+                );
             }
         }
-    };
-    report(event);
+    }
     ok
+}
+
+/// Поток публикации правки сущности `id`. Запись в БД шла с `db_started` до сих пор.
+pub fn stream_entity(state: AppState, touched: Touched, db_started: Instant, id: Uuid) -> Response {
+    jobs::stream(
+        &[Step::Db, Step::Search, Step::Isr],
+        move |report| async move {
+            report.finish(Step::Db, StepStatus::Done, "БД обновлена", db_started);
+            let ok = run(&state, touched, &report).await;
+            let entity = match detail_by_id(&state.db, id).await {
+                Ok(entity) => Some(Box::new(entity)),
+                Err(error) => {
+                    tracing::debug!(%error, entity_id = %id, "no card for the done event");
+                    None
+                }
+            };
+            DoneEvent {
+                ok,
+                entity,
+                ..DoneEvent::default()
+            }
+        },
+    )
 }
 
 #[cfg(test)]
@@ -402,24 +230,26 @@ mod tests {
 
     #[test]
     fn paths_follow_frontend_routes() {
-        let slugs = Slugs {
-            entities: vec![
-                (EntityKind::Movie, "dune-2021".into()),
-                (EntityKind::Book, "dune-novel".into()),
-            ],
-            people: vec!["denis-villeneuve".into()],
-        };
         assert_eq!(
-            slugs.paths().collect::<Vec<_>>(),
-            [
-                "/films/dune-2021",
-                "/books/dune-novel",
-                "/people/denis-villeneuve"
-            ]
+            entity_path(EntityKind::Movie, "dune-2021"),
+            "/films/dune-2021"
         );
         assert_eq!(
-            slugs.cache_keys().collect::<Vec<_>>(),
-            ["catalog:person:denis-villeneuve"]
+            entity_path(EntityKind::Book, "dune-novel"),
+            "/books/dune-novel"
         );
+        assert_eq!(entity_path(EntityKind::Series, "x"), "/series/x");
+        assert_eq!(
+            entity_path(EntityKind::Game, "witcher-3"),
+            "/games/witcher-3"
+        );
+        assert_eq!(person_path("denis-villeneuve"), "/people/denis-villeneuve");
+    }
+
+    #[test]
+    fn long_path_lists_are_counted() {
+        let paths: Vec<String> = (0..6).map(|i| format!("/films/{i}")).collect();
+        assert_eq!(list(&paths[..2]), "/films/0, /films/1");
+        assert_eq!(list(&paths), "6 страниц");
     }
 }

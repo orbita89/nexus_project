@@ -1,53 +1,71 @@
-//! Поиск по каталогу через Meilisearch и L3 для карточек людей ([`crate::cards`]).
+//! Поиск по каталогу через Meilisearch.
 //!
-//! Источник правды — PostgreSQL, индексы производные:
-//! - `entities`: поля для поиска и выдачи. Индекс только для поиска: карточку сущности
-//!   (`GET /entities/{slug}`) он не отдаёт. Поле `card` в документе пока остаётся;
-//! - `people`: готовая карточка человека `card` (как `GET /people/{slug}`).
+//! Источник правды — PostgreSQL, индекс `entities` производный и нужен только для поиска:
+//! карточки (`GET /entities/{slug}`, `GET /people/{slug}`) читаются из БД. В документе пока
+//! остаётся и полная карточка `card`, её никто не читает.
 //!
-//! После каждой записи в админке затронутые сущности и люди переотправляются в индексы
+//! После каждой записи в админке затронутые сущности переотправляются в индекс
 //! ([`update_index`] из [`crate::publish::run`]) с ожиданием применения. Ошибка Meilisearch
 //! запись не отменяет, только пишется в лог и в поток публикации.
 //!
-//! Полная перестройка ([`reindex`]) — при старте, по расписанию и `POST /admin/search/reindex`.
-//! Новые индексы строятся рядом и подменяют старые (swap), поиск не пустеет.
+//! **Перестройка** ([`reindex`]) — без простоя и без очистки живого индекса. Поиск всегда
+//! читает индекс `entities` (роль алиаса: в Meilisearch 1.15 алиасов нет):
+//! 1. создаётся теневой `entities_v<unix ms>`;
+//! 2. все сущности из БД пачками по [`BATCH`] уходят в него (`progress` в потоке);
+//! 3. новый индекс должен быть не меньше [`MIN_SIZE_PERCENT`]% текущего — иначе поиск не
+//!    переключается (сломанная или неполная выборка), теневой удаляется; `force` — пропустить;
+//! 4. `swap-indexes`: `entities` получает новые документы атомарно для всех инстансов, а
+//!    `entities_v<ms>` — предыдущую версию (откат — swap обратно);
+//! 5. ротация: хранятся текущая и одна предыдущая версия, `entities_v*` старше удаляются;
+//! 6. вся статика фронтенда пересобирается (`{"all": true}`), только при ручном запуске.
+//!
+//! Перестройка одна за раз: в процессе — набор занятых индексов, между инстансами — блокировка
+//! в Redis. Правки во время перестройки пишутся и в теневой индекс (в пределах инстанса).
 
-use crate::cards::KEY_PREFIX;
-use crate::entities::{check_year, detail_by_id};
+use crate::entities::{check_year, details};
+use crate::jobs::{self, DoneEvent, JobEvent, Reporter, Step, StepStatus};
 use crate::models::{
-    page_bounds, EntityDetail, EntityKind, EntitySummary, Page, Person, PersonDetail,
-    ReindexResult, SearchQuery, PERSON_COLUMNS,
+    page_bounds, Entity, EntityDetail, EntityKind, EntitySummary, Page, ReindexQuery,
+    ReindexResult, SearchQuery, ENTITY_COLUMNS,
 };
 use crate::publish::Touched;
-use crate::{people, validate};
+use crate::validate;
 use axum::extract::State;
 use axum::http::Method;
+use axum::response::Response;
 use axum::Json;
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use serde::Serialize;
 use serde_json::{json, Value};
 use shared::error::ErrorBody;
 use shared::extract::Query;
-use shared::search::SearchError;
+use shared::search::{Search, SearchError};
 use shared::{AdminUser, AppError, AppResult, AppState};
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-/// Имя индекса сущностей (без префикса).
+/// Имя индекса сущностей (без префикса). Его читает поиск.
 pub const INDEX: &str = "entities";
-/// Имя индекса людей (без префикса).
-pub const PEOPLE_INDEX: &str = "people";
 
-/// Сколько документов отправлять одним запросом при перестройке.
-const BATCH: usize = 1000;
+/// Сколько сущностей читать из БД и отправлять одним запросом при перестройке.
+pub const BATCH: usize = 500;
 
-/// Блокировка перестройки по расписанию: одна на все инстансы.
-const REINDEX_LOCK: &str = "catalog:reindex-lock";
+/// Новый индекс меньше этой доли текущего — поиск на него не переключается.
+pub const MIN_SIZE_PERCENT: u64 = 80;
+
+/// Перестройка по расписанию: одна на все инстансы за интервал.
+const SCHEDULE_LOCK: &str = "catalog:reindex-lock";
+/// Идёт перестройка (любая): одна на все инстансы. TTL — на случай падения процесса.
+const RUNNING_LOCK: &str = "catalog:reindex-running";
+const RUNNING_LOCK_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Документ индекса сущностей: поля для отображения в выдаче, для поиска и карточка.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+/// Документ индекса: поля для отображения в выдаче, для поиска и карточка.
+#[derive(Debug, Serialize)]
 struct SearchDoc {
     id: Uuid,
     kind: EntityKind,
@@ -61,24 +79,47 @@ struct SearchDoc {
     year: Option<i32>,
     /// Slug'и тегов: фильтр.
     tags: Vec<String>,
-    /// Названия тегов: поиск.
+    /// Названия тегов: поиск (в порядке slug'ов).
     tag_names: Vec<String>,
     /// Имена участников: поиск («вильнёв» находит его фильмы).
     people: Vec<String>,
-    /// Карточка целиком. Никем не читается (карточка сущности — из БД и статики), пока
-    /// остаётся в документе. Не ищется и не отдаётся поиском.
-    #[sqlx(skip)]
-    card: Option<EntityDetail>,
+    /// Карточка целиком. Никем не читается (карточка — из БД и статики), пока остаётся в
+    /// документе. Не ищется и не отдаётся поиском.
+    card: EntityDetail,
 }
 
-/// Документ индекса людей.
-#[derive(Debug, Serialize)]
-struct PersonDoc {
-    id: Uuid,
-    slug: String,
-    full_name: String,
-    /// Карточка целиком: L3 для `GET /people/{slug}`.
-    card: PersonDetail,
+impl From<EntityDetail> for SearchDoc {
+    fn from(card: EntityDetail) -> Self {
+        let entity = &card.entity;
+        let mut tags: Vec<(String, String)> = card
+            .tags
+            .iter()
+            .map(|tag| (tag.slug.clone(), tag.name.clone()))
+            .collect();
+        tags.sort_unstable();
+        let mut people: Vec<String> = card
+            .credits
+            .iter()
+            .map(|credit| credit.person.full_name.clone())
+            .collect();
+        people.sort_unstable();
+        people.dedup();
+        Self {
+            id: entity.id,
+            kind: entity.kind,
+            slug: entity.slug.clone(),
+            title: entity.title.clone(),
+            original_title: entity.original_title.clone(),
+            description: entity.description.clone(),
+            release_date: entity.release_date,
+            cover_url: entity.cover_url.clone(),
+            year: entity.release_date.map(|date| date.year()),
+            tag_names: tags.iter().map(|(_, name)| name.clone()).collect(),
+            tags: tags.into_iter().map(|(slug, _)| slug).collect(),
+            people,
+            card,
+        }
+    }
 }
 
 fn entity_settings() -> Value {
@@ -89,118 +130,58 @@ fn entity_settings() -> Value {
     })
 }
 
-fn people_settings() -> Value {
-    json!({
-        "searchableAttributes": ["full_name"],
-        "filterableAttributes": ["slug"],
-    })
+/// Документы пачки сущностей: два запроса на карточки, без запроса на каждую.
+async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchDoc>, BoxError> {
+    let cards = details(db, entities)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(cards.into_iter().map(SearchDoc::from).collect())
 }
 
-/// Документы для сущностей `ids` (все, если `None`). Удалённые из БД в ответ не попадают.
-async fn load_docs(db: &sqlx::PgPool, ids: Option<&[Uuid]>) -> Result<Vec<SearchDoc>, BoxError> {
-    let mut docs: Vec<SearchDoc> = sqlx::query_as(
-        "SELECT e.id, e.kind, e.slug, e.title, e.original_title, e.description, e.release_date,
-                e.cover_url, extract(year FROM e.release_date)::int AS year,
-                array(SELECT t.slug FROM entity_tags et JOIN tags t ON t.id = et.tag_id
-                      WHERE et.entity_id = e.id ORDER BY t.slug) AS tags,
-                array(SELECT t.name FROM entity_tags et JOIN tags t ON t.id = et.tag_id
-                      WHERE et.entity_id = e.id ORDER BY t.slug) AS tag_names,
-                array(SELECT DISTINCT p.full_name FROM entity_credits c
-                      JOIN people p ON p.id = c.person_id WHERE c.entity_id = e.id) AS people
-         FROM entities e
-         WHERE $1::uuid[] IS NULL OR e.id = ANY($1)
-         ORDER BY e.id",
-    )
-    .bind(ids)
-    .fetch_all(db)
-    .await?;
-    for doc in &mut docs {
-        // Та же карточка, что отдавал API из БД.
-        match detail_by_id(db, doc.id).await {
-            Ok(card) => doc.card = Some(card),
-            // Удалена между запросами — следующий sync её уберёт.
-            Err(AppError::NotFound) => {}
-            Err(error) => return Err(error.to_string().into()),
-        }
-    }
-    docs.retain(|doc| doc.card.is_some());
-    Ok(docs)
-}
-
-/// Документы для людей `ids` (все, если `None`).
-async fn load_people_docs(
-    db: &sqlx::PgPool,
-    ids: Option<&[Uuid]>,
-) -> Result<Vec<PersonDoc>, BoxError> {
-    let people: Vec<Person> = sqlx::query_as(&format!(
-        "SELECT {PERSON_COLUMNS} FROM people p
-         WHERE $1::uuid[] IS NULL OR p.id = ANY($1) ORDER BY p.id"
-    ))
-    .bind(ids)
-    .fetch_all(db)
-    .await?;
-    let mut docs = Vec::with_capacity(people.len());
-    for person in people {
-        let (id, slug, full_name) = (person.id, person.slug.clone(), person.full_name.clone());
-        let card = people::detail(db, person)
-            .await
-            .map_err(|e| e.to_string())?;
-        docs.push(PersonDoc {
-            id,
-            slug,
-            full_name,
-            card,
-        });
-    }
-    Ok(docs)
-}
-
-/// Переотправляет затронутое в индексы и ждёт применения; удалённое из БД удаляет из индексов.
-/// Вызывается из [`crate::publish::run`] после коммита.
+/// Переотправляет затронутое в индекс (и в теневой, если идёт перестройка) и ждёт применения;
+/// удалённое из БД удаляет из индекса. Вызывается из [`crate::publish::run`] после коммита.
 pub(crate) async fn update_index(state: &AppState, touched: &Touched) -> Result<(), BoxError> {
-    if !touched.entities.is_empty() {
-        let docs = load_docs(&state.db, Some(&touched.entities)).await?;
-        let present: Vec<Uuid> = docs.iter().map(|doc| doc.id).collect();
-        upsert_and_delete(
-            state,
-            INDEX,
-            serde_json::to_value(&docs)?,
-            &touched.entities,
-            &present,
-        )
-        .await?;
+    if touched.entities.is_empty() {
+        return Ok(());
     }
-    if !touched.people.is_empty() {
-        let docs = load_people_docs(&state.db, Some(&touched.people)).await?;
-        let present: Vec<Uuid> = docs.iter().map(|doc| doc.id).collect();
-        upsert_and_delete(
-            state,
-            PEOPLE_INDEX,
-            serde_json::to_value(&docs)?,
-            &touched.people,
-            &present,
-        )
-        .await?;
+    let entities: Vec<Entity> = sqlx::query_as(&format!(
+        "SELECT {ENTITY_COLUMNS} FROM entities e WHERE e.id = ANY($1) ORDER BY e.id"
+    ))
+    .bind(&touched.entities)
+    .fetch_all(&state.db)
+    .await?;
+    let docs = docs_of(&state.db, entities).await?;
+    let present: Vec<Uuid> = docs.iter().map(|doc| doc.id).collect();
+    let docs = serde_json::to_value(&docs)?;
+
+    let main = state.search.index(INDEX);
+    upsert_and_delete(&state.search, &main, &docs, &touched.entities, &present).await?;
+    if let Some(shadow) = shadow_of(&main) {
+        // Не успеет — перестройка перезапишет документ более ранним чтением; не страшно.
+        if let Err(error) =
+            upsert_and_delete(&state.search, &shadow, &docs, &touched.entities, &present).await
+        {
+            tracing::warn!(%error, %shadow, "shadow index sync failed");
+        }
     }
     Ok(())
 }
 
-/// Обновляет документы `docs` и удаляет те из `ids`, которых нет среди `present`. Ждёт применения.
+/// Обновляет документы `docs` в индексе `index` и удаляет те из `ids`, которых нет среди
+/// `present`. Ждёт применения.
 async fn upsert_and_delete(
-    state: &AppState,
-    name: &str,
-    docs: Value,
+    search: &Search,
+    index: &str,
+    docs: &Value,
     ids: &[Uuid],
     present: &[Uuid],
 ) -> Result<(), BoxError> {
-    let index = state.search.index(name);
     if docs.as_array().is_some_and(|docs| !docs.is_empty()) {
-        state
-            .search
+        search
             .call_and_wait(
                 Method::POST,
                 &format!("/indexes/{index}/documents?primaryKey=id"),
-                Some(&docs),
+                Some(docs),
             )
             .await?;
     }
@@ -210,8 +191,7 @@ async fn upsert_and_delete(
         .copied()
         .collect();
     if !deleted.is_empty() {
-        let result = state
-            .search
+        let result = search
             .call_and_wait(
                 Method::POST,
                 &format!("/indexes/{index}/documents/delete-batch"),
@@ -224,94 +204,345 @@ async fn upsert_and_delete(
     Ok(())
 }
 
-/// Одна перестройка за раз в процессе: временные индексы у них общие.
-static REINDEX_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// ---------------------------------------------------------------- перестройка
 
-/// Строит индексы сущностей и людей заново во временных индексах, подменяет ими текущие и
-/// сбрасывает карточки в кэше. Возвращает число сущностей.
-pub async fn reindex(state: &AppState) -> Result<usize, BoxError> {
-    let _guard = REINDEX_MUTEX.lock().await;
-    let entities = load_docs(&state.db, None).await?;
-    let people = load_people_docs(&state.db, None).await?;
-
-    let built = [
-        build_tmp(
-            state,
-            INDEX,
-            entity_settings(),
-            serde_json::to_value(&entities)?,
-        )
-        .await?,
-        build_tmp(
-            state,
-            PEOPLE_INDEX,
-            people_settings(),
-            serde_json::to_value(&people)?,
-        )
-        .await?,
-    ];
-    let search = &state.search;
-    let swaps: Vec<Value> = built
-        .iter()
-        .map(|(main, tmp)| json!({ "indexes": [main, tmp] }))
-        .collect();
-    search
-        .call_and_wait(Method::POST, "/swap-indexes", Some(&json!(swaps)))
-        .await?;
-    for (_, tmp) in &built {
-        search
-            .call_and_wait(Method::DELETE, &format!("/indexes/{tmp}"), None)
-            .await?;
-    }
-
-    // Карточки могли разойтись с новым индексом.
-    state.cache.clear(KEY_PREFIX).await;
-    Ok(entities.len())
+/// Как перестраивать.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReindexOptions {
+    /// Переключить поиск, даже если новый индекс меньше [`MIN_SIZE_PERCENT`]% текущего.
+    pub force: bool,
+    /// Пересобрать всю статику фронтенда в конце. При старте и по расписанию — нет.
+    pub revalidate: bool,
 }
 
-/// Временный индекс `{name}_reindex` с настройками и документами; основной создаётся, если его
-/// нет (swap требует, чтобы оба существовали). Возвращает `(основной, временный)`.
-async fn build_tmp(
-    state: &AppState,
-    name: &str,
-    settings: Value,
-    docs: Value,
-) -> Result<(String, String), BoxError> {
-    let search = &state.search;
-    let main = search.index(name);
-    let tmp = format!("{main}_reindex");
+impl ReindexOptions {
+    /// Шаги для `plan`.
+    pub fn steps(self) -> Vec<Step> {
+        let mut steps = vec![
+            Step::CreateIndex,
+            Step::Fill,
+            Step::Check,
+            Step::Swap,
+            Step::Rotate,
+        ];
+        if self.revalidate {
+            steps.push(Step::Isr);
+        }
+        steps
+    }
+}
 
-    // Остатки прерванной перестройки.
-    ignore(
-        search
-            .call_and_wait(Method::DELETE, &format!("/indexes/{tmp}"), None)
-            .await,
-        "index_not_found",
-    )?;
+#[derive(Debug)]
+pub enum ReindexError {
+    Disabled,
+    /// Уже идёт перестройка (в этом процессе или на другом инстансе).
+    Busy,
+    /// Новый индекс слишком мал: поиск не переключён.
+    TooSmall {
+        new: u64,
+        current: u64,
+    },
+    Failed(String),
+}
+
+impl fmt::Display for ReindexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => write!(f, "search is disabled"),
+            Self::Busy => write!(f, "reindex is already running"),
+            Self::TooSmall { new, current } => write!(
+                f,
+                "new index has {new} documents, current has {current}: less than \
+                 {MIN_SIZE_PERCENT}%, search was not switched (use force=true if intended)"
+            ),
+            Self::Failed(error) => write!(f, "reindex failed: {error}"),
+        }
+    }
+}
+
+impl From<ReindexError> for AppError {
+    fn from(error: ReindexError) -> Self {
+        match error {
+            ReindexError::Disabled => unavailable(),
+            ReindexError::Busy | ReindexError::TooSmall { .. } => {
+                AppError::Conflict(error.to_string())
+            }
+            ReindexError::Failed(_) => {
+                tracing::warn!(%error, "search reindex failed");
+                unavailable()
+            }
+        }
+    }
+}
+
+/// Индексы, которые сейчас перестраиваются в этом процессе (в тестах у каждого свой префикс).
+static RUNNING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+/// Теневой индекс идущей перестройки: основной → теневой.
+static SHADOWS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+fn shadow_of(main: &str) -> Option<String> {
+    SHADOWS.lock().unwrap().as_ref()?.get(main).cloned()
+}
+
+fn set_shadow(main: &str, shadow: Option<String>) {
+    let mut shadows = SHADOWS.lock().unwrap();
+    let shadows = shadows.get_or_insert_with(HashMap::new);
+    match shadow {
+        Some(shadow) => shadows.insert(main.to_string(), shadow),
+        None => shadows.remove(main),
+    };
+}
+
+/// Право на перестройку. Снимать через [`ReindexLock::release`]; в процессе снимается и при drop.
+pub struct ReindexLock {
+    main: String,
+    redis: bool,
+}
+
+impl ReindexLock {
+    pub async fn acquire(state: &AppState) -> Result<Self, ReindexError> {
+        if !state.search.is_enabled() {
+            return Err(ReindexError::Disabled);
+        }
+        let main = state.search.index(INDEX);
+        if !RUNNING
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashSet::new)
+            .insert(main.clone())
+        {
+            return Err(ReindexError::Busy);
+        }
+        let mut lock = Self { main, redis: false };
+        match state.cache.try_lock(RUNNING_LOCK, RUNNING_LOCK_TTL).await {
+            Ok(true) => lock.redis = true,
+            Ok(false) => return Err(ReindexError::Busy),
+            // Без Redis не узнать про другие инстансы: перестраиваем, как раньше.
+            Err(error) => tracing::warn!(%error, "reindex lock unavailable, rebuilding anyway"),
+        }
+        Ok(lock)
+    }
+
+    pub async fn release(mut self, state: &AppState) {
+        if std::mem::take(&mut self.redis) {
+            state.cache.unlock(RUNNING_LOCK).await;
+        }
+    }
+}
+
+impl Drop for ReindexLock {
+    fn drop(&mut self) {
+        if let Some(running) = RUNNING.lock().unwrap().as_mut() {
+            running.remove(&self.main);
+        }
+        set_shadow(&self.main, None);
+    }
+}
+
+/// Перестройка целиком: блокировка, шаги, снятие блокировки.
+pub async fn reindex(
+    state: &AppState,
+    options: ReindexOptions,
+    report: &Reporter,
+) -> Result<ReindexResult, ReindexError> {
+    let lock = ReindexLock::acquire(state).await?;
+    let result = reindex_locked(state, &lock, options, report).await;
+    lock.release(state).await;
+    result
+}
+
+/// Шаги перестройки (см. описание модуля). Каждый сообщает о себе в `report`; упавший шаг —
+/// `failed` и ошибка, следующие не выполняются.
+pub async fn reindex_locked(
+    state: &AppState,
+    lock: &ReindexLock,
+    options: ReindexOptions,
+    report: &Reporter,
+) -> Result<ReindexResult, ReindexError> {
+    let search = &state.search;
+    let main = lock.main.clone();
+    let version = format!("{main}_v{}", unix_ms());
+    let fail = |step: Step, started: Instant, error: String| {
+        report.finish(step, StepStatus::Failed, error.clone(), started);
+        ReindexError::Failed(error)
+    };
+
+    // 1. Теневой индекс. Основной создаётся, если его нет: swap требует оба.
+    let started = report.start(Step::CreateIndex);
+    create_version(search, &main, &version)
+        .await
+        .map_err(|error| fail(Step::CreateIndex, started, error.to_string()))?;
+    set_shadow(&main, Some(version.clone()));
+    report.finish(
+        Step::CreateIndex,
+        StepStatus::Done,
+        format!("Создан теневой индекс {version}"),
+        started,
+    );
+
+    // 2. Все сущности пачками.
+    let started = report.start(Step::Fill);
+    let indexed = match fill(state, &version, report).await {
+        Ok(indexed) => indexed,
+        Err(error) => {
+            drop_index(search, &version).await;
+            return Err(fail(Step::Fill, started, error.to_string()));
+        }
+    };
+    report.finish(
+        Step::Fill,
+        StepStatus::Done,
+        format!("Проиндексировано {indexed} сущностей"),
+        started,
+    );
+
+    // 3. Не переключать на подозрительно маленький индекс.
+    let started = report.start(Step::Check);
+    let sizes = async {
+        Ok::<_, SearchError>((
+            documents(search, &version).await?,
+            documents(search, &main).await?,
+        ))
+    };
+    let (new, current) = match sizes.await {
+        Ok(sizes) => sizes,
+        Err(error) => {
+            drop_index(search, &version).await;
+            return Err(fail(Step::Check, started, error.to_string()));
+        }
+    };
+    let percent = (new * 100).checked_div(current).unwrap_or(100);
+    if new * 100 < current * MIN_SIZE_PERCENT {
+        if !options.force {
+            drop_index(search, &version).await;
+            report.finish(
+                Step::Check,
+                StepStatus::Failed,
+                format!(
+                    "Новый индекс: {new} документов, текущий: {current} ({percent}%). Нужно не \
+                     меньше {MIN_SIZE_PERCENT}% — поиск не переключён, теневой индекс удалён. \
+                     Если сущности удалены намеренно — повторить с force=true"
+                ),
+                started,
+            );
+            return Err(ReindexError::TooSmall { new, current });
+        }
+        report.finish(
+            Step::Check,
+            StepStatus::Done,
+            format!(
+                "Новый индекс: {new} документов, текущий: {current} ({percent}%) — меньше \
+                 {MIN_SIZE_PERCENT}%, но force=true"
+            ),
+            started,
+        );
+    } else {
+        report.finish(
+            Step::Check,
+            StepStatus::Done,
+            format!("Новый индекс: {new} документов, текущий: {current} ({percent}%)"),
+            started,
+        );
+    }
+
+    // 4. Переключение: entities ⇄ entities_v<ms>.
+    let started = report.start(Step::Swap);
+    search
+        .call_and_wait(
+            Method::POST,
+            "/swap-indexes",
+            Some(&json!([{ "indexes": [main, version] }])),
+        )
+        .await
+        .map_err(|error| fail(Step::Swap, started, error.to_string()))?;
+    // До сих пор правки шли и в теневой: ни одна не осталась только в старой версии.
+    set_shadow(&main, None);
+    report.finish(
+        Step::Swap,
+        StepStatus::Done,
+        format!("Поиск переключён на новый индекс; предыдущая версия сохранена в {version}"),
+        started,
+    );
+
+    // 5. Ротация: текущая (main) и предыдущая (version), всё старше — удалить.
+    let started = report.start(Step::Rotate);
+    let deleted = rotate(search, &main, &version)
+        .await
+        .map_err(|error| fail(Step::Rotate, started, error.to_string()))?;
+    let message = if deleted.is_empty() {
+        "Устаревших индексов нет".to_string()
+    } else {
+        format!("Удалены устаревшие индексы: {}", deleted.join(", "))
+    };
+    report.finish(Step::Rotate, StepStatus::Done, message, started);
+
+    // 6. Статика.
+    if options.revalidate {
+        let started = report.start(Step::Isr);
+        if !state.isr.is_enabled() {
+            report.finish(
+                Step::Isr,
+                StepStatus::Skipped,
+                "ISR не настроен (ISR_URL, ISR_SECRET)",
+                started,
+            );
+        } else {
+            match state.isr.revalidate_all().await {
+                Ok(()) => report.finish(
+                    Step::Isr,
+                    StepStatus::Done,
+                    "Вся статика HTML/JSON пересобрана",
+                    started,
+                ),
+                // Поиск уже переключён: перестройка удалась, упала только статика.
+                Err(error) => {
+                    tracing::warn!(%error, "isr full revalidation failed");
+                    report.finish(
+                        Step::Isr,
+                        StepStatus::Failed,
+                        format!("Статика не пересобрана: {error}"),
+                        started,
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(ReindexResult {
+        indexed,
+        previous_count: current,
+        previous_version: version,
+        deleted,
+    })
+}
+
+fn unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+/// Метка версии: `entities_v1759912345123` → `1759912345123`.
+fn version_ms(main: &str, uid: &str) -> Option<u128> {
+    uid.strip_prefix(main)?.strip_prefix("_v")?.parse().ok()
+}
+
+async fn create_version(search: &Search, main: &str, version: &str) -> Result<(), SearchError> {
     search
         .call_and_wait(
             Method::POST,
             "/indexes",
-            Some(&json!({ "uid": tmp, "primaryKey": "id" })),
+            Some(&json!({ "uid": version, "primaryKey": "id" })),
         )
         .await?;
     search
         .call_and_wait(
             Method::PATCH,
-            &format!("/indexes/{tmp}/settings"),
-            Some(&settings),
+            &format!("/indexes/{version}/settings"),
+            Some(&entity_settings()),
         )
         .await?;
-    let docs = docs.as_array().cloned().unwrap_or_default();
-    for chunk in docs.chunks(BATCH) {
-        search
-            .call_and_wait(
-                Method::POST,
-                &format!("/indexes/{tmp}/documents"),
-                Some(&Value::from(chunk)),
-            )
-            .await?;
-    }
     ignore(
         search
             .call_and_wait(
@@ -321,8 +552,98 @@ async fn build_tmp(
             )
             .await,
         "index_already_exists",
-    )?;
-    Ok((main, tmp))
+    )
+}
+
+/// Все сущности из БД пачками по [`BATCH`] (keyset по id) в индекс `version`. Пока Meilisearch
+/// применяет пачку, читается следующая. Возвращает число отправленных документов.
+async fn fill(state: &AppState, version: &str, report: &Reporter) -> Result<usize, BoxError> {
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM entities")
+        .fetch_one(&state.db)
+        .await?;
+    let total = u64::try_from(total).unwrap_or(0);
+    report.progress(Step::Fill, 0, total);
+
+    let mut after: Option<Uuid> = None;
+    let mut indexed: usize = 0;
+    let mut pending: Option<(Value, usize)> = None;
+    loop {
+        let entities: Vec<Entity> = sqlx::query_as(&format!(
+            "SELECT {ENTITY_COLUMNS} FROM entities e
+             WHERE $1::uuid IS NULL OR e.id > $1 ORDER BY e.id LIMIT $2"
+        ))
+        .bind(after)
+        .bind(BATCH as i64)
+        .fetch_all(&state.db)
+        .await?;
+        let Some(last) = entities.last() else { break };
+        after = Some(last.id);
+        let docs = docs_of(&state.db, entities).await?;
+        let count = docs.len();
+        let task = state
+            .search
+            .call(
+                Method::POST,
+                &format!("/indexes/{version}/documents"),
+                Some(&serde_json::to_value(&docs)?),
+            )
+            .await?;
+        if let Some((task, count)) = pending.replace((task, count)) {
+            state.search.wait(&task).await?;
+            indexed += count;
+            report.progress(Step::Fill, indexed as u64, total.max(indexed as u64));
+        }
+    }
+    if let Some((task, count)) = pending {
+        state.search.wait(&task).await?;
+        indexed += count;
+        report.progress(Step::Fill, indexed as u64, total.max(indexed as u64));
+    }
+    Ok(indexed)
+}
+
+async fn documents(search: &Search, index: &str) -> Result<u64, SearchError> {
+    let stats = search
+        .call(Method::GET, &format!("/indexes/{index}/stats"), None)
+        .await?;
+    Ok(stats["numberOfDocuments"].as_u64().unwrap_or(0))
+}
+
+/// Удаляет версии `{main}_v*` старше `keep`. Более новые не трогает (их не бывает: перестройка
+/// одна за раз). Возвращает удалённые.
+async fn rotate(search: &Search, main: &str, keep: &str) -> Result<Vec<String>, SearchError> {
+    let keep_ms = version_ms(main, keep).unwrap_or(0);
+    let indexes = search
+        .call(Method::GET, "/indexes?limit=1000", None)
+        .await?;
+    let mut old: Vec<(u128, String)> = indexes["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|index| index["uid"].as_str())
+        .filter_map(|uid| Some((version_ms(main, uid)?, uid.to_string())))
+        .filter(|(ms, _)| *ms < keep_ms)
+        .collect();
+    old.sort_unstable();
+    for (_, uid) in &old {
+        ignore(
+            search
+                .call_and_wait(Method::DELETE, &format!("/indexes/{uid}"), None)
+                .await,
+            "index_not_found",
+        )?;
+    }
+    Ok(old.into_iter().map(|(_, uid)| uid).collect())
+}
+
+/// Удаляет недостроенный теневой индекс; ошибка — только в лог (уберёт следующая ротация).
+async fn drop_index(search: &Search, index: &str) {
+    let result = search
+        .call_and_wait(Method::DELETE, &format!("/indexes/{index}"), None)
+        .await;
+    if let Err(error) = ignore(result, "index_not_found") {
+        tracing::warn!(%error, %index, "shadow index cleanup failed");
+    }
 }
 
 fn ignore(result: Result<(), SearchError>, code: &str) -> Result<(), SearchError> {
@@ -332,9 +653,9 @@ fn ignore(result: Result<(), SearchError>, code: &str) -> Result<(), SearchError
     }
 }
 
-/// Перестройка индексов в фоне: сразу при старте приложения, затем каждые
+/// Перестройка в фоне: сразу при старте приложения, затем каждые
 /// `SEARCH_REINDEX_INTERVAL_SECS` (если не 0). По расписанию перестраивает только один инстанс:
-/// блокировка в Redis.
+/// блокировка в Redis. Статику фронтенда не трогает.
 pub fn spawn_reindex(state: AppState) {
     if !state.search.is_enabled() {
         return;
@@ -351,7 +672,7 @@ pub fn spawn_reindex(state: AppState) {
             .max(Duration::from_secs(60));
         loop {
             tokio::time::sleep(interval).await;
-            match state.cache.try_lock(REINDEX_LOCK, lock_ttl).await {
+            match state.cache.try_lock(SCHEDULE_LOCK, lock_ttl).await {
                 Ok(true) => run_reindex(&state, "scheduled").await,
                 Ok(false) => tracing::debug!("scheduled reindex is running on another instance"),
                 // Без Redis не узнать, перестраивает ли кто-то ещё: лишняя перестройка безопасна.
@@ -365,8 +686,9 @@ pub fn spawn_reindex(state: AppState) {
 }
 
 async fn run_reindex(state: &AppState, reason: &str) {
-    match reindex(state).await {
-        Ok(indexed) => tracing::info!(indexed, reason, "search index rebuilt"),
+    match reindex(state, ReindexOptions::default(), &Reporter::silent()).await {
+        Ok(result) => tracing::info!(indexed = result.indexed, reason, "search index rebuilt"),
+        Err(ReindexError::Busy) => tracing::info!(reason, "reindex is already running"),
         Err(error) => tracing::warn!(%error, reason, "search index rebuild failed"),
     }
 }
@@ -437,29 +759,112 @@ pub async fn search(
     }))
 }
 
-/// Перестроить поисковый индекс из PostgreSQL. Нужно после загрузки данных в БД в обход API
-/// (`make seed`) или если индекс отстал. Ждёт завершения.
+/// Перестроить поисковый индекс из PostgreSQL без простоя: теневой индекс, проверка размера,
+/// swap, ротация версий, пересборка статики. Ждёт завершения. Лог шагов — `.../reindex/stream`.
+///
+/// Нужно после загрузки данных в БД в обход API (`make seed`) или если индекс отстал.
 #[utoipa::path(
     post, path = "/admin/search/reindex", tag = "catalog-admin",
     security(("bearer" = [])),
+    params(ReindexQuery),
     responses(
-        (status = 200, description = "Индекс перестроен", body = ReindexResult),
+        (status = 200, description = "Индекс перестроен, поиск переключён", body = ReindexResult),
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 409, description = "Перестройка уже идёт или новый индекс меньше 80% текущего (поиск не переключён)", body = ErrorBody),
         (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
     )
 )]
 pub async fn reindex_handler(
     State(state): State<AppState>,
     AdminUser(admin): AdminUser,
+    Query(query): Query<ReindexQuery>,
 ) -> AppResult<Json<ReindexResult>> {
-    if !state.search.is_enabled() {
-        return Err(unavailable());
+    let options = ReindexOptions {
+        force: query.force,
+        revalidate: true,
+    };
+    let result = reindex(&state, options, &Reporter::silent()).await?;
+    tracing::info!(admin_id = %admin.id, indexed = result.indexed, "search index rebuilt");
+    Ok(Json(result))
+}
+
+/// То же, ход перестройки потоком `text/event-stream`: `plan`, `step` по шагам `create_index`,
+/// `fill` (с `progress`: `done`/`total`), `check`, `swap`, `rotate`, `isr`, затем `done`
+/// (`reindex` — итог, если поиск переключён).
+///
+/// Перестройка уже идёт — `409` JSON до потока. Новый индекс меньше 80% текущего — шаг `check`
+/// `failed`, поиск не переключается; `?force=true` — переключить всё равно. Перестройка
+/// доводится до конца, даже если клиент закрыл соединение.
+#[utoipa::path(
+    post, path = "/admin/search/reindex/stream", tag = "catalog-admin",
+    security(("bearer" = [])),
+    params(ReindexQuery),
+    responses(
+        (status = 200, description = "Поток событий перестройки",
+            content_type = "text/event-stream", body = JobEvent),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 409, description = "Перестройка уже идёт", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+    )
+)]
+pub async fn reindex_stream(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Query(query): Query<ReindexQuery>,
+) -> AppResult<Response> {
+    let options = ReindexOptions {
+        force: query.force,
+        revalidate: true,
+    };
+    // До потока: «уже идёт» — обычный 409.
+    let lock = ReindexLock::acquire(&state).await?;
+    tracing::info!(admin_id = %admin.id, force = options.force, "search reindex started");
+    Ok(jobs::stream(&options.steps(), move |report| async move {
+        let result = reindex_locked(&state, &lock, options, &report).await;
+        lock.release(&state).await;
+        match result {
+            Ok(result) => {
+                tracing::info!(indexed = result.indexed, "search index rebuilt");
+                DoneEvent {
+                    ok: true,
+                    reindex: Some(result),
+                    ..DoneEvent::default()
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "search reindex failed");
+                DoneEvent::default()
+            }
+        }
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_names() {
+        assert_eq!(
+            version_ms("entities", "entities_v1759912345123"),
+            Some(1_759_912_345_123)
+        );
+        assert_eq!(version_ms("t_entities", "t_entities_v12"), Some(12));
+        assert_eq!(version_ms("entities", "entities"), None);
+        assert_eq!(version_ms("entities", "entities_reindex"), None);
+        assert_eq!(version_ms("entities", "other_entities_v1"), None);
     }
-    let indexed = reindex(&state).await.map_err(|error| {
-        tracing::warn!(%error, "search reindex failed");
-        unavailable()
-    })?;
-    tracing::info!(admin_id = %admin.id, indexed, "search index rebuilt");
-    Ok(Json(ReindexResult { indexed }))
+
+    #[test]
+    fn steps_follow_options() {
+        let steps = ReindexOptions::default().steps();
+        assert_eq!(steps.last(), Some(&Step::Rotate));
+        let options = ReindexOptions {
+            revalidate: true,
+            ..ReindexOptions::default()
+        };
+        assert_eq!(options.steps().last(), Some(&Step::Isr));
+    }
 }

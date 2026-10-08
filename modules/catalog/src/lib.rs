@@ -4,9 +4,9 @@
 //! Чтение — без авторизации, запись — `/admin/...`, только роль admin.
 
 pub mod admin;
-pub mod cards;
 pub mod directory;
 pub mod entities;
+pub mod jobs;
 pub mod media;
 pub mod metadata;
 pub mod models;
@@ -39,4 +39,5 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::tags::create))
         .routes(routes!(admin::tags::update, admin::tags::delete))
         .routes(routes!(search::reindex_handler))
+        .routes(routes!(search::reindex_stream))
 }

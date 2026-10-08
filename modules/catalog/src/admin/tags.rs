@@ -1,6 +1,7 @@
 //! Админка тегов.
 
 use super::affected_entities;
+use crate::jobs::Reporter;
 use crate::models::{CreateTag, Tag, UpdateTag};
 use crate::publish::{self, Touched};
 use crate::validate::{self, MAX_TITLE};
@@ -90,12 +91,8 @@ pub async fn update(
 
     // slug и название тега есть в поисковых документах сущностей.
     let ids = affected_entities(&state.db, TAG_ENTITIES, id).await?;
-    publish::run(
-        &state,
-        Touched::collect(&state.db, &ids, &[]).await?,
-        |_| {},
-    )
-    .await;
+    let touched = Touched::collect(&state.db, &ids, &[]).await?;
+    publish::run(&state, touched, &Reporter::silent()).await;
     tracing::info!(admin_id = %admin.id, tag_id = %id, "tag updated");
     Ok(Json(tag))
 }
@@ -126,7 +123,7 @@ pub async fn delete(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    publish::run(&state, touched, |_| {}).await;
+    publish::run(&state, touched, &Reporter::silent()).await;
     tracing::info!(admin_id = %admin.id, tag_id = %id, "tag deleted");
     Ok(StatusCode::NO_CONTENT)
 }

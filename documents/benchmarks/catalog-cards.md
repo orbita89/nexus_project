@@ -2,10 +2,11 @@
 
 Задержка карточек `GET /catalog/entities/{slug}` и `GET /catalog/people/{slug}` по уровням кэша
 L1 (память) → L2 (Redis) → L3 (Meilisearch) в сравнении с PostgreSQL, в dev-сборке и в продовом
-образе. Как устроен кэш — [catalog.md](../modules/catalog.md#кэш-карточек-людей-).
+образе.
 
-> С 2026-10-08 карточки сущностей через кэш не идут: `GET /entities/{slug}` читает PostgreSQL, страницы
-> отдаёт статика фронтенда (ISR). Цифры по сущностям ниже — для прежней схемы.
+> С 2026-10-08 карточки через кэш не идут: `GET /entities/{slug}` и `GET /people/{slug}` читают
+> PostgreSQL, страницы отдаёт статика фронтенда (ISR) — [catalog.md](../modules/catalog.md#карточки-).
+> Замер — для прежней схемы, `scripts/bench/cards.sh` её больше не воспроизводит.
 
 ## Как мерили
 

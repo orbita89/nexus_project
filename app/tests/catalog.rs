@@ -1,9 +1,9 @@
-//! Каталог: чтение без авторизации, админка, поиск, карточки людей через Meilisearch и кэш,
-//! публикация правок (поток событий и ревалидация статики фронтенда).
+//! Каталог: чтение без авторизации, админка, поиск, публикация правок (поток событий и
+//! ревалидация статики фронтенда), перестройка индекса с версиями.
 //!
-//! Данные — `fixtures/catalog.sql`. Карточки сущностей читаются из PostgreSQL, карточки людей —
-//! L1 → Redis → Meilisearch, поэтому тесты ходят в настоящие Meilisearch и Redis (`MEILI_URL`,
-//! `MEILI_MASTER_KEY`, `REDIS_URL`, поднимаются `make up`). Фронтенд для ISR — [`FakeIsr`]. У каждого теста свои префиксы
+//! Данные — `fixtures/catalog.sql`. Карточки читаются из PostgreSQL; поиск и перестройка — в
+//! настоящем Meilisearch, блокировка перестройки — в Redis (`MEILI_URL`, `MEILI_MASTER_KEY`,
+//! `REDIS_URL`, поднимаются `make up`). Фронтенд для ISR — [`FakeIsr`]. У каждого теста свои префиксы
 //! индексов и ключей; [`test_utils::Cleanup`] удаляет их и при падении теста.
 
 use axum::http::{Method, StatusCode};
@@ -38,9 +38,13 @@ impl Ctx {
     /// Как в проде: Meilisearch и Redis включены, индексы построены из фикстур.
     async fn new(pool: PgPool) -> Self {
         let ctx = Self::unindexed(pool);
-        catalog::search::reindex(&ctx.state)
-            .await
-            .expect("reindex fixtures");
+        catalog::search::reindex(
+            &ctx.state,
+            catalog::search::ReindexOptions::default(),
+            &catalog::jobs::Reporter::silent(),
+        )
+        .await
+        .expect("reindex fixtures");
         ctx
     }
 
@@ -1025,119 +1029,58 @@ async fn search_follows_admin_changes(pool: PgPool) {
         .await;
 }
 
-// ---------------------------------------------------------------- кэш карточек
-
-impl Ctx {
-    /// Значение ключа карточки в Redis.
-    async fn redis_card(&self, key: &str) -> Option<String> {
-        use shared::cache::L2Store;
-        self.state.cache.wait_pending().await;
-        let store = shared::cache::RedisStore::new(&self.state.config.redis_url).unwrap();
-        store.get(&self.state.cache.full_key(key)).await.unwrap()
-    }
-
-    /// Второй инстанс приложения: те же Meilisearch и Redis, свой пустой L1.
-    fn other_instance(&self) -> AppState {
-        let mut state = self.state.clone();
-        let mut settings = shared::cache::CacheSettings::from_config(&state.config);
-        settings.prefix = self.state.cache.full_key("");
-        state.cache = shared::cache::Cache::redis(settings, &state.config.redis_url);
-        state
-    }
-}
+// ---------------------------------------------------------------- карточки из БД
 
 async fn get_on(state: &AppState, path: &str) -> TestResponse {
     let app = nexus::build_app(state.clone());
     request(app, Method::GET, &format!("{CATALOG}{path}"), None, None).await
 }
 
+/// Карточки сущностей и людей — из PostgreSQL: без Meilisearch и Redis, правки в обход API видны
+/// сразу.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn person_card_goes_l1_then_l2_then_meilisearch(pool: PgPool) {
-    let ctx = Ctx::new(pool).await;
-    let key = "catalog:person:denis-villeneuve";
-    assert_eq!(ctx.redis_card(key).await, None);
+async fn cards_read_postgres_without_search_or_redis(pool: PgPool) {
+    let state = test_utils::with_cache_at(Ctx::base(pool), "redis://127.0.0.1:1");
+    let started = std::time::Instant::now();
 
-    // Холодный старт: из Meilisearch, копия в L1 и Redis.
-    let card = ctx.get_ok("/people/denis-villeneuve").await;
-    assert_eq!(card["full_name"], "Дени Вильнёв");
-    assert!(!card["credits"].as_array().unwrap().is_empty(), "{card}");
-    assert!(ctx.state.cache.peek_l1(key).await.is_some());
-    let cached: Value = serde_json::from_str(&ctx.redis_card(key).await.unwrap()).unwrap();
-    assert_eq!(cached, card);
+    let card = get_on(&state, "/entities/dune-2021").await;
+    assert_eq!(card.status, StatusCode::OK);
+    assert_eq!(card.json()["title"], "Дюна");
+    let card = get_on(&state, "/people/denis-villeneuve").await;
+    assert_eq!(card.status, StatusCode::OK);
+    assert_eq!(card.json()["full_name"], "Дени Вильнёв");
+    for path in ["/entities/nope", "/people/nobody-at-all"] {
+        assert_eq!(get_on(&state, path).await.status, StatusCode::NOT_FOUND);
+    }
 
-    // Без Meilisearch: этот инстанс отдаёт из L1, второй (пустой L1) — из Redis.
-    let index = ctx.state.search.index(catalog::search::PEOPLE_INDEX);
-    ctx.state
-        .search
-        .call_and_wait(Method::DELETE, &format!("/indexes/{index}"), None)
+    sqlx::query("UPDATE people SET full_name = 'Д. Вильнёв' WHERE slug = 'denis-villeneuve'")
+        .execute(&state.db)
         .await
         .unwrap();
-    assert_eq!(ctx.get_ok("/people/denis-villeneuve").await, card);
-    let other = ctx.other_instance();
-    let response = get_on(&other, "/people/denis-villeneuve").await;
-    assert_eq!(response.status, StatusCode::OK);
-    assert_eq!(response.json(), card);
-    assert!(other.cache.peek_l1(key).await.is_some(), "L2 hit fills L1");
-
-    // Есть в БД, но нет ни в кэше, ни в Meilisearch — 404 (в БД чтение не ходит), не кэшируется.
-    assert_eq!(
-        ctx.get("/people/timothee-chalamet").await.status,
-        StatusCode::NOT_FOUND
+    let card = get_on(&state, "/people/denis-villeneuve").await.json();
+    assert_eq!(card["full_name"], "Д. Вильнёв");
+    let card = get_on(&state, "/entities/dune-2021").await.json();
+    assert!(
+        card["credits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["person"]["full_name"] == "Д. Вильнёв"),
+        "{card}"
     );
-    assert_eq!(
-        ctx.redis_card("catalog:person:timothee-chalamet").await,
-        None
-    );
-}
-
-/// Карточка сущности — из PostgreSQL: ни кэша, ни Meilisearch, ни Redis.
-#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn entity_card_reads_postgres_only(pool: PgPool) {
-    let ctx = Ctx::new(pool).await;
-    let card = ctx.get_ok("/entities/dune-2021").await;
-    assert_eq!(card["title"], "Дюна");
-    assert!(ctx
-        .state
-        .cache
-        .peek_l1("catalog:entity:dune-2021")
-        .await
-        .is_none());
-    assert_eq!(ctx.redis_card("catalog:entity:dune-2021").await, None);
-
-    // Правка в обход API и без индекса видна сразу.
-    let index = ctx.state.search.index(catalog::search::INDEX);
-    ctx.state
-        .search
-        .call_and_wait(Method::DELETE, &format!("/indexes/{index}"), None)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE entities SET title = 'Дюна (SQL)' WHERE slug = 'dune-2021'")
-        .execute(&ctx.state.db)
-        .await
-        .unwrap();
-    assert_eq!(
-        ctx.get_ok("/entities/dune-2021").await["title"],
-        "Дюна (SQL)"
-    );
-
-    // Без Meilisearch и с недоступным Redis — тоже 200.
-    let state = test_utils::with_cache_at(Ctx::base(ctx.state.db.clone()), "redis://127.0.0.1:1");
-    let response = get_on(&state, "/entities/dune-2021").await;
-    assert_eq!(response.status, StatusCode::OK);
-    assert_eq!(
-        get_on(&state, "/entities/nope").await.status,
-        StatusCode::NOT_FOUND
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "waited for Redis"
     );
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn admin_changes_are_visible_in_cached_cards(pool: PgPool) {
+async fn admin_changes_are_visible_in_cards(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
-    let other = ctx.other_instance();
     let id = ctx.entity_id("dune-2021").await;
     ctx.get_ok("/people/denis-villeneuve").await;
 
-    // Правка сущности: свежая карточка сразу, и на другом инстансе (Redis сброшен).
+    // Правка сущности: свежая карточка сразу.
     let (status, _) = ctx
         .admin_send(
             Method::PATCH,
@@ -1148,10 +1091,6 @@ async fn admin_changes_are_visible_in_cached_cards(pool: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         ctx.get_ok("/entities/dune-2021").await["title"],
-        "Дюна (2021)"
-    );
-    assert_eq!(
-        get_on(&other, "/entities/dune-2021").await.json()["title"],
         "Дюна (2021)"
     );
     // Карточка режиссёра показывает название сущности.
@@ -1206,10 +1145,6 @@ async fn admin_changes_are_visible_in_cached_cards(pool: PgPool) {
         ctx.get("/entities/dune-movie").await.status,
         StatusCode::NOT_FOUND
     );
-    assert_eq!(
-        get_on(&other, "/entities/dune-movie").await.status,
-        StatusCode::NOT_FOUND
-    );
     let person = ctx.get_ok("/people/denis-villeneuve").await;
     assert!(
         !person["credits"]
@@ -1224,7 +1159,7 @@ async fn admin_changes_are_visible_in_cached_cards(pool: PgPool) {
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn new_cards_are_available_right_after_create(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
-    // 404 не кэшируется: после создания карточка сразу есть.
+    // После создания карточка сразу есть.
     assert_eq!(
         ctx.get("/entities/neuromancer").await.status,
         StatusCode::NOT_FOUND
@@ -1275,62 +1210,233 @@ async fn new_cards_are_available_right_after_create(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn cards_work_without_redis(pool: PgPool) {
-    let ctx = Ctx::new(pool).await;
-    let mut state = ctx.state.clone();
-    state = test_utils::with_cache_at(state, "redis://127.0.0.1:1");
-    let started = std::time::Instant::now();
-    let response = get_on(&state, "/entities/dune-2021").await;
-    assert_eq!(response.status, StatusCode::OK);
-    assert_eq!(response.json()["title"], "Дюна");
-    assert_eq!(
-        get_on(&state, "/people/denis-villeneuve").await.status,
-        StatusCode::OK
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "waited for Redis"
-    );
-}
-
-#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn person_cards_are_503_without_meilisearch(pool: PgPool) {
-    let ctx = Ctx::without_search(pool);
-    let response = ctx.get("/people/denis-villeneuve").await;
-    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
-    // Сущности от Meilisearch не зависят.
-    ctx.get_ok("/entities/dune-2021").await;
-}
-
-#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn search_hits_have_no_card_and_reindex_clears_cache(pool: PgPool) {
+async fn search_hits_have_no_card(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
     let page = ctx.get_ok("/search?q=dune").await;
+    assert!(!page["items"].as_array().unwrap().is_empty());
     for item in page["items"].as_array().unwrap() {
         assert!(item.get("card").is_none(), "{item}");
     }
+}
 
-    ctx.get_ok("/people/denis-villeneuve").await;
-    assert!(ctx
-        .redis_card("catalog:person:denis-villeneuve")
+// ---------------------------------------------------------------- перестройка с версиями
+
+impl Ctx {
+    /// Версии индекса сущностей (`…entities_v<ms>`), по возрастанию.
+    async fn versions(&self) -> Vec<String> {
+        let main = self.state.search.index(catalog::search::INDEX);
+        let indexes = self
+            .state
+            .search
+            .call(Method::GET, "/indexes?limit=1000", None)
+            .await
+            .unwrap();
+        let mut versions: Vec<String> = indexes["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|index| index["uid"].as_str())
+            .filter(|uid| uid.starts_with(&format!("{main}_v")))
+            .map(str::to_string)
+            .collect();
+        versions.sort();
+        versions
+    }
+
+    async fn reindex(&self, query: &str) -> (StatusCode, Value) {
+        self.admin_send(Method::POST, &format!("/admin/search/reindex{query}"), None)
+            .await
+    }
+
+    async fn delete_entities_except(&self, keep: &[&str]) {
+        sqlx::query("DELETE FROM entities WHERE NOT (slug = ANY($1))")
+            .bind(keep)
+            .execute(&self.state.db)
+            .await
+            .unwrap();
+    }
+}
+
+/// Хранятся только текущая версия (индекс `entities`) и одна предыдущая; старые удаляются.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reindex_keeps_current_and_one_previous_version(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let first = ctx.versions().await;
+    assert_eq!(first.len(), 1, "{first:?}");
+
+    let (status, body) = ctx.reindex("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["indexed"], 5);
+    assert_eq!(body["previous_count"], 5);
+    assert_eq!(body["deleted"], json!(first));
+    let second = ctx.versions().await;
+    assert_eq!(second, [body["previous_version"].as_str().unwrap()]);
+    assert_ne!(second, first);
+
+    let (status, body) = ctx.reindex("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(second));
+    assert_eq!(ctx.versions().await.len(), 1);
+
+    // Поиск всё это время работает и видит всё.
+    assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 3);
+}
+
+/// Новый индекс меньше 80% текущего — поиск не переключается, теневой удаляется; ровно 80% и
+/// `force=true` — переключается.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reindex_refuses_to_switch_to_much_smaller_index(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let versions = ctx.versions().await;
+
+    // 1 из 5 — 20%.
+    ctx.delete_entities_except(&["witcher-3"]).await;
+    let (status, body) = ctx.reindex("").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("80%"), "{body}");
+    assert_eq!(ctx.versions().await, versions, "shadow index is removed");
+    assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 3);
+
+    let (status, body) = ctx.reindex("?force=true").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["indexed"], 1);
+    assert_eq!(body["previous_count"], 5);
+    assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 0);
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reindex_switches_at_exactly_80_percent(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    // 4 из 5 — ровно 80%.
+    sqlx::query("DELETE FROM entities WHERE slug = 'witcher-3'")
+        .execute(&ctx.state.db)
         .await
-        .is_some());
+        .unwrap();
+    let (status, body) = ctx.reindex("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["indexed"], 4);
+}
 
-    let (status, _) = ctx
-        .admin_send(Method::POST, "/admin/search/reindex", None)
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reindex_stream_reports_progress_rotation_and_isr(pool: PgPool) {
+    let mut ctx = Ctx::new(pool).await;
+    let isr = FakeIsr::start(StatusCode::OK).await;
+    isr.attach(&mut ctx);
+    let old = ctx.versions().await;
+
+    let token = ctx.admin().await;
+    let response = ctx
+        .send(
+            Method::POST,
+            "/admin/search/reindex/stream",
+            None,
+            Some(&token),
+        )
         .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response.status, StatusCode::OK);
+    let events = sse_events(&response);
+
+    let plan: Vec<&str> = events[0].1["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["step"].as_str().unwrap())
+        .collect();
     assert_eq!(
-        ctx.redis_card("catalog:person:denis-villeneuve").await,
-        None
+        plan,
+        ["create_index", "fill", "check", "swap", "rotate", "isr"]
     );
-    assert!(ctx
-        .state
-        .cache
-        .peek_l1("catalog:person:denis-villeneuve")
+    let finished: Vec<(String, String)> = steps(&events)
+        .into_iter()
+        .filter(|(_, status)| status != "running")
+        .collect();
+    assert_eq!(
+        finished,
+        pairs(&[
+            ("create_index", "done"),
+            ("fill", "done"),
+            ("check", "done"),
+            ("swap", "done"),
+            ("rotate", "done"),
+            ("isr", "done"),
+        ])
+    );
+    let progress: Vec<&Value> = events
+        .iter()
+        .filter(|(event, _)| event == "progress")
+        .map(|(_, data)| data)
+        .collect();
+    assert_eq!(progress.first().unwrap()["done"], 0);
+    let last = progress.last().unwrap();
+    assert_eq!(
+        (last["done"].as_u64(), last["total"].as_u64()),
+        (Some(5), Some(5))
+    );
+
+    let rotate = events
+        .iter()
+        .find(|(_, d)| d["step"] == "rotate" && d["status"] == "done")
+        .unwrap();
+    assert!(
+        rotate.1["message"].as_str().unwrap().contains(&old[0]),
+        "{}",
+        rotate.1
+    );
+    let done = &events.last().unwrap().1;
+    assert_eq!(done["type"], "done");
+    assert_eq!(done["ok"], true);
+    assert_eq!(done["reindex"]["indexed"], 5);
+    assert_eq!(isr.bodies(), [json!({ "all": true })]);
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reindex_stream_reports_refused_switch(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    ctx.delete_entities_except(&["witcher-3"]).await;
+    let token = ctx.admin().await;
+    let response = ctx
+        .send(
+            Method::POST,
+            "/admin/search/reindex/stream",
+            None,
+            Some(&token),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let events = sse_events(&response);
+    let finished: Vec<(String, String)> = steps(&events)
+        .into_iter()
+        .filter(|(_, status)| status != "running")
+        .collect();
+    assert_eq!(
+        finished,
+        pairs(&[
+            ("create_index", "done"),
+            ("fill", "done"),
+            ("check", "failed"),
+        ])
+    );
+    let done = &events.last().unwrap().1;
+    assert_eq!(done["ok"], false);
+    assert!(done.get("reindex").is_none(), "{done}");
+    assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 3);
+}
+
+/// Одна перестройка за раз: вторая — 409 до потока.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reindex_while_running_is_409(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let lock = catalog::search::ReindexLock::acquire(&ctx.state)
         .await
-        .is_none());
-    ctx.get_ok("/people/denis-villeneuve").await;
+        .unwrap();
+    let token = ctx.admin().await;
+    for path in ["/admin/search/reindex", "/admin/search/reindex/stream"] {
+        let response = ctx.send(Method::POST, path, None, Some(&token)).await;
+        assert_eq!(response.status, StatusCode::CONFLICT, "{path}");
+    }
+    lock.release(&ctx.state).await;
+    let (status, _) = ctx.reindex("").await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 // ---------------------------------------------------------------- публикация: поток и ISR
@@ -1374,6 +1480,12 @@ impl FakeIsr {
 
     fn attach(&self, ctx: &mut Ctx) {
         ctx.state.isr = shared::isr::Isr::new(&self.url, "isr-test-secret");
+    }
+
+    /// Тела всех запросов, по порядку.
+    fn bodies(&self) -> Vec<Value> {
+        let requests = self.requests.lock().unwrap();
+        requests.iter().map(|(_, body)| body.clone()).collect()
     }
 
     /// Все пути из всех запросов, по порядку.

@@ -2,12 +2,13 @@
 
 use super::nullable_param;
 use crate::entities::{detail_by_id, tags_of, CREDIT_COLUMNS};
+use crate::jobs::{JobEvent, Reporter};
 use crate::metadata;
 use crate::models::{
     AddCredit, CreateEntity, EntityCredit, EntityCreditRow, EntityDetail, EntityKind, SetTags, Tag,
     UpdateEntity,
 };
-use crate::publish::{self, PublishEvent, Step, StepEvent, StepStatus, Touched};
+use crate::publish::{self, Touched};
 use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -66,7 +67,7 @@ pub async fn create(
     replace_tags(&mut tx, id, &req.tags).await?;
     tx.commit().await?;
 
-    publish::run(&state, Touched::entity(id), |_| {}).await;
+    publish::run(&state, Touched::entity(id), &Reporter::silent()).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, slug = %req.slug, "entity created");
     Ok((
         StatusCode::CREATED,
@@ -98,7 +99,7 @@ pub async fn update(
 ) -> AppResult<Json<EntityDetail>> {
     let touched = write_update(&state, id, req).await?;
     tracing::info!(admin_id = %admin.id, entity_id = %id, "entity updated");
-    publish::run(&state, touched, |_| {}).await;
+    publish::run(&state, touched, &Reporter::silent()).await;
     Ok(Json(detail_by_id(&state.db, id).await?))
 }
 
@@ -106,7 +107,7 @@ pub async fn update(
 /// `text/event-stream` — для лога в админке.
 ///
 /// Неверные поля, чужой slug и отсутствующая сущность — обычные `400`/`409`/`404` с JSON, до
-/// потока. Если запись в БД прошла — `200` и поток событий [`PublishEvent`]: `plan` (все шаги),
+/// потока. Если запись в БД прошла — `200` и поток событий [`JobEvent`]: `plan` (все шаги),
 /// `step` (`running`, затем `done`/`skipped`/`failed` для `db`, `search`, `isr`), последним
 /// `done` с карточкой. Тип события — и в поле `event:`, и в `type` внутри `data:`.
 ///
@@ -120,7 +121,7 @@ pub async fn update(
     request_body = UpdateEntity,
     responses(
         (status = 200, description = "Записано в БД; дальше поток событий публикации",
-            content_type = "text/event-stream", body = PublishEvent),
+            content_type = "text/event-stream", body = JobEvent),
         (status = 400, description = "Неверные поля или metadata", body = ErrorBody),
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Нужна роль admin", body = ErrorBody),
@@ -137,8 +138,7 @@ pub async fn update_stream(
     let started = Instant::now();
     let touched = write_update(&state, id, req).await?;
     tracing::info!(admin_id = %admin.id, entity_id = %id, "entity updated");
-    let db = StepEvent::finished(Step::Db, StepStatus::Done, "БД обновлена", started);
-    Ok(publish::stream_entity(state, touched, db, id))
+    Ok(publish::stream_entity(state, touched, started, id))
 }
 
 /// Проверка и запись правки в БД. Возвращает затронутое (собрано до записи: старый slug).
@@ -237,7 +237,7 @@ pub async fn delete(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    publish::run(&state, touched, |_| {}).await;
+    publish::run(&state, touched, &Reporter::silent()).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, "entity deleted");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -273,12 +273,8 @@ pub async fn set_tags(
     replace_tags(&mut tx, id, &req.tags).await?;
     tx.commit().await?;
 
-    publish::run(
-        &state,
-        Touched::collect(&state.db, &[id], &[]).await?,
-        |_| {},
-    )
-    .await;
+    let touched = Touched::collect(&state.db, &[id], &[]).await?;
+    publish::run(&state, touched, &Reporter::silent()).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, tags = ?req.tags, "entity tags set");
     Ok(Json(tags_of(&state.db, id).await?))
 }
@@ -379,7 +375,7 @@ pub async fn add_credit(
     .await?;
 
     let touched = Touched::collect(&state.db, &[id], &[req.person_id]).await?;
-    publish::run(&state, touched, |_| {}).await;
+    publish::run(&state, touched, &Reporter::silent()).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, %credit_id, "credit added");
     Ok((StatusCode::CREATED, Json(row.into())))
 }
@@ -414,7 +410,7 @@ pub async fn delete_credit(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    publish::run(&state, touched, |_| {}).await;
+    publish::run(&state, touched, &Reporter::silent()).await;
     tracing::info!(admin_id = %admin.id, entity_id = %id, %credit_id, "credit deleted");
     Ok(StatusCode::NO_CONTENT)
 }

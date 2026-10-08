@@ -1,17 +1,15 @@
 //! Люди: список с поиском по имени и карточка с фильмографией. Чтение без авторизации.
 
-use crate::cards::{self, CardKind, MeiliCards};
 use crate::entities::like_pattern;
 use crate::models::{
     page_bounds, ListPeopleQuery, Page, Person, PersonCreditRow, PersonDetail, PersonSummary,
-    ENTITY_SUMMARY_COLUMNS,
+    ENTITY_SUMMARY_COLUMNS, PERSON_COLUMNS,
 };
 use axum::extract::State;
-use axum::response::Response;
 use axum::Json;
 use shared::error::ErrorBody;
 use shared::extract::{Path, Query};
-use shared::{AppResult, AppState};
+use shared::{AppError, AppResult, AppState};
 
 /// Список людей по алфавиту.
 #[utoipa::path(
@@ -53,24 +51,33 @@ pub async fn list(
 
 /// Карточка человека: данные и все его работы любых типов, новые сверху.
 ///
-/// Читается из кэша (память, Redis) и Meilisearch, после правок в админке — сразу свежая.
+/// Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика
+/// фронтенда (SSG/ISR), сюда приходят её пересборка и админка.
 #[utoipa::path(
     get, operation_id = "get_person", path = "/people/{slug}", tag = "catalog",
     params(("slug" = String, Path, description = "slug человека", example = "denis-villeneuve")),
     responses(
         (status = 200, description = "Карточка", body = PersonDetail),
         (status = 404, description = "Не найден", body = ErrorBody),
-        (status = 503, description = "Карточки нет в кэше, а Meilisearch недоступен", body = ErrorBody),
     )
 )]
-pub async fn get(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
-    let source = MeiliCards(state.search.clone());
-    let card = cards::read(&state.cache, &source, CardKind::Person, &slug).await?;
-    Ok(cards::json_response(card))
+pub async fn get(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> AppResult<Json<PersonDetail>> {
+    let person: Option<Person> = sqlx::query_as(&format!(
+        "SELECT {PERSON_COLUMNS} FROM people p WHERE p.slug = $1"
+    ))
+    .bind(&slug)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(Json(
+        detail(&state.db, person.ok_or(AppError::NotFound)?).await?,
+    ))
 }
 
-/// Карточка из БД: для документа поискового индекса.
-pub(crate) async fn detail(db: &sqlx::PgPool, person: Person) -> AppResult<PersonDetail> {
+/// Карточка из БД.
+async fn detail(db: &sqlx::PgPool, person: Person) -> AppResult<PersonDetail> {
     let rows: Vec<PersonCreditRow> = sqlx::query_as(&format!(
         "SELECT c.id, c.role, c.character_name, {ENTITY_SUMMARY_COLUMNS}
          FROM entity_credits c JOIN entities e ON e.id = c.entity_id

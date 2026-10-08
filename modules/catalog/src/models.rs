@@ -403,8 +403,25 @@ pub struct UpdateTag {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ReindexResult {
     /// Сколько сущностей в новом индексе.
-    #[schema(example = 45)]
+    #[schema(example = 100_000)]
     pub indexed: usize,
+    /// Сколько документов было в индексе до перестройки.
+    #[schema(example = 99_870)]
+    pub previous_count: u64,
+    /// Где сохранена предыдущая версия (откат — swap обратно).
+    #[schema(example = "entities_v1759912345123")]
+    pub previous_version: String,
+    /// Удалённые устаревшие версии.
+    #[schema(example = json!(["entities_v1759800000000"]))]
+    pub deleted: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ReindexQuery {
+    /// Переключить поиск, даже если новый индекс меньше 80% текущего (сущности удалены намеренно).
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Отличает отсутствующее поле (`None`) от `null` (`Some(None)`). Вместе с `#[serde(default)]`.

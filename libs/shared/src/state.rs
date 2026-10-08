@@ -20,7 +20,7 @@ pub struct AppState {
     pub mailer: Mailer,
     /// Meilisearch. В тестах по умолчанию выключен (`Search::disabled`).
     pub search: Search,
-    /// Кэш L1 (память) + L2 (Redis) для карточек людей. В тестах по умолчанию выключен.
+    /// Кэш L1 (память) + L2 (Redis); каталог берёт из него блокировки перестройки. В тестах выключен.
     pub cache: Cache,
     /// Ревалидация статики фронтенда. Выключена, если не заданы `ISR_URL` и `ISR_SECRET`.
     pub isr: Isr,

@@ -14,6 +14,7 @@ mod providers;
 
 pub use providers::{HttpFinder, Keys};
 
+use crate::jobs::Reporter;
 use crate::metadata::{self, TrailerProvider, TrailerSource};
 use crate::models::EntityKind;
 use crate::publish::{self, Touched};
@@ -257,7 +258,7 @@ pub async fn run_with<F: Finder>(
     }
     // Обложки есть и в карточках людей: Touched добавит участников.
     let touched = Touched::collect(&state.db, &touched, &[]).await?;
-    publish::run(state, touched, |_| {}).await;
+    publish::run(state, touched, &Reporter::silent()).await;
     Ok(report)
 }
 
