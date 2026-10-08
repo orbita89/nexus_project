@@ -1387,6 +1387,16 @@ async fn reindex_stream_reports_progress_rotation_and_isr(pool: PgPool) {
     assert_eq!(done["ok"], true);
     assert_eq!(done["reindex"]["indexed"], 5);
     assert_eq!(isr.bodies(), [json!({ "all": true })]);
+    // Фронтенд пересобирает в фоне: шаг сообщает «запущена», а не «пересобрана».
+    let isr_done = events
+        .iter()
+        .find(|(_, d)| d["step"] == "isr" && d["status"] == "done")
+        .unwrap();
+    assert!(
+        isr_done.1["message"].as_str().unwrap().contains("запущена"),
+        "{}",
+        isr_done.1
+    );
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]

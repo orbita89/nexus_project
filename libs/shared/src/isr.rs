@@ -68,7 +68,8 @@ impl Isr {
         self.inner.is_some()
     }
 
-    /// Пересобрать всю статику: `{"all": true}` (после перестройки индекса).
+    /// Запустить пересборку всей статики: `{"all": true}` (после перестройки индекса). Фронтенд
+    /// отвечает `202` и пересобирает в фоне: успех значит «запущено», а не «готово».
     pub async fn revalidate_all(&self) -> Result<(), IsrError> {
         let inner = self.inner.as_ref().ok_or(IsrError::Disabled)?;
         inner.post(&json!({ "all": true })).await
