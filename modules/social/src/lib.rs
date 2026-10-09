@@ -19,6 +19,7 @@ pub mod marks;
 pub mod models;
 pub mod posts;
 pub mod profiles;
+pub mod ratings;
 pub mod reactions;
 mod refs;
 pub mod reviews;

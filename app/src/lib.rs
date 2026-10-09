@@ -53,6 +53,8 @@ struct ApiDoc;
             «Select a definition» справа вверху."
     ),
     modifiers(&BearerAuth),
+    // Enum из query-параметров utoipa сам в components не кладёт.
+    components(schemas(catalog::models::EntitySort)),
     tags(
         (name = "catalog", description = "Каталог: сущности, люди, теги, поиск. Без авторизации"),
         (name = "catalog-admin", description = "Управление каталогом. Только роль admin"),
@@ -95,7 +97,8 @@ pub fn directories(db: PgPool) -> Directories {
     Directories {
         entities: Arc::new(catalog::directory::PgEntityDirectory::new(db.clone())),
         users: Arc::new(auth::directory::PgUserDirectory::new(db.clone())),
-        interests: Arc::new(social::directory::PgInterestDirectory::new(db)),
+        interests: Arc::new(social::directory::PgInterestDirectory::new(db.clone())),
+        ratings: Arc::new(catalog::directory::PgEntityRatings::new(db)),
     }
 }
 

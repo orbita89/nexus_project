@@ -1423,9 +1423,19 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Список сущностей: новинки сверху, без даты — в конце.",
+        "summary": "Список сущностей. `sort`: `new` (по умолчанию: новинки сверху, без даты — в конце), `popular`\n(больше оценок), `rating` (выше средняя, без оценок — в конце), `title`.",
+        "description": "Оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в\nтаблицы рецензий не ходит.",
         "operationId": "list_entities",
         "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "По умолчанию `new`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntitySort"
+            }
+          },
           {
             "name": "kind",
             "in": "query",
@@ -2297,6 +2307,16 @@
           "series",
           "book",
           "game"
+        ]
+      },
+      "EntitySort": {
+        "type": "string",
+        "description": "Порядок списка сущностей.",
+        "enum": [
+          "new",
+          "popular",
+          "rating",
+          "title"
         ]
       },
       "EntitySummary": {

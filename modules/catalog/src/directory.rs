@@ -1,6 +1,7 @@
-//! Справочник сущностей для других модулей (`shared::directory::EntityDirectory`).
+//! Справочник сущностей для других модулей (`shared::directory::EntityDirectory`) и сводки оценок
+//! от `social` для сортировок (`shared::directory::EntityRatings`).
 
-use shared::directory::{async_trait, EntityDirectory, EntityRef};
+use shared::directory::{async_trait, EntityDirectory, EntityRatings, EntityRef, RatingStats};
 use shared::AppResult;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -40,5 +41,59 @@ impl EntityDirectory for PgEntityDirectory {
         .fetch_all(&self.db)
         .await?;
         Ok(rows.into_iter().map(|row| (row.id, row)).collect())
+    }
+}
+
+/// Сводки оценок в `entity_ratings` (таблица каталога).
+pub struct PgEntityRatings {
+    db: PgPool,
+}
+
+impl PgEntityRatings {
+    pub fn new(db: PgPool) -> Self {
+        Self { db }
+    }
+}
+
+/// Upsert сводок; сущностей, которых уже нет, пропускает.
+async fn upsert(
+    db: impl sqlx::PgExecutor<'_>,
+    stats: &[(Uuid, RatingStats)],
+) -> Result<(), sqlx::Error> {
+    let ids: Vec<Uuid> = stats.iter().map(|(id, _)| *id).collect();
+    let averages: Vec<Option<f64>> = stats.iter().map(|(_, s)| s.average).collect();
+    let counts: Vec<i64> = stats.iter().map(|(_, s)| s.count).collect();
+    sqlx::query(
+        "INSERT INTO entity_ratings (entity_id, average, count)
+         SELECT v.id, v.average, v.count
+         FROM unnest($1::uuid[], $2::float8[], $3::int8[]) AS v(id, average, count)
+         JOIN entities e ON e.id = v.id
+         ON CONFLICT (entity_id) DO UPDATE
+         SET average = EXCLUDED.average, count = EXCLUDED.count, updated_at = now()",
+    )
+    .bind(ids)
+    .bind(averages)
+    .bind(counts)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+#[async_trait]
+impl EntityRatings for PgEntityRatings {
+    async fn set(&self, stats: &[(Uuid, RatingStats)]) -> AppResult<()> {
+        Ok(upsert(&self.db, stats).await?)
+    }
+
+    async fn replace_all(&self, stats: &[(Uuid, RatingStats)]) -> AppResult<()> {
+        let mut tx = self.db.begin().await?;
+        let ids: Vec<Uuid> = stats.iter().map(|(id, _)| *id).collect();
+        sqlx::query("DELETE FROM entity_ratings WHERE NOT (entity_id = ANY($1))")
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await?;
+        upsert(&mut *tx, stats).await?;
+        tx.commit().await?;
+        Ok(())
     }
 }

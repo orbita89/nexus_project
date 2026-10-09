@@ -5,6 +5,7 @@ use crate::models::{
     ListReviewsQuery, PageQuery, PutReview, RatingSummary, ReactionKind, Reactions, Review,
     ReviewRow, ReviewSort, REVIEW_COLUMNS,
 };
+use crate::ratings;
 use crate::refs;
 use crate::validate::{self, MAX_REVIEW_BODY};
 use axum::extract::State;
@@ -212,6 +213,7 @@ pub async fn put_own(
         &state,
         events::review(kind, saved.review.id, entity.id, user.id),
     );
+    ratings::sync(&state, entity.id).await;
     Ok((status, Json(refs::review(&state, saved.review).await?)))
 }
 
@@ -251,6 +253,7 @@ pub async fn delete_own(
         &state,
         events::review("review.deleted", id, entity.id, user.id),
     );
+    ratings::sync(&state, entity.id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

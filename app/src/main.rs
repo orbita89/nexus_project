@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     auth::cleanup::spawn(state.db.clone());
     catalog::search::spawn_reindex(state.clone());
+    social::ratings::spawn_sync_all(state.clone());
     let app = nexus::build_app(state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;

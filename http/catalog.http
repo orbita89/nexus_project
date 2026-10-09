@@ -48,6 +48,16 @@ GET {{host}}/api/v1/catalog/entities?limit=5
     });
 %}
 
+### Сортировка по оценке: с оценками сверху (сводки присылает social)
+GET {{host}}/api/v1/catalog/entities?sort=rating&limit=3
+
+> {%
+    client.test("200, три сущности", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.length === 3, JSON.stringify(response.body));
+    });
+%}
+
 ### Фильтры: книги с тегом sci-fi
 GET {{host}}/api/v1/catalog/entities?kind=book&tag=sci-fi&limit=100
 

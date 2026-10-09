@@ -1,7 +1,7 @@
 //! Сущности: список с фильтрами и карточка. Чтение без авторизации.
 
 use crate::models::{
-    page_bounds, Entity, EntityCredit, EntityCreditRow, EntityDetail, EntitySummary,
+    page_bounds, Entity, EntityCredit, EntityCreditRow, EntityDetail, EntitySort, EntitySummary,
     ListEntitiesQuery, Page, RelatedWorks, SimilarQuery, Tag, ENTITY_COLUMNS,
     ENTITY_SUMMARY_COLUMNS, TAG_COLUMNS, TAG_ORDER,
 };
@@ -25,7 +25,11 @@ const LIST_FILTER: &str = "
                                AND e.release_date < make_date($3 + 1, 1, 1)))
       AND ($4::text IS NULL OR e.title ILIKE $4 OR e.original_title ILIKE $4)";
 
-/// Список сущностей: новинки сверху, без даты — в конце.
+/// Список сущностей. `sort`: `new` (по умолчанию: новинки сверху, без даты — в конце), `popular`
+/// (больше оценок), `rating` (выше средняя, без оценок — в конце), `title`.
+///
+/// Оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в
+/// таблицы рецензий не ходит.
 #[utoipa::path(
     get, operation_id = "list_entities", path = "/entities", tag = "catalog",
     params(ListEntitiesQuery),
@@ -51,9 +55,22 @@ pub async fn list(
         .bind(&pattern)
         .fetch_one(&state.db)
         .await?;
+    let order = match query.sort.unwrap_or_default() {
+        EntitySort::New => "e.release_date DESC NULLS LAST, e.title, e.id",
+        EntitySort::Popular => {
+            "COALESCE((SELECT r.count FROM entity_ratings r WHERE r.entity_id = e.id), 0) DESC,
+             e.release_date DESC NULLS LAST, e.id"
+        }
+        EntitySort::Rating => {
+            "(SELECT r.average FROM entity_ratings r WHERE r.entity_id = e.id) DESC NULLS LAST,
+             COALESCE((SELECT r.count FROM entity_ratings r WHERE r.entity_id = e.id), 0) DESC,
+             e.release_date DESC NULLS LAST, e.id"
+        }
+        EntitySort::Title => "e.title, e.release_date DESC NULLS LAST, e.id",
+    };
     let items = sqlx::query_as(&format!(
         "SELECT {ENTITY_SUMMARY_COLUMNS} {LIST_FILTER}
-         ORDER BY e.release_date DESC NULLS LAST, e.title, e.id
+         ORDER BY {order}
          LIMIT $5 OFFSET $6"
     ))
     .bind(query.kind)

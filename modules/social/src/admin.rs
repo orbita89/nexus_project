@@ -36,6 +36,7 @@ pub async fn delete_review(
     let (author, entity) = review.ok_or(AppError::NotFound)?;
     tracing::info!(admin_id = %admin.id, review_id = %id, author_id = %author, "review deleted by admin");
     events::publish(&state, events::review("review.deleted", id, entity, author));
+    crate::ratings::sync(&state, entity).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

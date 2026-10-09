@@ -297,9 +297,26 @@ impl From<PersonCreditRow> for PersonCredit {
     }
 }
 
+/// Порядок списка сущностей.
+#[derive(Debug, Clone, Copy, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EntitySort {
+    /// Новинки сверху, без даты — в конце.
+    #[default]
+    New,
+    /// Больше оценок сверху.
+    Popular,
+    /// Выше средняя оценка сверху; без оценок — в конце.
+    Rating,
+    /// По названию.
+    Title,
+}
+
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListEntitiesQuery {
+    /// По умолчанию `new`.
+    pub sort: Option<EntitySort>,
     /// Тип сущности.
     pub kind: Option<EntityKind>,
     /// Slug тега.

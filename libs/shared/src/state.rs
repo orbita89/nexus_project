@@ -2,7 +2,9 @@
 
 use crate::auth::Jwt;
 use crate::cache::{Cache, CacheSettings};
-use crate::directory::{Directories, EntityDirectory, InterestDirectory, UserDirectory};
+use crate::directory::{
+    Directories, EntityDirectory, EntityRatings, InterestDirectory, UserDirectory,
+};
 use crate::events::EventBus;
 use crate::isr::Isr;
 use crate::mail::Mailer;
@@ -30,6 +32,8 @@ pub struct AppState {
     pub users: Arc<dyn UserDirectory>,
     /// Интересы пользователей для других модулей (реализует `social`).
     pub interests: Arc<dyn InterestDirectory>,
+    /// Сводки оценок для сортировок каталога (реализует `catalog`, пишет `social`).
+    pub ratings: Arc<dyn EntityRatings>,
     /// Шина событий: модули публикуют, `realtime` рассылает клиентам.
     pub events: EventBus,
 }
@@ -51,6 +55,7 @@ impl AppState {
             entities: directories.entities,
             users: directories.users,
             interests: directories.interests,
+            ratings: directories.ratings,
             events: EventBus::default(),
         }
     }

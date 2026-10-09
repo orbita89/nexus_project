@@ -2,8 +2,8 @@
 //!
 //! Модуль не ходит SQL'ем в чужие таблицы (см. «Правила границ» в `documents/architecture.md`).
 //! Если `social` нужно название сущности или имя автора, он вызывает трейт отсюда, а реализует
-//! трейт модуль-владелец данных: [`EntityDirectory`] — `catalog`, [`UserDirectory`] — `auth`,
-//! [`InterestDirectory`] — `social`.
+//! трейт модуль-владелец данных: [`EntityDirectory`] и [`EntityRatings`] — `catalog`,
+//! [`UserDirectory`] — `auth`, [`InterestDirectory`] — `social`.
 //! Реализации собирает `app` и кладёт в [`AppState`](crate::AppState); в тестах их можно
 //! подменить: `state.entities = Arc::new(Fake)`.
 //!
@@ -71,10 +71,31 @@ pub trait InterestDirectory: Send + Sync {
     async fn entity_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>>;
 }
 
+/// Сводка оценок сущности: средняя (без округления) и сколько оценок.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RatingStats {
+    /// `None` — оценок нет.
+    pub average: Option<f64>,
+    pub count: i64,
+}
+
+/// Оценки сущностей для каталога: `social` (владелец рецензий) сообщает сводки, `catalog` хранит
+/// их у себя для сортировок списка (`popular`, `rating`). Реализует `catalog`.
+///
+/// Значения абсолютные, не приращения: повтор и пропущенный вызов исправляет следующий.
+#[async_trait]
+pub trait EntityRatings: Send + Sync {
+    /// Заменить сводки этих сущностей. Удалённые сущности пропускаются.
+    async fn set(&self, stats: &[(Uuid, RatingStats)]) -> AppResult<()>;
+    /// Заменить все сводки: у сущностей, которых нет в `stats`, оценок нет.
+    async fn replace_all(&self, stats: &[(Uuid, RatingStats)]) -> AppResult<()>;
+}
+
 /// Все справочники разом: аргумент [`AppState::new`](crate::AppState::new).
 #[derive(Clone)]
 pub struct Directories {
     pub entities: Arc<dyn EntityDirectory>,
     pub users: Arc<dyn UserDirectory>,
     pub interests: Arc<dyn InterestDirectory>,
+    pub ratings: Arc<dyn EntityRatings>,
 }

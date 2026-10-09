@@ -225,6 +225,7 @@
 |---|---|---|
 | `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>` |
 | `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных) |
+| `EntityRatings` | `catalog::directory::PgEntityRatings` | `set`, `replace_all` — `social` сообщает каталогу сводки оценок для сортировок `popular` и `rating` (`social::ratings`: после записи рецензии и при старте) |
 
 В обратную сторону `social` сам реализует `InterestDirectory` (`social::directory::PgInterestDirectory`,
 `entity_ids(user)`): по нему `realtime` узнаёт интересы, не читая `user_interests`.

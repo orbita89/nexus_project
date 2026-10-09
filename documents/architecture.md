@@ -50,7 +50,7 @@ app/ (nexus)  ──собирает──►  modules/auth, catalog, social, re
    права проверяют все модули, а зависеть от `auth` им нельзя. Модуль `auth` только выдаёт токены.
 4. Если модулю нужны данные другого (например, `social` проверяет, что сущность существует), то это
    делается через явный публичный интерфейс (трейт в `shared`), а не через SQL в чужие таблицы.
-   Сделано так: `shared::directory` (`EntityDirectory` реализует catalog, `UserDirectory` — auth),
+   Сделано так: `shared::directory` (`EntityDirectory` и `EntityRatings` реализует catalog, `UserDirectory` — auth),
    реализации лежат в `AppState`, см. [social.md](modules/social.md#чужие-данные-справочники).
 5. Если модулю нужно сообщить другим о том, что произошло (новое сообщение в теме), он публикует
    событие в `shared::events::EventBus` (`state.events`), а не вызывает другой модуль: так `social`

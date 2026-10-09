@@ -2530,6 +2530,7 @@ dependencies = [
  "serde_json",
  "shared",
  "sqlx",
+ "tokio",
  "tracing",
  "utoipa",
  "utoipa-axum",

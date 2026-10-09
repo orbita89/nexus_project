@@ -582,6 +582,108 @@ async fn user_reviews_list(pool: PgPool) {
     assert_eq!(pluck(items(&page), "author/username"), [&alice.username]);
 }
 
+// ---------------------------------------------------------------- оценки в каталоге
+
+/// slug'и страницы каталога `GET /catalog/entities?...`.
+async fn catalog_slugs(ctx: &Ctx, query: &str) -> Vec<String> {
+    let app = nexus::build_app(ctx.state.clone());
+    let response = test_utils::get(app, &format!("/api/v1/catalog/entities?{query}")).await;
+    assert_eq!(response.status, StatusCode::OK, "{query}");
+    response.json()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["slug"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn catalog_sorts_by_ratings_from_social(pool: PgPool) {
+    let ctx = Ctx::new(pool.clone());
+    let users = [
+        ctx.user("alice").await,
+        ctx.user("bob").await,
+        ctx.user("carol").await,
+    ];
+    for (user, slug, rating) in [
+        (0, "dune-novel", 6),
+        (1, "dune-novel", 6),
+        (2, "dune-novel", 7),
+        (0, "dune-2021", 9),
+        (1, "dune-2021", 7),
+        (0, "witcher-3", 10),
+    ] {
+        ctx.review(&users[user], slug, json!({ "rating": rating }))
+            .await;
+    }
+    // Текст без оценки не считается.
+    ctx.review(&users[2], "no-date", json!({ "body": "Ещё не смотрел" }))
+        .await;
+
+    assert_eq!(
+        catalog_slugs(&ctx, "sort=popular").await,
+        [
+            "dune-novel",
+            "dune-2021",
+            "witcher-3",
+            "dune-part-two-2024",
+            "no-date"
+        ]
+    );
+    assert_eq!(
+        catalog_slugs(&ctx, "sort=rating").await,
+        [
+            "witcher-3",
+            "dune-2021",
+            "dune-novel",
+            "dune-part-two-2024",
+            "no-date"
+        ]
+    );
+    assert_eq!(
+        catalog_slugs(&ctx, "sort=title&kind=movie").await,
+        ["dune-2021", "dune-part-two-2024"]
+    );
+    assert_eq!(
+        catalog_slugs(&ctx, "sort=new&limit=2").await,
+        ["dune-part-two-2024", "dune-2021"]
+    );
+
+    // Удалена единственная оценка — сущность без оценок, в конце.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        "/entities/witcher-3/review",
+        None,
+        Some(&users[0]),
+    )
+    .await;
+    assert_eq!(
+        catalog_slugs(&ctx, "sort=rating&limit=3").await,
+        ["dune-2021", "dune-novel", "dune-part-two-2024"]
+    );
+
+    // Записанное в обход API догоняет полная синхронизация при старте.
+    sqlx::query(
+        "INSERT INTO reviews (user_id, entity_id, rating)
+         SELECT u.id, e.id, 10 FROM users u, entities e
+         WHERE u.username = $1 AND e.slug = 'dune-part-two-2024'",
+    )
+    .bind(&users[2].username)
+    .execute(&pool)
+    .await
+    .unwrap();
+    social::ratings::sync_all(&ctx.state).await.unwrap();
+    assert_eq!(
+        catalog_slugs(&ctx, "sort=rating&limit=1").await,
+        ["dune-part-two-2024"]
+    );
+
+    let app = nexus::build_app(ctx.state.clone());
+    let response = test_utils::get(app, "/api/v1/catalog/entities?sort=best").await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+}
+
 // ---------------------------------------------------------------- голоса за рецензии
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
