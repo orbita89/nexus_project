@@ -176,6 +176,7 @@ async fn put_review_creates_then_replaces(pool: PgPool) {
     assert_eq!(created["entity"]["title"], "Дюна");
     assert_eq!(created["entity"]["kind"], "movie");
     assert_eq!(created["entity"]["release_date"], "2021-10-22");
+    assert_eq!(created["is_spoiler"], false);
 
     // Повторный PUT заменяет целиком: текст убран, оценка изменена, id тот же.
     let replaced = ctx
@@ -204,6 +205,43 @@ async fn put_review_creates_then_replaces(pool: PgPool) {
         Some(&alice),
     )
     .await;
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn review_spoiler_flag(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+
+    let review = ctx
+        .review(
+            &alice,
+            "dune-2021",
+            json!({ "rating": 8, "body": "Пол выживает.", "is_spoiler": true }),
+        )
+        .await;
+    assert_eq!(review["is_spoiler"], true);
+    let page = ctx.get_ok("/entities/dune-2021/reviews", None).await;
+    assert_eq!(items(&page)[0]["is_spoiler"], true);
+
+    // Замена целиком: старый клиент без поля снимает отметку.
+    let review = ctx
+        .review(
+            &alice,
+            "dune-2021",
+            json!({ "rating": 8, "body": "Красиво." }),
+        )
+        .await;
+    assert_eq!(review["is_spoiler"], false);
+
+    let response = ctx
+        .send(
+            Method::PUT,
+            "/entities/dune-2021/review",
+            Some(json!({ "rating": 8, "is_spoiler": "yes" })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]

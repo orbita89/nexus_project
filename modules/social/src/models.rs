@@ -19,6 +19,8 @@ pub struct Review {
     #[schema(example = 8)]
     pub rating: Option<i16>,
     pub body: Option<String>,
+    /// В тексте есть спойлеры: фронтенд размывает его, пока читатель не откроет.
+    pub is_spoiler: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -30,11 +32,13 @@ pub struct ReviewRow {
     pub entity_id: Uuid,
     pub rating: Option<i16>,
     pub body: Option<String>,
+    pub is_spoiler: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-pub const REVIEW_COLUMNS: &str = "id, user_id, entity_id, rating, body, created_at, updated_at";
+pub const REVIEW_COLUMNS: &str =
+    "id, user_id, entity_id, rating, body, is_spoiler, created_at, updated_at";
 
 /// Своя рецензия: заменяется целиком. Нужна хотя бы оценка или текст.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -46,6 +50,9 @@ pub struct PutReview {
     /// До 10 000 символов. Пустой — без текста.
     #[schema(example = "Визуально — шедевр.")]
     pub body: Option<String>,
+    /// В тексте есть спойлеры. По умолчанию `false`.
+    #[serde(default)]
+    pub is_spoiler: bool,
 }
 
 /// Сводка оценок сущности. Учитываются все рецензии с оценкой, в том числе без текста.

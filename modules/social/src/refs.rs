@@ -57,6 +57,7 @@ pub async fn reviews(state: &AppState, rows: Vec<ReviewRow>) -> AppResult<Vec<Re
                 id: row.id,
                 rating: row.rating,
                 body: row.body,
+                is_spoiler: row.is_spoiler,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             })

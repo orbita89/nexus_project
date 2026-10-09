@@ -3551,6 +3551,7 @@
                 "id",
                 "author",
                 "entity",
+                "is_spoiler",
                 "created_at",
                 "updated_at"
               ],
@@ -3574,6 +3575,10 @@
                 "id": {
                   "type": "string",
                   "format": "uuid"
+                },
+                "is_spoiler": {
+                  "type": "boolean",
+                  "description": "В тексте есть спойлеры: фронтенд размывает его, пока читатель не откроет."
                 },
                 "rating": {
                   "type": [
@@ -3809,6 +3814,10 @@
             "description": "До 10 000 символов. Пустой — без текста.",
             "example": "Визуально — шедевр."
           },
+          "is_spoiler": {
+            "type": "boolean",
+            "description": "В тексте есть спойлеры. По умолчанию `false`."
+          },
           "rating": {
             "type": [
               "integer",
@@ -3912,6 +3921,7 @@
           "id",
           "author",
           "entity",
+          "is_spoiler",
           "created_at",
           "updated_at"
         ],
@@ -3935,6 +3945,10 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "is_spoiler": {
+            "type": "boolean",
+            "description": "В тексте есть спойлеры: фронтенд размывает его, пока читатель не откроет."
           },
           "rating": {
             "type": [

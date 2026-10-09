@@ -40,6 +40,7 @@
 | `entity_id` | `uuid` | NOT NULL, FK → `entities`, CASCADE | О каком произведении |
 | `rating` | `smallint` | 1–10 или NULL | Оценка |
 | `body` | `text` | | Текст рецензии |
+| `is_spoiler` | `boolean` | NOT NULL, default `false` | В тексте спойлеры (миграция `20261014100000_review_spoilers.sql`) |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
 
 **Ограничения:** одна рецензия на пару «пользователь — произведение» (повторная — это редактирование);
@@ -205,12 +206,12 @@
 | GET | `/entities/{slug}/reviews` | гость | Рецензии на сущность. По умолчанию только с текстом; `all=true` — и оценки без текста. `sort`: `new` (по умолчанию), `rating_desc`, `rating_asc` (без оценки — в конце) |
 | GET | `/entities/{slug}/rating` | гость | Сводка: `{"average": 8.3, "count": 12, "distribution": [n1, ..., n10]}`. Среднее округлено до 0.1, без оценок — `null`. Учитываются все оценки, в том числе без текста |
 | GET | `/entities/{slug}/review` | user | Своя рецензия, нет — 404 |
-| PUT | `/entities/{slug}/review` | user | `{"rating": 1–10, "body": "..."}`: создать (201) или заменить целиком (200). Нужна оценка или текст |
+| PUT | `/entities/{slug}/review` | user | `{"rating": 1–10, "body": "...", "is_spoiler": false}`: создать (201) или заменить целиком (200). Нужна оценка или текст; `is_spoiler` по умолчанию `false` |
 | DELETE | `/entities/{slug}/review` | user | Удалить свою → 204, нет — 404 |
 | GET | `/users/{username}/reviews` | гость | Рецензии пользователя, включая оценки без текста, новые сверху |
 
 Рецензия в ответе: `id`, `author` (`UserRef`), `entity` (`EntityRef`), `rating`, `body`,
-`created_at`, `updated_at`. Рецензии заблокированных пользователей остаются в списках и сводке.
+`is_spoiler`, `created_at`, `updated_at`. Рецензии заблокированных пользователей остаются в списках и сводке.
 Сводка в карточку каталога не попадает: фронтенд запрашивает её отдельно.
 
 ### Подписки

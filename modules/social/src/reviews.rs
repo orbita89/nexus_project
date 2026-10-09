@@ -169,14 +169,17 @@ pub async fn put_own(
 
     // xmax = 0 только у только что вставленной строки: так отличаем создание от замены.
     let saved: Saved = sqlx::query_as(&format!(
-        "INSERT INTO reviews (user_id, entity_id, rating, body) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (user_id, entity_id) DO UPDATE SET rating = EXCLUDED.rating, body = EXCLUDED.body
+        "INSERT INTO reviews (user_id, entity_id, rating, body, is_spoiler)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (user_id, entity_id) DO UPDATE
+         SET rating = EXCLUDED.rating, body = EXCLUDED.body, is_spoiler = EXCLUDED.is_spoiler
          RETURNING {REVIEW_COLUMNS}, (xmax = 0) AS created"
     ))
     .bind(user.id)
     .bind(entity.id)
     .bind(rating)
     .bind(&body)
+    .bind(req.is_spoiler)
     .fetch_one(&state.db)
     .await
     .map_err(validate::missing_reference)?;
