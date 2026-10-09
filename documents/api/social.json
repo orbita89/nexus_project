@@ -2381,6 +2381,65 @@
         ]
       }
     },
+    "/api/v1/social/ratings": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Средние оценки пачкой: для сеток каталога (одна сущность — `GET /entities/{slug}/rating`).",
+        "operationId": "list_ratings",
+        "parameters": [
+          {
+            "name": "slugs",
+            "in": "query",
+            "description": "slug'и через запятую, до 100.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021,dune-1984"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "slug → оценка; неизвестных slug'ов в ответе нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/RatingBrief"
+                  },
+                  "propertyNames": {
+                    "type": "string"
+                  }
+                },
+                "example": {
+                  "dune-1984": {
+                    "average": null,
+                    "count": 0
+                  },
+                  "dune-2021": {
+                    "average": 8.3,
+                    "count": 12
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Нет slug'ов или больше 100",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/social/review-comments/{id}": {
       "delete": {
         "tags": [
@@ -5005,6 +5064,28 @@
           }
         },
         "additionalProperties": false
+      },
+      "RatingBrief": {
+        "type": "object",
+        "description": "Оценка сущности в списке: средняя (округлена до 0.1, `null` — оценок нет) и сколько оценок.",
+        "required": [
+          "count"
+        ],
+        "properties": {
+          "average": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "example": 8.3
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "example": 12
+          }
+        }
       },
       "RatingSummary": {
         "type": "object",

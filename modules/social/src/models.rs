@@ -170,6 +170,23 @@ pub struct Reaction {
     pub kind: ReactionKind,
 }
 
+/// Оценка сущности в списке: средняя (округлена до 0.1, `null` — оценок нет) и сколько оценок.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RatingBrief {
+    #[schema(example = 8.3)]
+    pub average: Option<f64>,
+    #[schema(example = 12)]
+    pub count: i64,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RatingsQuery {
+    /// slug'и через запятую, до 100.
+    #[param(example = "dune-2021,dune-1984")]
+    pub slugs: String,
+}
+
 /// Порядок рецензий сущности.
 #[derive(Debug, Clone, Copy, Default, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]

@@ -2,8 +2,8 @@
 
 use crate::events;
 use crate::models::{
-    ListReviewsQuery, PageQuery, PutReview, RatingSummary, ReactionKind, Reactions, Review,
-    ReviewRow, ReviewSort, REVIEW_COLUMNS,
+    ListReviewsQuery, PageQuery, PutReview, RatingBrief, RatingSummary, RatingsQuery, ReactionKind,
+    Reactions, Review, ReviewRow, ReviewSort, REVIEW_COLUMNS,
 };
 use crate::ratings;
 use crate::refs;
@@ -15,6 +15,7 @@ use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path, Query};
 use shared::pagination::{page_bounds, Page};
 use shared::{AppError, AppResult, AppState, AuthUser};
+use std::collections::HashMap;
 
 /// Рецензии на сущность. По умолчанию только с текстом и новые сверху.
 #[utoipa::path(
@@ -105,6 +106,64 @@ pub async fn rating(
     }
     Ok(Json(summary))
 }
+
+/// Средние оценки пачкой: для сеток каталога (одна сущность — `GET /entities/{slug}/rating`).
+#[utoipa::path(
+    get, operation_id = "list_ratings", path = "/ratings", tag = "reviews",
+    params(RatingsQuery),
+    responses(
+        (status = 200, description = "slug → оценка; неизвестных slug'ов в ответе нет",
+            body = HashMap<String, RatingBrief>,
+            example = json!({
+                "dune-2021": { "average": 8.3, "count": 12 },
+                "dune-1984": { "average": null, "count": 0 }
+            })),
+        (status = 400, description = "Нет slug'ов или больше 100", body = ErrorBody),
+    )
+)]
+pub async fn ratings(
+    State(state): State<AppState>,
+    Query(query): Query<RatingsQuery>,
+) -> AppResult<Json<HashMap<String, RatingBrief>>> {
+    let mut slugs: Vec<String> = query
+        .slugs
+        .split(',')
+        .map(str::trim)
+        .filter(|slug| !slug.is_empty())
+        .map(str::to_string)
+        .collect();
+    slugs.sort_unstable();
+    slugs.dedup();
+    if slugs.is_empty() || slugs.len() > MAX_RATINGS_SLUGS {
+        return Err(AppError::BadRequest(format!(
+            "slugs: 1 to {MAX_RATINGS_SLUGS} comma-separated slugs"
+        )));
+    }
+    let entities = state.entities.by_slugs(&slugs).await?;
+    let ids: Vec<uuid::Uuid> = entities.values().map(|entity| entity.id).collect();
+    let stats: Vec<(uuid::Uuid, Option<f64>, i64)> = sqlx::query_as(
+        "SELECT entity_id, round(avg(rating), 1)::float8, count(rating)
+         FROM reviews WHERE entity_id = ANY($1) AND rating IS NOT NULL GROUP BY entity_id",
+    )
+    .bind(&ids)
+    .fetch_all(&state.db)
+    .await?;
+    let stats: HashMap<uuid::Uuid, (Option<f64>, i64)> = stats
+        .into_iter()
+        .map(|(id, average, count)| (id, (average, count)))
+        .collect();
+    Ok(Json(
+        entities
+            .into_iter()
+            .map(|(slug, entity)| {
+                let (average, count) = stats.get(&entity.id).copied().unwrap_or((None, 0));
+                (slug, RatingBrief { average, count })
+            })
+            .collect(),
+    ))
+}
+
+const MAX_RATINGS_SLUGS: usize = 100;
 
 /// Сводка из пар «оценка — сколько раз».
 fn summary(counts: &[(i16, i64)]) -> RatingSummary {

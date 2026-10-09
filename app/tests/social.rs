@@ -584,6 +584,45 @@ async fn user_reviews_list(pool: PgPool) {
 
 // ---------------------------------------------------------------- оценки в каталоге
 
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn ratings_in_batch(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let (alice, bob) = (ctx.user("alice").await, ctx.user("bob").await);
+    ctx.review(&alice, "dune-2021", json!({ "rating": 9 }))
+        .await;
+    ctx.review(&bob, "dune-2021", json!({ "rating": 8 })).await;
+    ctx.review(&alice, "witcher-3", json!({ "body": "Без оценки" }))
+        .await;
+
+    let ratings = ctx
+        .get_ok(
+            "/ratings?slugs=dune-2021,witcher-3,%20dune-2021,no-such",
+            None,
+        )
+        .await;
+    assert_eq!(
+        ratings,
+        json!({
+            "dune-2021": { "average": 8.5, "count": 2 },
+            "witcher-3": { "average": null, "count": 0 },
+        })
+    );
+
+    let many = (0..101)
+        .map(|i| format!("s{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for query in [
+        "/ratings?slugs=",
+        "/ratings?slugs=,,",
+        "/ratings",
+        &format!("/ratings?slugs={many}"),
+    ] {
+        ctx.expect(StatusCode::BAD_REQUEST, Method::GET, query, None, None)
+            .await;
+    }
+}
+
 /// slug'и страницы каталога `GET /catalog/entities?...`.
 async fn catalog_slugs(ctx: &Ctx, query: &str) -> Vec<String> {
     let app = nexus::build_app(ctx.state.clone());
@@ -2136,6 +2175,14 @@ impl EntityDirectory for FakeEntities {
             .iter()
             .filter(|id| **id == self.dune.id)
             .map(|id| (*id, self.dune.clone()))
+            .collect())
+    }
+
+    async fn by_slugs(&self, slugs: &[String]) -> AppResult<HashMap<String, EntityRef>> {
+        Ok(slugs
+            .iter()
+            .filter(|slug| **slug == self.dune.slug)
+            .map(|slug| (slug.clone(), self.dune.clone()))
             .collect())
     }
 }

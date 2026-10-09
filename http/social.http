@@ -110,6 +110,17 @@ GET {{host}}/api/v1/social/entities/dune-2021/rating
     });
 %}
 
+### Оценки пачкой для сетки каталога
+GET {{host}}/api/v1/social/ratings?slugs=dune-2021,dune-1984,no-such-entity
+
+> {%
+    client.test("200, известные slug'и", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body["dune-2021"].count >= 3, JSON.stringify(response.body));
+        client.assert(!("no-such-entity" in response.body));
+    });
+%}
+
 ### Реакция на «Дюну» 2021
 PUT {{host}}/api/v1/social/entities/dune-2021/reaction
 Authorization: Bearer {{user_token}}

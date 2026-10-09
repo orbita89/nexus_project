@@ -223,7 +223,7 @@
 
 | Трейт | Реализует | Методы |
 |---|---|---|
-| `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>` |
+| `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>`, `by_slugs` → `HashMap<String, EntityRef>` |
 | `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных) |
 | `EntityRatings` | `catalog::directory::PgEntityRatings` | `set`, `replace_all` — `social` сообщает каталогу сводки оценок для сортировок `popular` и `rating` (`social::ratings`: после записи рецензии и при старте) |
 
@@ -269,6 +269,7 @@
 |---|---|---|---|
 | GET | `/entities/{slug}/reviews` | гость | Рецензии на сущность. По умолчанию только с текстом; `all=true` — и оценки без текста. `sort`: `new` (по умолчанию), `rating_desc`, `rating_asc` (без оценки — в конце) |
 | GET | `/entities/{slug}/rating` | гость | Сводка: `{"average": 8.3, "count": 12, "distribution": [n1, ..., n10], "reactions": {"fire": 12, "sad": 3, "think": 5, "bored": 1}}`. Среднее округлено до 0.1, без оценок — `null`. Учитываются все оценки, в том числе без текста; в `reactions` всегда все четыре ключа |
+| GET | `/ratings?slugs=a,b,c` | гость | Средние оценки пачкой для сеток каталога (до 100 slug'ов): `{"dune-2021": {"average": 8.3, "count": 12}}`. Без оценок — `{"average": null, "count": 0}`, неизвестных slug'ов в ответе нет; пусто или больше 100 — 400 |
 | GET | `/entities/{slug}/review` | user | Своя рецензия, нет — 404 |
 | PUT | `/entities/{slug}/review` | user | `{"rating": 1–10, "body": "...", "is_spoiler": false}`: создать (201) или заменить целиком (200). Нужна оценка или текст; `is_spoiler` по умолчанию `false`. До выхода (`release_date` позже сегодняшней даты UTC) — 409 `not_released`; без даты — можно |
 | DELETE | `/entities/{slug}/review` | user | Удалить свою → 204, нет — 404. Можно и до выхода (премьеру перенесли) |

@@ -42,6 +42,22 @@ impl EntityDirectory for PgEntityDirectory {
         .await?;
         Ok(rows.into_iter().map(|row| (row.id, row)).collect())
     }
+
+    async fn by_slugs(&self, slugs: &[String]) -> AppResult<HashMap<String, EntityRef>> {
+        if slugs.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<EntityRef> = sqlx::query_as(&format!(
+            "SELECT {REF_COLUMNS} FROM entities WHERE slug = ANY($1)"
+        ))
+        .bind(slugs)
+        .fetch_all(&self.db)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.slug.clone(), row))
+            .collect())
+    }
 }
 
 /// Сводки оценок в `entity_ratings` (таблица каталога).

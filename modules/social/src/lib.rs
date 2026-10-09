@@ -36,6 +36,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(profiles::get))
         .routes(routes!(reviews::list_for_entity))
         .routes(routes!(reviews::rating))
+        .routes(routes!(reviews::ratings))
         .routes(routes!(
             reviews::get_own,
             reviews::put_own,

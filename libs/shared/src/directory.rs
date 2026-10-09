@@ -53,6 +53,8 @@ pub trait EntityDirectory: Send + Sync {
     async fn by_slug(&self, slug: &str) -> AppResult<Option<EntityRef>>;
     /// Сущности по id. Несуществующих id в ответе нет.
     async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, EntityRef>>;
+    /// Сущности по slug'ам (ключ — slug). Несуществующих в ответе нет.
+    async fn by_slugs(&self, slugs: &[String]) -> AppResult<HashMap<String, EntityRef>>;
 }
 
 /// Пользователи. Реализует `auth`.
