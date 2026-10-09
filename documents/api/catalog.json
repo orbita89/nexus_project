@@ -412,6 +412,200 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/entities/{id}/relations": {
+      "put": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Связать сущность с другой: `to_id` — её сиквел, приквел или ремейк.",
+        "operationId": "put_entity_relation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сущности",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutRelation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Связанные произведения сущности после правки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelatedWorks"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля или `to_id` не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Связь с собой (`self_relation`) или такая связь уже есть (`conflict`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/entities/{id}/relations/{to_id}": {
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Убрать связь с `to_id` этого вида (с какой бы стороны она ни была записана).",
+        "operationId": "delete_entity_relation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сущности",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "to_id",
+            "in": "path",
+            "description": "id связанной сущности",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Вид связи.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Вид связи в админке. `prequel` — то же, что `sequel` в обратную сторону.",
+              "enum": [
+                "sequel",
+                "prequel",
+                "remake"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "400": {
+            "description": "Нет или неверный `kind`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Такой связи нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/entities/{id}/stream": {
       "patch": {
         "tags": [
@@ -1924,7 +2118,8 @@
             "type": "object",
             "required": [
               "tags",
-              "credits"
+              "credits",
+              "related"
             ],
             "properties": {
               "credits": {
@@ -1932,6 +2127,9 @@
                 "items": {
                   "$ref": "#/components/schemas/EntityCredit"
                 }
+              },
+              "related": {
+                "$ref": "#/components/schemas/RelatedWorks"
               },
               "tags": {
                 "type": "array",
@@ -1942,7 +2140,7 @@
             }
           }
         ],
-        "description": "Карточка: сущность, теги и участники в порядке титров."
+        "description": "Карточка: сущность, теги, участники в порядке титров и связанные произведения."
       },
       "EntityKind": {
         "type": "string",
@@ -2616,6 +2814,32 @@
           }
         }
       },
+      "PutRelation": {
+        "type": "object",
+        "description": "Связать сущность с другой.",
+        "required": [
+          "kind",
+          "to_id"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/RelationKind"
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Порядок при одинаковой дате выхода, по умолчанию 0."
+          },
+          "to_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
       "ReindexResult": {
         "type": "object",
         "required": [
@@ -2654,6 +2878,47 @@
             "example": "entities_v1759912345123"
           }
         }
+      },
+      "RelatedWorks": {
+        "type": "object",
+        "description": "Связанные произведения, каждая группа — по дате выхода (без даты — в конце). Пустые — `[]`.",
+        "required": [
+          "prequels",
+          "sequels",
+          "remakes"
+        ],
+        "properties": {
+          "prequels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntitySummary"
+            },
+            "description": "Это сиквел для них."
+          },
+          "remakes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntitySummary"
+            },
+            "description": "Ремейки в обе стороны: оригинал видит ремейки, ремейк — оригинал."
+          },
+          "sequels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntitySummary"
+            },
+            "description": "Сиквелы этого."
+          }
+        }
+      },
+      "RelationKind": {
+        "type": "string",
+        "description": "Вид связи в админке. `prequel` — то же, что `sequel` в обратную сторону.",
+        "enum": [
+          "sequel",
+          "prequel",
+          "remake"
+        ]
       },
       "SeriesMetadata": {
         "type": "object",

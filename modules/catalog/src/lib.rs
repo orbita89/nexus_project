@@ -34,6 +34,8 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::entities::set_tags))
         .routes(routes!(admin::entities::add_credit))
         .routes(routes!(admin::entities::delete_credit))
+        .routes(routes!(admin::relations::put))
+        .routes(routes!(admin::relations::delete))
         .routes(routes!(admin::people::create))
         .routes(routes!(admin::people::update, admin::people::delete))
         .routes(routes!(admin::tags::create))

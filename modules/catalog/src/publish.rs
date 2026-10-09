@@ -18,8 +18,9 @@ use uuid::Uuid;
 
 /// Что затронула запись в каталоге: какие документы переотправить и какие страницы пересобрать.
 ///
-/// Связи раскрываются сами: у сущности — её участники (их страницы показывают сущность),
-/// у человека — его работы (их страницы и документы показывают человека). Собирать **до**
+/// Связи раскрываются сами: у сущности — её участники (их страницы показывают сущность) и
+/// связанные произведения (сиквелы, приквелы, ремейки показывают её в `related`), у человека — его
+/// работы (их страницы и документы показывают человека). Собирать **до**
 /// записи, если запись удаляет или меняет slug: старые адреса запоминаются, чтобы пересобрать и их.
 #[derive(Debug, Default)]
 pub struct Touched {
@@ -47,8 +48,15 @@ impl Touched {
         .bind(people)
         .fetch_all(db)
         .await?;
+        let related: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT to_id FROM entity_relations WHERE from_id = ANY($1)
+             UNION SELECT from_id FROM entity_relations WHERE to_id = ANY($1)",
+        )
+        .bind(entities)
+        .fetch_all(db)
+        .await?;
         let mut touched = Self {
-            entities: merge(entities, entities_of),
+            entities: merge(entities, merge(&entities_of, related)),
             people: merge(people, people_of),
             before: Vec::new(),
         };
@@ -60,6 +68,15 @@ impl Touched {
     pub fn entity(id: Uuid) -> Self {
         Self {
             entities: vec![id],
+            ..Self::default()
+        }
+    }
+
+    /// Сущности, у которых поменялись только связи между собой: их slug'и не меняются, а
+    /// участников и связанных пересобирать незачем.
+    pub fn entities(ids: &[Uuid]) -> Self {
+        Self {
+            entities: merge(ids, Vec::new()),
             ..Self::default()
         }
     }

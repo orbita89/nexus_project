@@ -85,13 +85,55 @@ pub struct Entity {
 pub const ENTITY_COLUMNS: &str = "e.id, e.kind, e.slug, e.title, e.original_title, e.description, \
      e.release_date, e.cover_url, e.metadata, e.created_at, e.updated_at";
 
-/// Карточка: сущность, теги и участники в порядке титров.
+/// Карточка: сущность, теги, участники в порядке титров и связанные произведения.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EntityDetail {
     #[serde(flatten)]
     pub entity: Entity,
     pub tags: Vec<Tag>,
     pub credits: Vec<EntityCredit>,
+    pub related: RelatedWorks,
+}
+
+/// Связанные произведения, каждая группа — по дате выхода (без даты — в конце). Пустые — `[]`.
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct RelatedWorks {
+    /// Это сиквел для них.
+    pub prequels: Vec<EntitySummary>,
+    /// Сиквелы этого.
+    pub sequels: Vec<EntitySummary>,
+    /// Ремейки в обе стороны: оригинал видит ремейки, ремейк — оригинал.
+    pub remakes: Vec<EntitySummary>,
+}
+
+/// Вид связи в админке. `prequel` — то же, что `sequel` в обратную сторону.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RelationKind {
+    /// `to_id` — сиквел этой сущности.
+    Sequel,
+    /// `to_id` — приквел этой сущности.
+    Prequel,
+    /// `to_id` — ремейк этой сущности (или её оригинал: показывается в обе стороны).
+    Remake,
+}
+
+/// Связать сущность с другой.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PutRelation {
+    pub kind: RelationKind,
+    pub to_id: Uuid,
+    /// Порядок при одинаковой дате выхода, по умолчанию 0.
+    pub position: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RelationQuery {
+    /// Вид связи.
+    #[param(inline)]
+    pub kind: RelationKind,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]

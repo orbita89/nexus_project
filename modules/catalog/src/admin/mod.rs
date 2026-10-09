@@ -4,6 +4,7 @@
 
 pub mod entities;
 pub mod people;
+pub mod relations;
 pub mod tags;
 
 use uuid::Uuid;

@@ -410,4 +410,21 @@ FROM (VALUES
 ) AS v(entity, person, role, character_name, position)
 ON CONFLICT DO NOTHING;
 
+-- Связанные произведения: to — сиквел (ремейк) from. Приквелы — обратное чтение.
+INSERT INTO entity_relations (from_id, to_id, kind)
+SELECT (SELECT id FROM entities WHERE slug = v.from_slug), (SELECT id FROM entities WHERE slug = v.to_slug),
+       v.kind
+FROM (VALUES
+    ('dune-1984',                          'dune-2021',                    'remake'),
+    ('dune-2021',                          'dune-part-two-2024',           'sequel'),
+    ('dune-novel',                         'dune-messiah',                 'sequel'),
+    ('the-hobbit-unexpected-journey-2012', 'lotr-fellowship-2001',         'sequel'),
+    ('lotr-fellowship-2001',               'lotr-two-towers-2002',         'sequel'),
+    ('lotr-two-towers-2002',               'lotr-return-of-the-king-2003', 'sequel'),
+    ('blade-runner-1982',                  'blade-runner-2049',            'sequel'),
+    ('stalker-shadow-of-chernobyl',        'stalker-2',                    'sequel'),
+    ('metro-2033-game',                    'metro-exodus',                 'sequel')
+) AS v(from_slug, to_slug, kind)
+ON CONFLICT DO NOTHING;
+
 COMMIT;

@@ -2,7 +2,7 @@
 
 use crate::models::{
     page_bounds, Entity, EntityCredit, EntityCreditRow, EntityDetail, EntitySummary,
-    ListEntitiesQuery, Page, Tag, ENTITY_COLUMNS, ENTITY_SUMMARY_COLUMNS,
+    ListEntitiesQuery, Page, RelatedWorks, Tag, ENTITY_COLUMNS, ENTITY_SUMMARY_COLUMNS,
 };
 use axum::extract::State;
 use axum::Json;
@@ -118,7 +118,7 @@ async fn detail(db: impl PgExecutor<'_> + Copy, entity: Entity) -> AppResult<Ent
     Ok(cards.pop().expect("one card per entity"))
 }
 
-/// Карточки пачкой: два запроса на любое число сущностей (перестройка индекса). Порядок — как у
+/// Карточки пачкой: три запроса на любое число сущностей (перестройка индекса). Порядок — как у
 /// `entities`.
 pub(crate) async fn details(
     db: impl PgExecutor<'_> + Copy,
@@ -161,14 +161,64 @@ pub(crate) async fn details(
     for CreditOf { entity_id, row } in credits {
         credits_by.entry(entity_id).or_default().push(row.into());
     }
+    let mut related_by = related(db, &ids).await?;
     Ok(entities
         .into_iter()
         .map(|entity| EntityDetail {
             tags: tags_by.remove(&entity.id).unwrap_or_default(),
             credits: credits_by.remove(&entity.id).unwrap_or_default(),
+            related: related_by.remove(&entity.id).unwrap_or_default(),
             entity,
         })
         .collect())
+}
+
+/// Связанные произведения сущностей `ids`. Сиквел в таблице — `from → to`: для `from` это сиквел,
+/// для `to` — приквел; ремейк виден с обеих сторон.
+async fn related(db: impl PgExecutor<'_>, ids: &[Uuid]) -> AppResult<HashMap<Uuid, RelatedWorks>> {
+    #[derive(sqlx::FromRow)]
+    struct RelatedOf {
+        owner: Uuid,
+        group_name: String,
+        #[sqlx(flatten)]
+        entity: EntitySummary,
+    }
+    let rows: Vec<RelatedOf> = sqlx::query_as(&format!(
+        "SELECT v.owner, v.group_name, {ENTITY_SUMMARY_COLUMNS}
+         FROM (
+             SELECT from_id AS owner, to_id AS other, 'sequels' AS group_name, position
+             FROM entity_relations WHERE kind = 'sequel' AND from_id = ANY($1)
+             UNION ALL
+             SELECT to_id, from_id, 'prequels', position
+             FROM entity_relations WHERE kind = 'sequel' AND to_id = ANY($1)
+             UNION ALL
+             SELECT from_id, to_id, 'remakes', position
+             FROM entity_relations WHERE kind = 'remake' AND from_id = ANY($1)
+             UNION ALL
+             SELECT to_id, from_id, 'remakes', position
+             FROM entity_relations WHERE kind = 'remake' AND to_id = ANY($1)
+         ) v JOIN entities e ON e.id = v.other
+         ORDER BY e.release_date NULLS LAST, v.position, e.title, e.id"
+    ))
+    .bind(ids)
+    .fetch_all(db)
+    .await?;
+
+    let mut by: HashMap<Uuid, RelatedWorks> = HashMap::new();
+    for RelatedOf {
+        owner,
+        group_name,
+        entity,
+    } in rows
+    {
+        let works = by.entry(owner).or_default();
+        match group_name.as_str() {
+            "sequels" => works.sequels.push(entity),
+            "prequels" => works.prequels.push(entity),
+            _ => works.remakes.push(entity),
+        }
+    }
+    Ok(by)
 }
 
 pub(crate) async fn tags_of(db: impl PgExecutor<'_>, entity_id: Uuid) -> AppResult<Vec<Tag>> {

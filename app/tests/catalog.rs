@@ -13,6 +13,7 @@ use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use test_utils::{request, Cleanup, TestResponse};
+use uuid::Uuid;
 
 const CATALOG: &str = "/api/v1/catalog";
 
@@ -383,6 +384,11 @@ async fn admin_endpoints_require_admin(pool: PgPool) {
         (
             Method::DELETE,
             format!("/admin/entities/{id}/credits/{any}"),
+        ),
+        (Method::PUT, format!("/admin/entities/{id}/relations")),
+        (
+            Method::DELETE,
+            format!("/admin/entities/{id}/relations/{any}?kind=sequel"),
         ),
         (Method::POST, "/admin/people".to_string()),
         (Method::PATCH, format!("/admin/people/{any}")),
@@ -1741,6 +1747,161 @@ async fn admin_writes_revalidate_static_pages(pool: PgPool) {
     );
 }
 
+// ---------------------------------------------------------------- связанные произведения
+
+fn related_slugs<'a>(card: &'a Value, group: &str) -> Vec<&'a str> {
+    card["related"][group]
+        .as_array()
+        .unwrap_or_else(|| panic!("related.{group} in {card}"))
+        .iter()
+        .map(|item| item["slug"].as_str().unwrap())
+        .collect()
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn relations_show_in_both_cards(pool: PgPool) {
+    let mut ctx = Ctx::without_search(pool);
+    let isr = FakeIsr::start(StatusCode::OK).await;
+    isr.attach(&mut ctx);
+    let first = ctx.entity_id("dune-2021").await;
+    let second = ctx.entity_id("dune-part-two-2024").await;
+    let novel = ctx.entity_id("dune-novel").await;
+    let undated = ctx.entity_id("no-date").await;
+
+    // Связей нет — группы пустые, но есть.
+    let card = ctx.get_ok("/entities/dune-2021").await;
+    assert_eq!(
+        card["related"],
+        json!({ "prequels": [], "sequels": [], "remakes": [] })
+    );
+
+    let relate = |id: &str, kind: &str, to: &str| {
+        let path = format!("/admin/entities/{id}/relations");
+        let body = json!({ "kind": kind, "to_id": to });
+        let ctx = &ctx;
+        async move { ctx.admin_send(Method::PUT, &path, Some(body)).await }
+    };
+    let (status, related) = relate(&first, "sequel", &second).await;
+    assert_eq!(status, StatusCode::OK, "{related}");
+    assert_eq!(related["sequels"][0]["slug"], "dune-part-two-2024");
+    assert_eq!(related["sequels"][0]["release_date"], "2024-03-01");
+    // Публикуются обе карточки.
+    let paths = isr.paths();
+    assert!(paths.contains(&"/films/dune-2021".to_string()), "{paths:?}");
+    assert!(
+        paths.contains(&"/films/dune-part-two-2024".to_string()),
+        "{paths:?}"
+    );
+    let card = ctx.get_ok("/entities/dune-part-two-2024").await;
+    assert_eq!(related_slugs(&card, "prequels"), ["dune-2021"]);
+    assert!(related_slugs(&card, "sequels").is_empty());
+
+    // Тот же сиквел с другой стороны (как приквел) или повтор — 409.
+    for (id, kind, to) in [(&second, "prequel", &first), (&first, "sequel", &second)] {
+        let (status, body) = relate(id, kind, to).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "conflict");
+    }
+    // Приквел записывается как сиквел наоборот; без даты — в конце группы.
+    let (status, _) = relate(&undated, "prequel", &first).await;
+    assert_eq!(status, StatusCode::OK);
+    let card = ctx.get_ok("/entities/dune-2021").await;
+    assert_eq!(
+        related_slugs(&card, "sequels"),
+        ["dune-part-two-2024", "no-date"]
+    );
+
+    // Ремейк виден с обеих сторон, обратный дубль — 409.
+    let (status, _) = relate(&novel, "remake", &first).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        related_slugs(&ctx.get_ok("/entities/dune-2021").await, "remakes"),
+        ["dune-novel"]
+    );
+    assert_eq!(
+        related_slugs(&ctx.get_ok("/entities/dune-novel").await, "remakes"),
+        ["dune-2021"]
+    );
+    let (status, _) = relate(&first, "remake", &novel).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Удалить: приквел — со стороны сиквела, ремейк — с любой.
+    let delete = |id: &str, to: &str, kind: &str| {
+        let path = format!("/admin/entities/{id}/relations/{to}?kind={kind}");
+        let ctx = &ctx;
+        async move { ctx.admin_send(Method::DELETE, &path, None).await.0 }
+    };
+    assert_eq!(
+        delete(&second, &first, "prequel").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        delete(&second, &first, "prequel").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        delete(&first, &novel, "remake").await,
+        StatusCode::NO_CONTENT
+    );
+    let card = ctx.get_ok("/entities/dune-2021").await;
+    assert_eq!(related_slugs(&card, "sequels"), ["no-date"]);
+    assert!(related_slugs(&card, "remakes").is_empty());
+
+    // Удаление сущности убирает связи и пересобирает связанные карточки.
+    let before = isr.paths().len();
+    let (status, _) = ctx
+        .admin_send(Method::DELETE, &format!("/admin/entities/{undated}"), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(isr.paths()[before..].contains(&"/films/dune-2021".to_string()));
+    let card = ctx.get_ok("/entities/dune-2021").await;
+    assert!(related_slugs(&card, "sequels").is_empty());
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn relations_validate(pool: PgPool) {
+    let ctx = Ctx::without_search(pool);
+    let id = ctx.entity_id("dune-2021").await;
+    let other = ctx.entity_id("dune-novel").await;
+    let any = Uuid::new_v4();
+    let path = format!("/admin/entities/{id}/relations");
+
+    let (status, body) = ctx
+        .admin_send(
+            Method::PUT,
+            &path,
+            Some(json!({ "kind": "sequel", "to_id": id })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "self_relation");
+    for body in [
+        json!({ "kind": "sequel", "to_id": any }),
+        json!({ "kind": "spinoff", "to_id": other }),
+        json!({ "kind": "sequel" }),
+        json!({ "kind": "sequel", "to_id": other, "position": -1 }),
+    ] {
+        let (status, error) = ctx.admin_send(Method::PUT, &path, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
+    }
+    let (status, _) = ctx
+        .admin_send(
+            Method::PUT,
+            &format!("/admin/entities/{any}/relations"),
+            Some(json!({ "kind": "sequel", "to_id": other })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = ctx
+        .admin_send(
+            Method::DELETE,
+            &format!("/admin/entities/{id}/relations/{other}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 // ---------------------------------------------------------------- дамп
 
 /// `seeds/catalog.sql` загружается и проходит те же проверки metadata, что и API.
@@ -1778,6 +1939,20 @@ async fn seed_catalog_is_valid(pool: PgPool) {
         .as_str()
         .unwrap()
         .contains("openlibrary.org"));
+
+    // Связанные: ремейк в обе стороны, сиквел и приквел.
+    assert_eq!(related_slugs(&dune, "remakes"), ["dune-1984"]);
+    assert_eq!(related_slugs(&dune, "sequels"), ["dune-part-two-2024"]);
+    assert_eq!(related_slugs(&lynch, "remakes"), ["dune-2021"]);
+    let fellowship = ctx.get_ok("/entities/lotr-fellowship-2001").await;
+    assert_eq!(
+        related_slugs(&fellowship, "prequels"),
+        ["the-hobbit-unexpected-journey-2012"]
+    );
+    assert_eq!(
+        related_slugs(&fellowship, "sequels"),
+        ["lotr-two-towers-2002"]
+    );
 
     // Франшиза в разных типах: книга, фильм и игра по «Пикнику на обочине».
     let card = ctx.get_ok("/people/arkady-strugatsky").await;

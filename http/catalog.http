@@ -87,6 +87,8 @@ GET {{host}}/api/v1/catalog/entities/dune-2021
         client.assert(response.body.credits[0].person.slug === "denis-villeneuve");
         client.assert(response.body.tags.some(t => t.slug === "sci-fi"));
         client.assert(response.body.metadata.runtime_min === 155);
+        client.assert(response.body.related.remakes.some(e => e.slug === "dune-1984"), JSON.stringify(response.body.related));
+        client.assert(response.body.related.sequels.some(e => e.slug === "dune-part-two-2024"));
     });
 %}
 
@@ -276,6 +278,59 @@ GET {{host}}/api/v1/catalog/search?q=Zzhttpcheck
         client.assert(response.status === 200, `got ${response.status}`);
         client.assert(response.body.items.some(e => e.id === client.global.get("entity_id")), JSON.stringify(response.body));
     });
+%}
+
+### Связанные: новая книга — сиквел «Дюны» (роман)
+GET {{host}}/api/v1/catalog/entities/dune-novel
+
+> {%
+    client.global.set("dune_novel_id", response.body.id);
+%}
+
+###
+PUT {{host}}/api/v1/catalog/admin/entities/{{entity_id}}/relations
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "kind": "prequel", "to_id": "{{dune_novel_id}}" }
+
+> {%
+    client.test("200, приквел — роман", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.prequels.some(e => e.slug === "dune-novel"), JSON.stringify(response.body));
+    });
+%}
+
+### Роман видит сиквел в карточке
+GET {{host}}/api/v1/catalog/entities/dune-novel
+
+> {%
+    client.test("200, новая книга в sequels", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.related.sequels.some(e => e.id === client.global.get("entity_id")), JSON.stringify(response.body.related));
+    });
+%}
+
+### Связь с собой → 409
+PUT {{host}}/api/v1/catalog/admin/entities/{{entity_id}}/relations
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "kind": "sequel", "to_id": "{{entity_id}}" }
+
+> {%
+    client.test("409 self_relation", () => {
+        client.assert(response.status === 409, `got ${response.status}`);
+        client.assert(response.body.code === "self_relation");
+    });
+%}
+
+### Убрать связь
+DELETE {{host}}/api/v1/catalog/admin/entities/{{entity_id}}/relations/{{dune_novel_id}}?kind=prequel
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
 %}
 
 ### Удалить участника
