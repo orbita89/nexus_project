@@ -9,6 +9,7 @@
 
 pub mod admin;
 pub mod collections;
+pub mod comments;
 pub mod directory;
 mod events;
 pub mod feed;
@@ -40,6 +41,8 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(reviews::list_for_user))
         .routes(routes!(votes::put, votes::delete))
         .routes(routes!(votes::mine))
+        .routes(routes!(comments::list, comments::create))
+        .routes(routes!(comments::delete))
         .routes(routes!(follows::follow, follows::unfollow))
         .routes(routes!(follows::followers))
         .routes(routes!(follows::following))
@@ -67,6 +70,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(posts::create))
         .routes(routes!(posts::update, posts::delete))
         .routes(routes!(admin::delete_review))
+        .routes(routes!(admin::delete_review_comment))
         .routes(routes!(admin::delete_collection))
         .routes(routes!(admin::delete_thread))
         .routes(routes!(admin::delete_post))

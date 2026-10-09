@@ -42,6 +42,7 @@
 | `body` | `text` | | Текст рецензии |
 | `is_spoiler` | `boolean` | NOT NULL, default `false` | В тексте спойлеры (миграция `20261014100000_review_spoilers.sql`) |
 | `likes_count`, `dislikes_count` | `bigint` | NOT NULL, ≥ 0 | Голоса, пишет триггер на `review_votes` |
+| `comments_count` | `bigint` | NOT NULL, ≥ 0 | Комментарии без удалённых, пишет триггер на `review_comments` |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер, только при правке `rating`, `body`, `is_spoiler`: счётчики его не меняют |
 
 **Ограничения:** одна рецензия на пару «пользователь — произведение» (повторная — это редактирование);
@@ -64,6 +65,23 @@
 Один голос на пару «пользователь — рецензия»; за свою рецензию голосовать нельзя (проверяет код).
 Счётчики `reviews.likes_count` / `dislikes_count` обновляет триггер `review_votes_count` в той же
 транзакции — и при каскадном удалении голосов. **Индексы:** PK; `user_id` — свои голоса на карточке.
+
+### `review_comments` ✅ — комментарии к рецензиям
+
+Миграция `20261014120000_review_comments.sql`.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK | |
+| `review_id` | `uuid` | NOT NULL, FK → `reviews`, CASCADE | |
+| `author_id` | `uuid` | NOT NULL, FK → `users`, CASCADE | |
+| `body` | `text` | NOT NULL, 1–2000 символов | |
+| `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
+| `deleted_at` | `timestamptz` | | Удалён автором или admin: из списков пропадает |
+
+Плоский список без веток. Ограничения частоты нет, как и у сообщений форума. `reviews.comments_count` (без удалённых) обновляет триггер
+`review_comments_count`. **Индексы:** частичный (`review_id`, `created_at`) для неудалённых —
+комментарии рецензии по порядку.
 
 ### `collections` ✅ — коллекции
 
@@ -227,10 +245,13 @@
 | GET | `/users/{username}/reviews` | гость | Рецензии пользователя, включая оценки без текста, новые сверху |
 | PUT | `/reviews/{id}/vote` | user | `{"value": 1 \| -1}` — лайк или дизлайк; другой `value` меняет голос → 200 `{"likes_count", "dislikes_count", "value"}`. За свою рецензию — 403 `own_review` |
 | DELETE | `/reviews/{id}/vote` | user | Снять голос → 200, `value: null` (голоса не было — тоже 200) |
+| GET | `/reviews/{id}/comments` | гость | Комментарии к рецензии, старые сверху: `{id, review_id, author, body, created_at, updated_at}` |
+| POST | `/reviews/{id}/comments` | user | `{"body": "..."}` (1–2000 символов) → 201. Оценку без текста — 409 `review_without_text` |
+| DELETE | `/review-comments/{id}` | автор комментария | → 204; чужой — 403, уже удалён — 404 |
 | GET | `/entities/{slug}/votes/mine` | user | Свои голоса за рецензии сущности: `{"<id рецензии>": 1 \| -1}` — один запрос на карточку |
 
 Рецензия в ответе: `id`, `author` (`UserRef`), `entity` (`EntityRef`), `rating`, `body`,
-`is_spoiler`, `likes_count`, `dislikes_count`, `created_at`, `updated_at`.
+`is_spoiler`, `likes_count`, `dislikes_count`, `comments_count`, `created_at`, `updated_at`.
 
 **Личное — отдельными запросами.** Публичные списки (рецензии, сводка, комментарии) одинаковы для
 всех и читаются без токена — их можно кэшировать. Поэтому «мой голос», «моя реакция», «моя
@@ -345,7 +366,8 @@ WebSocket-соединений пользователя (`interest.added` / `int
 
 | Метод | Путь | Что делает |
 |---|---|---|
-| DELETE | `/admin/reviews/{id}` | Удалить любую рецензию → 204 |
+| DELETE | `/admin/reviews/{id}` | Удалить любую рецензию → 204 (голоса и комментарии — вместе с ней) |
+| DELETE | `/admin/review-comments/{id}` | Удалить любой комментарий к рецензии → 204 |
 | DELETE | `/admin/collections/{id}` | Удалить любую коллекцию, в том числе приватную → 204 |
 | DELETE | `/admin/threads/{id}` | Удалить любую тему вместе с сообщениями → 204 |
 | DELETE | `/admin/posts/{id}` | Удалить любое сообщение → 204 (с ответами — заглушка, как у автора) |
@@ -366,6 +388,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `body` темы | 1–20 000 символов |
 | `entities` темы | 1–10 slug'ов без повторов; неизвестный — 400 |
 | `body` сообщения | 1–10 000 символов |
+| `body` комментария к рецензии | 1–2000 символов |
 
 Строки обрезаются по краям, пустая необязательная строка становится `null`. Неизвестные поля в
 теле — 400.
@@ -419,6 +442,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `post.updated`, `post.deleted` | тема | `thread_id`, `post_id` |
 | `reply.created` | автор сообщения, на которое ответили (себе — нет) | `thread_id`, `post_id`, `parent_id`, `author_id` |
 | `review.created`, `review.updated`, `review.deleted` | сущность | `review_id`, `entity_id`, `author_id` |
+| `review.commented`, `review.comment_deleted` | сущность | `review_id`, `comment_id`, `entity_id`, `author_id` |
 | `interest.added`, `interest.removed` | пользователь | `entity_id` |
 
 `thread.updated` — и правка автором, и закрытие/открытие admin; `thread.deleted` и `post.deleted` —

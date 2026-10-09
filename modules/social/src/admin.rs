@@ -1,5 +1,7 @@
-//! Модерация: admin удаляет любую рецензию, коллекцию, тему и сообщение, закрывает темы.
+//! Модерация: admin удаляет любую рецензию, комментарий к ней, коллекцию, тему и сообщение,
+//! закрывает темы.
 
+use crate::comments;
 use crate::events;
 use crate::posts;
 use axum::extract::State;
@@ -34,6 +36,29 @@ pub async fn delete_review(
     let (author, entity) = review.ok_or(AppError::NotFound)?;
     tracing::info!(admin_id = %admin.id, review_id = %id, author_id = %author, "review deleted by admin");
     events::publish(&state, events::review("review.deleted", id, entity, author));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Удалить любой комментарий к рецензии.
+#[utoipa::path(
+    delete, operation_id = "admin_delete_review_comment", path = "/admin/review-comments/{id}",
+    tag = "social-admin",
+    security(("bearer" = [])),
+    params(("id" = Uuid, Path, description = "id комментария")),
+    responses(
+        (status = 204, description = "Удалён"),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Нет или уже удалён", body = ErrorBody),
+    )
+)]
+pub async fn delete_review_comment(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let author = comments::remove(&state, id, None).await?;
+    tracing::info!(admin_id = %admin.id, comment_id = %id, author_id = %author, "review comment deleted by admin");
     Ok(StatusCode::NO_CONTENT)
 }
 

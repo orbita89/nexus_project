@@ -26,6 +26,9 @@ pub struct Review {
     pub likes_count: i64,
     #[schema(example = 1)]
     pub dislikes_count: i64,
+    /// Комментарии, без удалённых.
+    #[schema(example = 3)]
+    pub comments_count: i64,
     pub created_at: DateTime<Utc>,
     /// Когда автор правил рецензию (голоса и комментарии не считаются).
     pub updated_at: DateTime<Utc>,
@@ -41,12 +44,13 @@ pub struct ReviewRow {
     pub is_spoiler: bool,
     pub likes_count: i64,
     pub dislikes_count: i64,
+    pub comments_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 pub const REVIEW_COLUMNS: &str = "id, user_id, entity_id, rating, body, is_spoiler, \
-     likes_count, dislikes_count, created_at, updated_at";
+     likes_count, dislikes_count, comments_count, created_at, updated_at";
 
 /// Своя рецензия: заменяется целиком. Нужна хотя бы оценка или текст.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -61,6 +65,39 @@ pub struct PutReview {
     /// В тексте есть спойлеры. По умолчанию `false`.
     #[serde(default)]
     pub is_spoiler: bool,
+}
+
+/// Комментарий к рецензии.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReviewComment {
+    pub id: Uuid,
+    pub review_id: Uuid,
+    pub author: UserRef,
+    #[schema(example = "Согласен, звук в IMAX — отдельное удовольствие.")]
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ReviewCommentRow {
+    pub id: Uuid,
+    pub review_id: Uuid,
+    pub author_id: Uuid,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub const COMMENT_COLUMNS: &str = "id, review_id, author_id, body, created_at, updated_at";
+
+/// Новый комментарий к рецензии.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateReviewComment {
+    /// 1–2000 символов.
+    #[schema(example = "Согласен, звук в IMAX — отдельное удовольствие.")]
+    pub body: String,
 }
 
 /// Голос за рецензию: `1` — лайк, `-1` — дизлайк.

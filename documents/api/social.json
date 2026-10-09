@@ -132,6 +132,67 @@
         ]
       }
     },
+    "/api/v1/social/admin/review-comments/{id}": {
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Удалить любой комментарий к рецензии.",
+        "operationId": "admin_delete_review_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id комментария",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или уже удалён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/admin/reviews/{id}": {
       "delete": {
         "tags": [
@@ -1944,6 +2005,226 @@
         ]
       }
     },
+    "/api/v1/social/review-comments/{id}": {
+      "delete": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Удалить свой комментарий.",
+        "operationId": "delete_review_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id комментария",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужой комментарий",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или уже удалён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/reviews/{id}/comments": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Комментарии к рецензии по времени: старые сверху.",
+        "operationId": "list_review_comments",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id рецензии",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница комментариев",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ReviewComment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Рецензия не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Прокомментировать рецензию. Оценку без текста комментировать нельзя.",
+        "operationId": "create_review_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id рецензии",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReviewComment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создан",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewComment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пустой или длиннее 2000 символов текст",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Рецензия не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Оценка без текста (`code`: `review_without_text`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/reviews/{id}/vote": {
       "put": {
         "tags": [
@@ -3176,6 +3457,21 @@
         },
         "additionalProperties": false
       },
+      "CreateReviewComment": {
+        "type": "object",
+        "description": "Новый комментарий к рецензии.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "1–2000 символов.",
+            "example": "Согласен, звук в IMAX — отдельное удовольствие."
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateThread": {
         "type": "object",
         "description": "Новая тема.",
@@ -3776,6 +4072,7 @@
                 "is_spoiler",
                 "likes_count",
                 "dislikes_count",
+                "comments_count",
                 "created_at",
                 "updated_at"
               ],
@@ -3788,6 +4085,12 @@
                     "string",
                     "null"
                   ]
+                },
+                "comments_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Комментарии, без удалённых.",
+                  "example": 3
                 },
                 "created_at": {
                   "type": "string",
@@ -3828,6 +4131,74 @@
                   "type": "string",
                   "format": "date-time",
                   "description": "Когда автор правил рецензию (голоса и комментарии не считаются)."
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_ReviewComment": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Комментарий к рецензии.",
+              "required": [
+                "id",
+                "review_id",
+                "author",
+                "body",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "author": {
+                  "$ref": "#/components/schemas/UserRef"
+                },
+                "body": {
+                  "type": "string",
+                  "example": "Согласен, звук в IMAX — отдельное удовольствие."
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "review_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
                 }
               }
             }
@@ -4175,6 +4546,7 @@
           "is_spoiler",
           "likes_count",
           "dislikes_count",
+          "comments_count",
           "created_at",
           "updated_at"
         ],
@@ -4187,6 +4559,12 @@
               "string",
               "null"
             ]
+          },
+          "comments_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Комментарии, без удалённых.",
+            "example": 3
           },
           "created_at": {
             "type": "string",
@@ -4227,6 +4605,43 @@
             "type": "string",
             "format": "date-time",
             "description": "Когда автор правил рецензию (голоса и комментарии не считаются)."
+          }
+        }
+      },
+      "ReviewComment": {
+        "type": "object",
+        "description": "Комментарий к рецензии.",
+        "required": [
+          "id",
+          "review_id",
+          "author",
+          "body",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "author": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "body": {
+            "type": "string",
+            "example": "Согласен, звук в IMAX — отдельное удовольствие."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "review_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },

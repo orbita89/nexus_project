@@ -9,6 +9,7 @@
 //! | `post.updated`, `post.deleted` | тема | `thread_id`, `post_id` |
 //! | `reply.created` | автор родителя (если отвечает не он сам) | `thread_id`, `post_id`, `parent_id`, `author_id` |
 //! | `review.created`, `review.updated`, `review.deleted` | сущность | `review_id`, `entity_id`, `author_id` |
+//! | `review.commented`, `review.comment_deleted` | сущность | `review_id`, `comment_id`, `entity_id`, `author_id` |
 //! | `interest.added`, `interest.removed` | пользователь | `entity_id` |
 
 use serde_json::json;
@@ -99,6 +100,26 @@ pub fn review(kind: &'static str, review_id: Uuid, entity_id: Uuid, author_id: U
         kind,
         vec![Channel::Entity(entity_id)],
         json!({ "review_id": review_id, "entity_id": entity_id, "author_id": author_id }),
+    )
+}
+
+/// `review.commented` или `review.comment_deleted`: карточка перечитывает комментарии рецензии.
+pub fn review_comment(
+    kind: &'static str,
+    review_id: Uuid,
+    comment_id: Uuid,
+    entity_id: Uuid,
+    author_id: Uuid,
+) -> Event {
+    Event::new(
+        kind,
+        vec![Channel::Entity(entity_id)],
+        json!({
+            "review_id": review_id,
+            "comment_id": comment_id,
+            "entity_id": entity_id,
+            "author_id": author_id,
+        }),
     )
 }
 

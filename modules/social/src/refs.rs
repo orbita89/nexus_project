@@ -6,7 +6,7 @@
 
 use crate::models::{
     Collection, CollectionItem, CollectionItemRow, CollectionRow, Interest, InterestRow, Post,
-    PostRow, Review, ReviewRow, Thread, ThreadRow,
+    PostRow, Review, ReviewComment, ReviewCommentRow, ReviewRow, Thread, ThreadRow,
 };
 use shared::directory::{EntityRef, UserRef};
 use shared::{AppError, AppResult, AppState};
@@ -73,6 +73,7 @@ pub async fn reviews(state: &AppState, rows: Vec<ReviewRow>) -> AppResult<Vec<Re
                 is_spoiler: row.is_spoiler,
                 likes_count: row.likes_count,
                 dislikes_count: row.dislikes_count,
+                comments_count: row.comments_count,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             })
@@ -85,6 +86,26 @@ pub async fn review(state: &AppState, row: ReviewRow) -> AppResult<Review> {
         .await?
         .pop()
         .ok_or(AppError::NotFound)
+}
+
+pub async fn comments(
+    state: &AppState,
+    rows: Vec<ReviewCommentRow>,
+) -> AppResult<Vec<ReviewComment>> {
+    let users = users(state, rows.iter().map(|r| r.author_id).collect()).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(ReviewComment {
+                author: users.get(&row.author_id)?.clone(),
+                id: row.id,
+                review_id: row.review_id,
+                body: row.body,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            })
+        })
+        .collect())
 }
 
 pub async fn collections(state: &AppState, rows: Vec<CollectionRow>) -> AppResult<Vec<Collection>> {

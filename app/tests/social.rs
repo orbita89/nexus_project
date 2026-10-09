@@ -747,6 +747,220 @@ async fn review_votes_errors(pool: PgPool) {
     .await;
 }
 
+// ---------------------------------------------------------------- комментарии к рецензиям
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn review_comments_flow(pool: PgPool) {
+    use shared::events::Channel;
+
+    let ctx = Ctx::new(pool.clone());
+    let (alice, bob, carol) = (
+        ctx.user("alice").await,
+        ctx.user("bob").await,
+        ctx.user("carol").await,
+    );
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let review = ctx
+        .review(
+            &alice,
+            "dune-2021",
+            json!({ "rating": 9, "body": "Красиво" }),
+        )
+        .await;
+    assert_eq!(review["comments_count"], 0);
+    let path = format!("/reviews/{}/comments", review["id"].as_str().unwrap());
+    let mut events = ctx.state.events.subscribe();
+
+    let first = ctx
+        .expect(
+            StatusCode::CREATED,
+            Method::POST,
+            &path,
+            Some(json!({ "body": "  Согласен  " })),
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(first["body"], "Согласен");
+    assert_eq!(first["author"]["username"], bob.username.as_str());
+    assert_eq!(first["review_id"], review["id"]);
+    let event = events.try_recv().expect("review.commented");
+    assert_eq!(event.kind, "review.commented");
+    assert!(matches!(event.channels[0], Channel::Entity(_)));
+    assert_eq!(event.data["comment_id"], first["id"]);
+    assert_eq!(event.data["review_id"], review["id"]);
+
+    // Автор рецензии тоже может ответить.
+    for (user, text) in [(&carol, "А мне скучно"), (&alice, "Спасибо")] {
+        ctx.expect(
+            StatusCode::CREATED,
+            Method::POST,
+            &path,
+            Some(json!({ "body": text })),
+            Some(user),
+        )
+        .await;
+    }
+
+    // Публично, старые сверху; счётчик — в рецензии.
+    let page = ctx.get_ok(&path, None).await;
+    assert_eq!(page["total"], 3);
+    assert_eq!(
+        pluck(items(&page), "body"),
+        ["Согласен", "А мне скучно", "Спасибо"]
+    );
+    let page = ctx.get_ok(&format!("{path}?limit=1&offset=1"), None).await;
+    assert_eq!(pluck(items(&page), "body"), ["А мне скучно"]);
+    let reviews = ctx.get_ok("/entities/dune-2021/reviews", None).await;
+    assert_eq!(items(&reviews)[0]["comments_count"], 3);
+    // Комментарии не делают рецензию «изменённой».
+    assert_eq!(items(&reviews)[0]["updated_at"], review["updated_at"]);
+
+    // Удалить свой может автор, чужой — нет; admin — любой.
+    let delete = |id: &Value| format!("/review-comments/{}", id.as_str().unwrap());
+    let carols = &items(&ctx.get_ok(&path, None).await)[1].clone();
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::DELETE,
+        &delete(&carols["id"]),
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &delete(&first["id"]),
+        None,
+        Some(&bob),
+    )
+    .await;
+    while let Ok(event) = events.try_recv() {
+        if event.kind == "review.comment_deleted" {
+            assert_eq!(event.data["comment_id"], first["id"]);
+        }
+    }
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        &delete(&first["id"]),
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::DELETE,
+        &format!("/admin/review-comments/{}", carols["id"].as_str().unwrap()),
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/admin/review-comments/{}", carols["id"].as_str().unwrap()),
+        None,
+        Some(&admin),
+    )
+    .await;
+    let page = ctx.get_ok(&path, None).await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(pluck(items(&page), "body"), ["Спасибо"]);
+
+    // Удалена рецензия — комментарии вместе с ней.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        "/entities/dune-2021/review",
+        None,
+        Some(&alice),
+    )
+    .await;
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM review_comments")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+    ctx.expect(StatusCode::NOT_FOUND, Method::GET, &path, None, None)
+        .await;
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn review_comments_errors(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let (alice, bob) = (ctx.user("alice").await, ctx.user("bob").await);
+    let review = ctx
+        .review(&alice, "dune-2021", json!({ "rating": 9, "body": "Да" }))
+        .await;
+    let path = format!("/reviews/{}/comments", review["id"].as_str().unwrap());
+
+    for body in [
+        json!({ "body": "   " }),
+        json!({ "body": "ы".repeat(2001) }),
+        json!({}),
+        json!({ "body": "x", "extra": 1 }),
+    ] {
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::POST,
+                &path,
+                Some(body),
+                Some(&bob),
+            )
+            .await;
+        assert_eq!(error["code"], "validation");
+    }
+    ctx.expect(
+        StatusCode::CREATED,
+        Method::POST,
+        &path,
+        Some(json!({ "body": "ы".repeat(2000) })),
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::POST,
+        &path,
+        Some(json!({ "body": "x" })),
+        None,
+    )
+    .await;
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::DELETE,
+        &format!("/review-comments/{}", Uuid::new_v4()),
+        None,
+        None,
+    )
+    .await;
+    let missing = format!("/reviews/{}/comments", Uuid::new_v4());
+    ctx.expect(StatusCode::NOT_FOUND, Method::GET, &missing, None, None)
+        .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::POST,
+        &missing,
+        Some(json!({ "body": "x" })),
+        Some(&bob),
+    )
+    .await;
+
+    // Оценку без текста не комментируют.
+    let rating = ctx.review(&bob, "witcher-3", json!({ "rating": 3 })).await;
+    let error = ctx
+        .expect(
+            StatusCode::CONFLICT,
+            Method::POST,
+            &format!("/reviews/{}/comments", rating["id"].as_str().unwrap()),
+            Some(json!({ "body": "Почему 3?" })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(error["code"], "review_without_text");
+}
+
 // ---------------------------------------------------------------- подписки
 
 #[sqlx::test(migrator = "nexus::MIGRATOR")]

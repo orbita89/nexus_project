@@ -263,6 +263,47 @@ Authorization: Bearer {{author_token}}
     });
 %}
 
+### Автор комментирует рецензию user
+POST {{host}}/api/v1/social/reviews/{{review_id}}/comments
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{ "body": "Проверка из http/social.http: согласен" }
+
+> {%
+    client.test("201", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.author.username === "author");
+    });
+    client.global.set("comment_id", response.body.id);
+%}
+
+### Комментарии гостем
+GET {{host}}/api/v1/social/reviews/{{review_id}}/comments
+
+> {%
+    client.test("200, комментарий автора", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.total === 1 && response.body.items[0].id === client.global.get("comment_id"), JSON.stringify(response.body));
+    });
+%}
+
+### Чужой комментарий удалить нельзя
+DELETE {{host}}/api/v1/social/review-comments/{{comment_id}}
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("403", () => client.assert(response.status === 403, `got ${response.status}`));
+%}
+
+### Автор удаляет свой комментарий
+DELETE {{host}}/api/v1/social/review-comments/{{comment_id}}
+Authorization: Bearer {{author_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
 ### Удалить свою рецензию
 DELETE {{host}}/api/v1/social/entities/elden-ring/review
 Authorization: Bearer {{user_token}}
