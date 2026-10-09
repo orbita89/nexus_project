@@ -540,6 +540,52 @@ pub struct InterestRow {
     pub created_at: DateTime<Utc>,
 }
 
+// ---------------------------------------------------------------- отметки
+
+/// Личная отметка: `later` — «посмотреть (прочитать, пройти) позже», `done` — «просмотрено».
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum MarkKind {
+    Later,
+    Done,
+}
+
+/// Своя отметка на карточке.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Mark {
+    pub kind: MarkKind,
+}
+
+/// Сущность в своём списке отметок.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MarkedEntity {
+    pub entity: EntityRef,
+    pub kind: MarkKind,
+    /// Когда поставлена эта отметка (смена `later` → `done` — заново).
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct MarkRow {
+    pub entity_id: Uuid,
+    pub kind: MarkKind,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct MarksQuery {
+    /// Только отметки этого вида; не передан — все.
+    #[param(inline)]
+    pub kind: Option<MarkKind>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
 // ---------------------------------------------------------------- лента
 
 /// Тип записи ленты.

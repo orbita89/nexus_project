@@ -1073,6 +1073,135 @@ async fn reactions_errors(pool: PgPool) {
     assert_eq!(error["code"], "not_released");
 }
 
+// ---------------------------------------------------------------- отметки
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn marks_are_exclusive_and_private(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let (alice, bob) = (ctx.user("alice").await, ctx.user("bob").await);
+    let ctx = &ctx;
+    let mark = |user, slug: &str, kind: &str| {
+        let path = format!("/entities/{slug}/mark");
+        let body = json!({ "kind": kind });
+        async move {
+            ctx.expect(StatusCode::OK, Method::PUT, &path, Some(body), Some(user))
+                .await
+        }
+    };
+
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/entities/dune-2021/mark",
+        None,
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(
+        mark(&alice, "dune-2021", "later").await,
+        json!({ "kind": "later" })
+    );
+    mark(&alice, "dune-novel", "later").await;
+    mark(&alice, "witcher-3", "done").await;
+    mark(&bob, "dune-2021", "done").await;
+
+    let later = ctx.get_ok("/users/me/marks?kind=later", Some(&alice)).await;
+    assert_eq!(later["total"], 2);
+    assert_eq!(
+        pluck(items(&later), "entity/slug"),
+        ["dune-novel", "dune-2021"]
+    );
+    assert_eq!(items(&later)[0]["kind"], "later");
+    assert_eq!(items(&later)[0]["entity"]["release_date"], "1965-08-01");
+
+    // «Просмотрено» убирает из «позже» и встаёт сверху своего списка.
+    mark(&alice, "dune-2021", "done").await;
+    assert_eq!(
+        ctx.get_ok("/entities/dune-2021/mark", Some(&alice)).await,
+        json!({ "kind": "done" })
+    );
+    let later = ctx.get_ok("/users/me/marks?kind=later", Some(&alice)).await;
+    assert_eq!(pluck(items(&later), "entity/slug"), ["dune-novel"]);
+    let done = ctx.get_ok("/users/me/marks?kind=done", Some(&alice)).await;
+    assert_eq!(
+        pluck(items(&done), "entity/slug"),
+        ["dune-2021", "witcher-3"]
+    );
+    let all = ctx.get_ok("/users/me/marks?limit=2", Some(&alice)).await;
+    assert_eq!(all["total"], 3);
+    assert_eq!(items(&all).len(), 2);
+
+    // У bob свои отметки, alice их не видит.
+    let bobs = ctx.get_ok("/users/me/marks", Some(&bob)).await;
+    assert_eq!(pluck(items(&bobs), "entity/slug"), ["dune-2021"]);
+
+    for _ in 0..2 {
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            "/entities/dune-2021/mark",
+            None,
+            Some(&alice),
+        )
+        .await;
+    }
+    let done = ctx.get_ok("/users/me/marks?kind=done", Some(&alice)).await;
+    assert_eq!(pluck(items(&done), "entity/slug"), ["witcher-3"]);
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn marks_errors(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let path = "/entities/dune-2021/mark";
+
+    for body in [json!({ "kind": "watching" }), json!({})] {
+        ctx.expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            path,
+            Some(body),
+            Some(&alice),
+        )
+        .await;
+    }
+    for method in [Method::GET, Method::PUT, Method::DELETE] {
+        let body = (method == Method::PUT).then(|| json!({ "kind": "later" }));
+        ctx.expect(
+            StatusCode::UNAUTHORIZED,
+            method.clone(),
+            path,
+            body.clone(),
+            None,
+        )
+        .await;
+        ctx.expect(
+            StatusCode::NOT_FOUND,
+            method,
+            "/entities/no-such/mark",
+            body,
+            Some(&alice),
+        )
+        .await;
+    }
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::GET,
+        "/users/me/marks",
+        None,
+        None,
+    )
+    .await;
+    ctx.expect(
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        "/users/me/marks?kind=soon",
+        None,
+        Some(&alice),
+    )
+    .await;
+}
+
 // ---------------------------------------------------------------- подписки
 
 #[sqlx::test(migrator = "nexus::MIGRATOR")]

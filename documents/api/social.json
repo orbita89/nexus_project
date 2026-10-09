@@ -1231,6 +1231,189 @@
         ]
       }
     },
+    "/api/v1/social/entities/{slug}/mark": {
+      "get": {
+        "tags": [
+          "marks"
+        ],
+        "summary": "Своя отметка на сущности.",
+        "operationId": "get_own_mark",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Отметка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Mark"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена или отметки нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "marks"
+        ],
+        "summary": "Поставить отметку; другая заменяет прежнюю («просмотрено» убирает из «позже»).",
+        "operationId": "put_mark",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Mark"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Отметка сохранена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Mark"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестная отметка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "marks"
+        ],
+        "summary": "Снять отметку → 204 (даже если её не было).",
+        "operationId": "delete_mark",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Отметки нет"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/entities/{slug}/rating": {
       "get": {
         "tags": [
@@ -2994,6 +3177,88 @@
         ]
       }
     },
+    "/api/v1/social/users/me/marks": {
+      "get": {
+        "tags": [
+          "marks"
+        ],
+        "summary": "Свои отметки, свежие сверху: списки «Посмотреть позже» и «Просмотрено» в личном кабинете.",
+        "operationId": "list_own_marks",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Только отметки этого вида; не передан — все.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Личная отметка: `later` — «посмотреть (прочитать, пройти) позже», `done` — «просмотрено».",
+              "enum": [
+                "later",
+                "done"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница отметок",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_MarkedEntity"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/users/{username}": {
       "get": {
         "tags": [
@@ -3959,6 +4224,49 @@
           }
         }
       },
+      "Mark": {
+        "type": "object",
+        "description": "Своя отметка на карточке.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/MarkKind"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MarkKind": {
+        "type": "string",
+        "description": "Личная отметка: `later` — «посмотреть (прочитать, пройти) позже», `done` — «просмотрено».",
+        "enum": [
+          "later",
+          "done"
+        ]
+      },
+      "MarkedEntity": {
+        "type": "object",
+        "description": "Сущность в своём списке отметок.",
+        "required": [
+          "entity",
+          "kind",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Когда поставлена эта отметка (смена `later` → `done` — заново)."
+          },
+          "entity": {
+            "$ref": "#/components/schemas/EntityRef"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MarkKind"
+          }
+        }
+      },
       "Page_Collection": {
         "type": "object",
         "description": "Страница списка.",
@@ -4116,6 +4424,59 @@
                   "type": "string",
                   "format": "date-time",
                   "description": "Когда добавлена."
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_MarkedEntity": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Сущность в своём списке отметок.",
+              "required": [
+                "entity",
+                "kind",
+                "created_at"
+              ],
+              "properties": {
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Когда поставлена эта отметка (смена `later` → `done` — заново)."
+                },
+                "entity": {
+                  "$ref": "#/components/schemas/EntityRef"
+                },
+                "kind": {
+                  "$ref": "#/components/schemas/MarkKind"
                 }
               }
             }
@@ -5232,6 +5593,10 @@
     {
       "name": "interests",
       "description": "Интересы: на какие сущности подписан пользователь. Список личный; по нему realtime (/ws) присылает события сущностей"
+    },
+    {
+      "name": "marks",
+      "description": "Личные отметки «Посмотреть позже» и «Просмотрено». Видит только сам пользователь"
     },
     {
       "name": "forum",

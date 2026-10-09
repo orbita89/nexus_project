@@ -15,6 +15,7 @@ mod events;
 pub mod feed;
 pub mod follows;
 pub mod interests;
+pub mod marks;
 pub mod models;
 pub mod posts;
 pub mod profiles;
@@ -49,6 +50,8 @@ pub fn router() -> OpenApiRouter<AppState> {
             reactions::put,
             reactions::delete
         ))
+        .routes(routes!(marks::get_own, marks::put, marks::delete))
+        .routes(routes!(marks::list_own))
         .routes(routes!(follows::follow, follows::unfollow))
         .routes(routes!(follows::followers))
         .routes(routes!(follows::following))
