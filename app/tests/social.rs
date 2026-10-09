@@ -2372,6 +2372,25 @@ async fn seed_social_is_valid(pool: PgPool) {
         .await;
     assert!(page["total"].as_i64().unwrap() >= 2);
 
+    // Голоса, комментарии, спойлер, реакции.
+    let page = ctx.get_ok("/entities/dune-2021/reviews", None).await;
+    let users_review = items(&page)
+        .iter()
+        .find(|r| r["author"]["username"] == "user")
+        .unwrap();
+    assert_eq!(users_review["likes_count"], 2);
+    assert_eq!(users_review["dislikes_count"], 1);
+    assert_eq!(users_review["comments_count"], 2);
+    let id = users_review["id"].as_str().unwrap();
+    let comments = ctx.get_ok(&format!("/reviews/{id}/comments"), None).await;
+    assert_eq!(comments["total"], 2);
+    let sequel = ctx
+        .get_ok("/entities/dune-part-two-2024/reviews", None)
+        .await;
+    assert_eq!(items(&sequel)[0]["is_spoiler"], true);
+    let summary = ctx.get_ok("/entities/dune-2021/rating", None).await;
+    assert_eq!(summary["reactions"]["fire"], 2);
+
     let followers = ctx.get_ok("/users/author/followers", None).await;
     assert!(followers["total"].as_i64().unwrap() >= 2, "{followers}");
 
@@ -2423,6 +2442,10 @@ async fn seed_social_is_valid(pool: PgPool) {
     // Интересы user.
     let interests = ctx.get_ok("/interests", Some(&user)).await;
     assert_eq!(interests["total"], 3, "{interests}");
+
+    // Отметки user.
+    let later = ctx.get_ok("/users/me/marks?kind=later", Some(&user)).await;
+    assert_eq!(later["total"], 2, "{later}");
 
     // Лента user: сначала подписки (author, admin), потом интересы (рецензия blocked на «Дюну»).
     let feed = ctx.get_ok("/feed?limit=100", Some(&user)).await;

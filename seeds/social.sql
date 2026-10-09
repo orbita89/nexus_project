@@ -1,5 +1,5 @@
--- Мини-дамп социального модуля для локальной разработки: рецензии и оценки, подписки, коллекции,
--- форум и интересы тестовых пользователей (seeds/dev.sql) на сущности из seeds/catalog.sql.
+-- Мини-дамп социального модуля для локальной разработки: рецензии и оценки (голоса, комментарии,
+-- спойлер), реакции, отметки, подписки, коллекции, форум и интересы тестовых пользователей (seeds/dev.sql) на сущности из seeds/catalog.sql.
 -- Загрузка: make seed (после dev.sql и catalog.sql). Повторный запуск безопасен: существующие
 -- записи не трогаются.
 --
@@ -158,5 +158,78 @@ FROM (VALUES
     ('author', 'blade-runner-2049')
 ) AS v(username, slug)
 ON CONFLICT DO NOTHING;
+
+-- Спойлеры: рецензия автора на вторую часть раскрывает финал.
+UPDATE reviews SET is_spoiler = true
+WHERE user_id = (SELECT id FROM users WHERE username = 'author')
+  AND entity_id = (SELECT id FROM entities WHERE slug = 'dune-part-two-2024');
+
+-- Голоса за рецензии (рецензия — по автору и slug). Счётчики в reviews пишет триггер.
+INSERT INTO review_votes (review_id, user_id, value)
+SELECT
+    (SELECT r.id FROM reviews r
+     WHERE r.user_id = (SELECT id FROM users WHERE username = v.review_author::citext)
+       AND r.entity_id = (SELECT id FROM entities WHERE slug = v.slug)),
+    (SELECT id FROM users WHERE username = v.voter::citext),
+    v.value
+FROM (VALUES
+    ('user',   'dune-2021',          'author',  1::smallint),
+    ('user',   'dune-2021',          'admin',   1),
+    ('user',   'dune-2021',          'blocked', -1),
+    ('author', 'dune-2021',          'user',    -1),
+    ('author', 'dune-2021',          'admin',   1),
+    ('author', 'dune-part-two-2024', 'user',    1)
+) AS v(review_author, slug, voter, value)
+ON CONFLICT DO NOTHING;
+
+-- Комментарии к рецензиям: id фиксированы, чтобы повторная загрузка не плодила копии.
+-- comments_count в reviews пишет триггер.
+INSERT INTO review_comments (id, review_id, author_id, body, created_at)
+SELECT
+    v.id::uuid,
+    (SELECT r.id FROM reviews r
+     WHERE r.user_id = (SELECT id FROM users WHERE username = v.review_author::citext)
+       AND r.entity_id = (SELECT id FROM entities WHERE slug = v.slug)),
+    (SELECT id FROM users WHERE username = v.username::citext),
+    v.body,
+    now() - v.age::interval
+FROM (VALUES
+    ('00000000-0000-4000-9200-000000000001', 'user', 'dune-2021', 'author',
+     'Про звук согласен, в IMAX пол дрожал.', '3 days'),
+    ('00000000-0000-4000-9200-000000000002', 'user', 'dune-2021', 'admin',
+     'А мне не хватило Харконненов.', '2 days'),
+    ('00000000-0000-4000-9200-000000000003', 'author', 'dune-part-two-2024', 'user',
+     'Финал книги всё равно мрачнее.', '1 day')
+) AS v(id, review_author, slug, username, body, age)
+ON CONFLICT (id) DO NOTHING;
+
+-- Реакции на произведения.
+INSERT INTO entity_reactions (entity_id, user_id, kind)
+SELECT (SELECT id FROM entities WHERE slug = v.slug), (SELECT id FROM users WHERE username = v.username::citext), v.kind
+FROM (VALUES
+    ('dune-2021',          'user',   'fire'),
+    ('dune-2021',          'author', 'think'),
+    ('dune-2021',          'admin',  'fire'),
+    ('dune-part-two-2024', 'author', 'fire'),
+    ('dune-1984',          'user',   'bored')
+) AS v(slug, username, kind)
+ON CONFLICT DO NOTHING;
+
+-- Отметки «Посмотреть позже» / «Просмотрено».
+INSERT INTO entity_marks (entity_id, user_id, kind)
+SELECT (SELECT id FROM entities WHERE slug = v.slug), (SELECT id FROM users WHERE username = v.username::citext), v.kind
+FROM (VALUES
+    ('dune-2021',          'user',   'done'),
+    ('blade-runner-2049',  'user',   'later'),
+    ('interstellar',       'user',   'later'),
+    ('dune-1984',          'author', 'later')
+) AS v(slug, username, kind)
+ON CONFLICT DO NOTHING;
+
+-- Сводки оценок для сортировок каталога (entity_ratings). Дамп пишет в обход API, поэтому и
+-- сводки здесь; приложение при старте всё равно пересчитывает их из reviews.
+INSERT INTO entity_ratings (entity_id, average, count)
+SELECT entity_id, avg(rating)::float8, count(rating) FROM reviews GROUP BY entity_id
+ON CONFLICT (entity_id) DO UPDATE SET average = EXCLUDED.average, count = EXCLUDED.count, updated_at = now();
 
 COMMIT;
