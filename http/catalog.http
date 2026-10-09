@@ -157,6 +157,16 @@ GET {{host}}/api/v1/catalog/tags
     });
 %}
 
+### Один тег: страница тега
+GET {{host}}/api/v1/catalog/tags/sci-fi
+
+> {%
+    client.test("200, жанр с числом сущностей", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.kind === "genre" && response.body.entities_count > 0, JSON.stringify(response.body));
+    });
+%}
+
 ### Только жанры
 GET {{host}}/api/v1/catalog/tags?kind=genre
 

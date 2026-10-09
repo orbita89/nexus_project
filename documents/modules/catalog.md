@@ -355,6 +355,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/people` | Список людей по алфавиту, `q` — подстрока в имени |
 | GET | `/people/{slug}` | Человек и все его работы любых типов, новые сверху. Из PostgreSQL |
 | GET | `/tags` | Все теги с `kind` и `entities_count`, без пагинации (тегов немного); `?kind=genre\|tag` — только жанры или только теги |
+| GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `entities_count`; нет — 404 |
 | GET | `/search` | Поиск через Meilisearch: `q`, фильтры `kind`, `tag`, `year`. По релевантности |
 
 **`related`** в карточке — `{"prequels": [...], "sequels": [...], "remakes": [...]}`, элементы —

@@ -363,6 +363,13 @@ async fn tags_list_with_counts(pool: PgPool) {
         .collect();
     // По названию.
     assert_eq!(tags, [("unused", 0), ("sci-fi", 3), ("fantasy", 1)]);
+
+    let tag = ctx.get_ok("/tags/sci-fi").await;
+    assert_eq!(tag["name"], "Научная фантастика");
+    assert_eq!(tag["kind"], "tag");
+    assert_eq!(tag["entities_count"], 3);
+    assert_eq!(ctx.get_ok("/tags/unused").await["entities_count"], 0);
+    assert_eq!(ctx.get("/tags/no-such").await.status, StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------- права

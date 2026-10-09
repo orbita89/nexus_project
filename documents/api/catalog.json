@@ -1875,6 +1875,49 @@
           }
         }
       }
+    },
+    "/api/v1/catalog/tags/{slug}": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Тег по slug: страница тега.",
+        "operationId": "get_tag",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug тега",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "sci-fi"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Тег",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagWithCount"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
