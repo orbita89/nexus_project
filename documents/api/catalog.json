@@ -1555,6 +1555,70 @@
         }
       }
     },
+    "/api/v1/catalog/entities/{slug}/similar": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Похожие на сущность: тот же тип, больше общих тегов — выше, при равенстве — новее. Без самой\nсущности и её связанных (они и так на карточке). Нет тегов — пустая страница.",
+        "description": "Первая версия без ML: один запрос с подсчётом пересечения тегов по `entity_tags (tag_id)`.",
+        "operationId": "list_similar_entities",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–24, по умолчанию 12. Вне диапазона приводится к границам.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Похожие, самые похожие сверху",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_EntitySummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/catalog/people": {
       "get": {
         "tags": [

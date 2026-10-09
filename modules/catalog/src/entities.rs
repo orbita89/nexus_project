@@ -2,7 +2,8 @@
 
 use crate::models::{
     page_bounds, Entity, EntityCredit, EntityCreditRow, EntityDetail, EntitySummary,
-    ListEntitiesQuery, Page, RelatedWorks, Tag, ENTITY_COLUMNS, ENTITY_SUMMARY_COLUMNS,
+    ListEntitiesQuery, Page, RelatedWorks, SimilarQuery, Tag, ENTITY_COLUMNS,
+    ENTITY_SUMMARY_COLUMNS,
 };
 use axum::extract::State;
 use axum::Json;
@@ -97,6 +98,70 @@ pub async fn get(
     Ok(Json(
         detail(&state.db, entity.ok_or(AppError::NotFound)?).await?,
     ))
+}
+
+/// Похожие на сущность: тот же тип, больше общих тегов — выше, при равенстве — новее. Без самой
+/// сущности и её связанных (они и так на карточке). Нет тегов — пустая страница.
+///
+/// Первая версия без ML: один запрос с подсчётом пересечения тегов по `entity_tags (tag_id)`.
+#[utoipa::path(
+    get, operation_id = "list_similar_entities", path = "/entities/{slug}/similar", tag = "catalog",
+    params(
+        ("slug" = String, Path, description = "slug сущности", example = "dune-2021"),
+        SimilarQuery,
+    ),
+    responses(
+        (status = 200, description = "Похожие, самые похожие сверху", body = Page<EntitySummary>),
+        (status = 400, description = "Неверный параметр", body = ErrorBody),
+        (status = 404, description = "Не найдена", body = ErrorBody),
+    )
+)]
+pub async fn similar(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Query(query): Query<SimilarQuery>,
+) -> AppResult<Json<Page<EntitySummary>>> {
+    #[derive(sqlx::FromRow)]
+    struct Similar {
+        total: i64,
+        #[sqlx(flatten)]
+        entity: EntitySummary,
+    }
+
+    let limit = query.limit.unwrap_or(12).clamp(1, 24);
+    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM entities WHERE slug = $1")
+        .bind(&slug)
+        .fetch_optional(&state.db)
+        .await?;
+    let id = id.ok_or(AppError::NotFound)?;
+    let rows: Vec<Similar> = sqlx::query_as(&format!(
+        "WITH scored AS (
+             SELECT other.entity_id, count(*) AS score
+             FROM entity_tags mine
+             JOIN entity_tags other ON other.tag_id = mine.tag_id AND other.entity_id <> mine.entity_id
+             WHERE mine.entity_id = $1
+             GROUP BY other.entity_id
+         )
+         SELECT count(*) OVER () AS total, {ENTITY_SUMMARY_COLUMNS}
+         FROM scored s JOIN entities e ON e.id = s.entity_id
+         WHERE e.kind = (SELECT kind FROM entities WHERE id = $1)
+           AND NOT EXISTS (SELECT 1 FROM entity_relations r
+                           WHERE (r.from_id = $1 AND r.to_id = e.id)
+                              OR (r.to_id = $1 AND r.from_id = e.id))
+         ORDER BY s.score DESC, e.release_date DESC NULLS LAST, e.id
+         LIMIT $2"
+    ))
+    .bind(id)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(Page {
+        total: rows.first().map_or(0, |row| row.total),
+        items: rows.into_iter().map(|row| row.entity).collect(),
+        limit,
+        offset: 0,
+    }))
 }
 
 /// Карточка по id из БД: для админских ответов, событий публикации и документа поискового индекса.

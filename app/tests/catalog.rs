@@ -1902,6 +1902,80 @@ async fn relations_validate(pool: PgPool) {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+// ---------------------------------------------------------------- похожие
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn similar_entities_by_shared_tags(pool: PgPool) {
+    // Ещё фильмы: два общих тега с «Дюной» 2021, один и ни одного.
+    sqlx::raw_sql(
+        "INSERT INTO tags (slug, name) VALUES ('space-opera', 'Космическая опера');
+         INSERT INTO entities (kind, slug, title, release_date) VALUES
+             ('movie', 'two-tags', 'Два тега', '1999-01-01'),
+             ('movie', 'one-tag-old', 'Один тег, старый', '1980-01-01'),
+             ('movie', 'one-tag-new', 'Один тег, новый', '2010-01-01'),
+             ('movie', 'no-tags', 'Без тегов', '2020-01-01');
+         INSERT INTO entity_tags (entity_id, tag_id)
+         SELECT e.id, t.id FROM entities e, tags t
+         WHERE (e.slug, t.slug) IN (('dune-2021', 'space-opera'), ('two-tags', 'space-opera'),
+                                    ('two-tags', 'sci-fi'), ('one-tag-old', 'sci-fi'),
+                                    ('one-tag-new', 'space-opera'))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let ctx = Ctx::without_search(pool);
+
+    // Тот же тип (книга с тегом sci-fi не попадает), больше общих тегов — выше, затем новее.
+    let page = ctx.get_ok("/entities/dune-2021/similar").await;
+    assert_eq!(
+        slugs(&page),
+        [
+            "two-tags",
+            "dune-part-two-2024",
+            "one-tag-new",
+            "one-tag-old"
+        ]
+    );
+    assert_eq!(page["total"], 4);
+    assert_eq!(page["limit"], 12);
+
+    // Связанные (сиквел) уже на карточке — из похожих уходят.
+    let first = ctx.entity_id("dune-2021").await;
+    let second = ctx.entity_id("dune-part-two-2024").await;
+    let (status, _) = ctx
+        .admin_send(
+            Method::PUT,
+            &format!("/admin/entities/{first}/relations"),
+            Some(json!({ "kind": "sequel", "to_id": second })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let page = ctx.get_ok("/entities/dune-2021/similar?limit=2").await;
+    assert_eq!(slugs(&page), ["two-tags", "one-tag-new"]);
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["limit"], 2);
+
+    // limit приводится к 1–24; без тегов — пустая страница, а не 404.
+    assert_eq!(
+        ctx.get_ok("/entities/dune-2021/similar?limit=100").await["limit"],
+        24
+    );
+    let empty = ctx.get_ok("/entities/no-tags/similar").await;
+    assert_eq!(empty["items"], json!([]));
+    assert_eq!(empty["total"], 0);
+
+    assert_eq!(
+        ctx.get("/entities/no-such/similar").await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        ctx.get("/entities/dune-2021/similar?limit=abc")
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+}
+
 // ---------------------------------------------------------------- дамп
 
 /// `seeds/catalog.sql` загружается и проходит те же проверки metadata, что и API.

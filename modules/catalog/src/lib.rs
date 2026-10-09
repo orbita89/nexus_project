@@ -24,6 +24,7 @@ pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(entities::list))
         .routes(routes!(entities::get))
+        .routes(routes!(entities::similar))
         .routes(routes!(people::list))
         .routes(routes!(people::get))
         .routes(routes!(tags::list))

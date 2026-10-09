@@ -300,6 +300,13 @@ pub struct ListEntitiesQuery {
 
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
+pub struct SimilarQuery {
+    /// 1–24, по умолчанию 12. Вне диапазона приводится к границам.
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListPeopleQuery {
     /// Подстрока в имени, без учёта регистра.
     #[param(example = "кинг")]

@@ -92,6 +92,19 @@ GET {{host}}/api/v1/catalog/entities/dune-2021
     });
 %}
 
+### Похожие на «Дюну» 2021: фильмы с общими тегами, без её сиквела и ремейка
+GET {{host}}/api/v1/catalog/entities/dune-2021/similar?limit=5
+
+> {%
+    client.test("200, фильмы, без самой и связанных", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const slugs = response.body.items.map(e => e.slug);
+        client.assert(slugs.length > 0 && slugs.length <= 5, JSON.stringify(slugs));
+        client.assert(response.body.items.every(e => e.kind === "movie"));
+        client.assert(!["dune-2021", "dune-part-two-2024", "dune-1984"].some(s => slugs.includes(s)), JSON.stringify(slugs));
+    });
+%}
+
 ### Несуществующая карточка → 404
 GET {{host}}/api/v1/catalog/entities/no-such-entity
 
