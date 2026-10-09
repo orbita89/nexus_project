@@ -21,6 +21,7 @@ mod refs;
 pub mod reviews;
 pub mod threads;
 mod validate;
+pub mod votes;
 
 use shared::AppState;
 use utoipa_axum::router::OpenApiRouter;
@@ -37,6 +38,8 @@ pub fn router() -> OpenApiRouter<AppState> {
             reviews::delete_own
         ))
         .routes(routes!(reviews::list_for_user))
+        .routes(routes!(votes::put, votes::delete))
+        .routes(routes!(votes::mine))
         .routes(routes!(follows::follow, follows::unfollow))
         .routes(routes!(follows::followers))
         .routes(routes!(follows::following))

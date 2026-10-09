@@ -41,13 +41,29 @@
 | `rating` | `smallint` | 1–10 или NULL | Оценка |
 | `body` | `text` | | Текст рецензии |
 | `is_spoiler` | `boolean` | NOT NULL, default `false` | В тексте спойлеры (миграция `20261014100000_review_spoilers.sql`) |
-| `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
+| `likes_count`, `dislikes_count` | `bigint` | NOT NULL, ≥ 0 | Голоса, пишет триггер на `review_votes` |
+| `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер, только при правке `rating`, `body`, `is_spoiler`: счётчики его не меняют |
 
 **Ограничения:** одна рецензия на пару «пользователь — произведение» (повторная — это редактирование);
 нужна хотя бы оценка или текст.
 **Индексы:** (`entity_id`, `created_at DESC`) — свежие рецензии на странице произведения;
 (`user_id`, `created_at DESC`) — рецензии на странице пользователя (миграция
 `20261008100000_social_indexes.sql`).
+
+### `review_votes` ✅ — лайки и дизлайки рецензий
+
+Миграция `20261014110000_review_votes.sql`.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `review_id` | `uuid` | PK, FK → `reviews`, CASCADE | |
+| `user_id` | `uuid` | PK, FK → `users`, CASCADE | Кто голосовал |
+| `value` | `smallint` | NOT NULL, `1` или `-1` | Лайк или дизлайк |
+| `created_at` | `timestamptz` | NOT NULL | |
+
+Один голос на пару «пользователь — рецензия»; за свою рецензию голосовать нельзя (проверяет код).
+Счётчики `reviews.likes_count` / `dislikes_count` обновляет триггер `review_votes_count` в той же
+транзакции — и при каскадном удалении голосов. **Индексы:** PK; `user_id` — свои голоса на карточке.
 
 ### `collections` ✅ — коллекции
 
@@ -209,9 +225,16 @@
 | PUT | `/entities/{slug}/review` | user | `{"rating": 1–10, "body": "...", "is_spoiler": false}`: создать (201) или заменить целиком (200). Нужна оценка или текст; `is_spoiler` по умолчанию `false`. До выхода (`release_date` позже сегодняшней даты UTC) — 409 `not_released`; без даты — можно |
 | DELETE | `/entities/{slug}/review` | user | Удалить свою → 204, нет — 404. Можно и до выхода (премьеру перенесли) |
 | GET | `/users/{username}/reviews` | гость | Рецензии пользователя, включая оценки без текста, новые сверху |
+| PUT | `/reviews/{id}/vote` | user | `{"value": 1 \| -1}` — лайк или дизлайк; другой `value` меняет голос → 200 `{"likes_count", "dislikes_count", "value"}`. За свою рецензию — 403 `own_review` |
+| DELETE | `/reviews/{id}/vote` | user | Снять голос → 200, `value: null` (голоса не было — тоже 200) |
+| GET | `/entities/{slug}/votes/mine` | user | Свои голоса за рецензии сущности: `{"<id рецензии>": 1 \| -1}` — один запрос на карточку |
 
 Рецензия в ответе: `id`, `author` (`UserRef`), `entity` (`EntityRef`), `rating`, `body`,
-`is_spoiler`, `created_at`, `updated_at`. Рецензии заблокированных пользователей остаются в списках и сводке.
+`is_spoiler`, `likes_count`, `dislikes_count`, `created_at`, `updated_at`.
+
+**Личное — отдельными запросами.** Публичные списки (рецензии, сводка, комментарии) одинаковы для
+всех и читаются без токена — их можно кэшировать. Поэтому «мой голос», «моя реакция», «моя
+отметка» в них не встраиваются: `votes/mine`, `reaction`, `mark` — отдельные эндпоинты с токеном. Рецензии заблокированных пользователей остаются в списках и сводке.
 Сводка в карточку каталога не попадает: фронтенд запрашивает её отдельно.
 
 ### Подписки

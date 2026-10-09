@@ -576,6 +576,177 @@ async fn user_reviews_list(pool: PgPool) {
     assert_eq!(pluck(items(&page), "author/username"), [&alice.username]);
 }
 
+// ---------------------------------------------------------------- голоса за рецензии
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn review_votes_count_and_change(pool: PgPool) {
+    let ctx = Ctx::new(pool.clone());
+    let (alice, bob, carol) = (
+        ctx.user("alice").await,
+        ctx.user("bob").await,
+        ctx.user("carol").await,
+    );
+    let review = ctx
+        .review(&alice, "dune-2021", json!({ "rating": 9, "body": "Да" }))
+        .await;
+    assert_eq!(review["likes_count"], 0);
+    assert_eq!(review["dislikes_count"], 0);
+    let id = review["id"].as_str().unwrap();
+    let vote = format!("/reviews/{id}/vote");
+    let put = |user, value: i32| {
+        ctx.expect(
+            StatusCode::OK,
+            Method::PUT,
+            &vote,
+            Some(json!({ "value": value })),
+            Some(user),
+        )
+    };
+
+    let result = put(&bob, 1).await;
+    assert_eq!(
+        result,
+        json!({ "likes_count": 1, "dislikes_count": 0, "value": 1 })
+    );
+    // Повтор того же голоса ничего не меняет, другой — переносит голос.
+    assert_eq!(put(&bob, 1).await["likes_count"], 1);
+    let result = put(&bob, -1).await;
+    assert_eq!(
+        result,
+        json!({ "likes_count": 0, "dislikes_count": 1, "value": -1 })
+    );
+    let result = put(&carol, 1).await;
+    assert_eq!(
+        result,
+        json!({ "likes_count": 1, "dislikes_count": 1, "value": 1 })
+    );
+
+    // Счётчики — в публичном списке, свой голос — отдельно.
+    let page = ctx.get_ok("/entities/dune-2021/reviews", None).await;
+    assert_eq!(items(&page)[0]["likes_count"], 1);
+    assert_eq!(items(&page)[0]["dislikes_count"], 1);
+    assert!(items(&page)[0].get("my_vote").is_none());
+    let mine = ctx
+        .get_ok("/entities/dune-2021/votes/mine", Some(&bob))
+        .await;
+    assert_eq!(mine, json!({ id: -1 }));
+    let mine = ctx
+        .get_ok("/entities/witcher-3/votes/mine", Some(&bob))
+        .await;
+    assert_eq!(mine, json!({}));
+
+    // Голоса не делают рецензию «изменённой».
+    let own = ctx.get_ok("/entities/dune-2021/review", Some(&alice)).await;
+    assert_eq!(own["updated_at"], review["updated_at"]);
+
+    let result = ctx
+        .expect(StatusCode::OK, Method::DELETE, &vote, None, Some(&bob))
+        .await;
+    assert_eq!(
+        result,
+        json!({ "likes_count": 1, "dislikes_count": 0, "value": null })
+    );
+    // Голоса нет — тоже 200.
+    let again = ctx
+        .expect(StatusCode::OK, Method::DELETE, &vote, None, Some(&bob))
+        .await;
+    assert_eq!(again, result);
+
+    // Удалена рецензия — голоса уходят вместе с ней.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        "/entities/dune-2021/review",
+        None,
+        Some(&alice),
+    )
+    .await;
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM review_votes")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn review_votes_errors(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let (alice, bob) = (ctx.user("alice").await, ctx.user("bob").await);
+    let review = ctx
+        .review(&alice, "dune-2021", json!({ "rating": 9 }))
+        .await;
+    let vote = format!("/reviews/{}/vote", review["id"].as_str().unwrap());
+
+    let error = ctx
+        .expect(
+            StatusCode::FORBIDDEN,
+            Method::PUT,
+            &vote,
+            Some(json!({ "value": 1 })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(error["code"], "own_review");
+    for body in [
+        json!({ "value": 0 }),
+        json!({ "value": 2 }),
+        json!({}),
+        json!({ "value": "up" }),
+    ] {
+        ctx.expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            &vote,
+            Some(body),
+            Some(&bob),
+        )
+        .await;
+    }
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::PUT,
+        &vote,
+        Some(json!({ "value": 1 })),
+        None,
+    )
+    .await;
+    ctx.expect(StatusCode::UNAUTHORIZED, Method::DELETE, &vote, None, None)
+        .await;
+    let missing = format!("/reviews/{}/vote", Uuid::new_v4());
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::PUT,
+        &missing,
+        Some(json!({ "value": 1 })),
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        &missing,
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::GET,
+        "/entities/dune-2021/votes/mine",
+        None,
+        None,
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/entities/no-such/votes/mine",
+        None,
+        Some(&bob),
+    )
+    .await;
+}
+
 // ---------------------------------------------------------------- подписки
 
 #[sqlx::test(migrator = "nexus::MIGRATOR")]

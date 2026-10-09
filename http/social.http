@@ -184,6 +184,85 @@ Authorization: Bearer {{user_token}}
     });
 %}
 
+### Отметить спойлеры
+PUT {{host}}/api/v1/social/entities/elden-ring/review
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "rating": 10, "body": "Проверка из http/social.http: финал", "is_spoiler": true }
+
+> {%
+    client.test("200, is_spoiler, счётчики с нуля", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.is_spoiler === true);
+        client.assert(response.body.likes_count === 0 && response.body.dislikes_count === 0, JSON.stringify(response.body));
+    });
+%}
+
+### Автор лайкает рецензию user
+PUT {{host}}/api/v1/social/reviews/{{review_id}}/vote
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{ "value": 1 }
+
+> {%
+    client.test("200, один лайк", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.likes_count === 1 && response.body.dislikes_count === 0 && response.body.value === 1, JSON.stringify(response.body));
+    });
+%}
+
+### Передумал: дизлайк
+PUT {{host}}/api/v1/social/reviews/{{review_id}}/vote
+Authorization: Bearer {{author_token}}
+Content-Type: application/json
+
+{ "value": -1 }
+
+> {%
+    client.test("200, голос перенесён", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.likes_count === 0 && response.body.dislikes_count === 1 && response.body.value === -1, JSON.stringify(response.body));
+    });
+%}
+
+### Свои голоса на карточке Elden Ring
+GET {{host}}/api/v1/social/entities/elden-ring/votes/mine
+Authorization: Bearer {{author_token}}
+
+> {%
+    client.test("200, id рецензии → -1", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body[client.global.get("review_id")] === -1, JSON.stringify(response.body));
+    });
+%}
+
+### За свою рецензию голосовать нельзя
+PUT {{host}}/api/v1/social/reviews/{{review_id}}/vote
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "value": 1 }
+
+> {%
+    client.test("403 own_review", () => {
+        client.assert(response.status === 403, `got ${response.status}`);
+        client.assert(response.body.code === "own_review", JSON.stringify(response.body));
+    });
+%}
+
+### Снять голос
+DELETE {{host}}/api/v1/social/reviews/{{review_id}}/vote
+Authorization: Bearer {{author_token}}
+
+> {%
+    client.test("200, value = null", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.value === null && response.body.dislikes_count === 0, JSON.stringify(response.body));
+    });
+%}
+
 ### Удалить свою рецензию
 DELETE {{host}}/api/v1/social/entities/elden-ring/review
 Authorization: Bearer {{user_token}}

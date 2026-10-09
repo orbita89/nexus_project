@@ -21,7 +21,13 @@ pub struct Review {
     pub body: Option<String>,
     /// В тексте есть спойлеры: фронтенд размывает его, пока читатель не откроет.
     pub is_spoiler: bool,
+    /// Лайки. Свой голос — `GET /entities/{slug}/votes/mine`.
+    #[schema(example = 12)]
+    pub likes_count: i64,
+    #[schema(example = 1)]
+    pub dislikes_count: i64,
     pub created_at: DateTime<Utc>,
+    /// Когда автор правил рецензию (голоса и комментарии не считаются).
     pub updated_at: DateTime<Utc>,
 }
 
@@ -33,12 +39,14 @@ pub struct ReviewRow {
     pub rating: Option<i16>,
     pub body: Option<String>,
     pub is_spoiler: bool,
+    pub likes_count: i64,
+    pub dislikes_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-pub const REVIEW_COLUMNS: &str =
-    "id, user_id, entity_id, rating, body, is_spoiler, created_at, updated_at";
+pub const REVIEW_COLUMNS: &str = "id, user_id, entity_id, rating, body, is_spoiler, \
+     likes_count, dislikes_count, created_at, updated_at";
 
 /// Своя рецензия: заменяется целиком. Нужна хотя бы оценка или текст.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -53,6 +61,25 @@ pub struct PutReview {
     /// В тексте есть спойлеры. По умолчанию `false`.
     #[serde(default)]
     pub is_spoiler: bool,
+}
+
+/// Голос за рецензию: `1` — лайк, `-1` — дизлайк.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PutVote {
+    #[schema(example = 1)]
+    pub value: i16,
+}
+
+/// Счётчики рецензии после голоса и свой голос (`null` — нет).
+#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+pub struct VoteResult {
+    #[schema(example = 13)]
+    pub likes_count: i64,
+    #[schema(example = 1)]
+    pub dislikes_count: i64,
+    #[schema(example = 1)]
+    pub value: Option<i16>,
 }
 
 /// Сводка оценок сущности. Учитываются все рецензии с оценкой, в том числе без текста.

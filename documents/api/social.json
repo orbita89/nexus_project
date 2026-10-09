@@ -1589,6 +1589,74 @@
         }
       }
     },
+    "/api/v1/social/entities/{slug}/votes/mine": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Свои голоса за рецензии сущности: `{\"<id рецензии>\": 1 | -1}`. Одним запросом на карточку.",
+        "operationId": "list_own_review_votes",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "id рецензии → голос",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer",
+                    "format": "int32"
+                  },
+                  "propertyNames": {
+                    "type": "string"
+                  }
+                },
+                "example": {
+                  "0199b2a4-6c1e-7d3a-9f00-1a2b3c4d5e6f": 1
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/feed": {
       "get": {
         "tags": [
@@ -1860,6 +1928,150 @@
           },
           "404": {
             "description": "Нет или удалено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/reviews/{id}/vote": {
+      "put": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Поставить лайк (`1`) или дизлайк (`-1`). Повторный вызов с другим `value` меняет голос.",
+        "operationId": "vote_review",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id рецензии",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutVote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Голос учтён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`value` не 1 и не -1",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Своя рецензия (`code`: `own_review`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Рецензия не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Снять свой голос. Голоса не было — тоже 200.",
+        "operationId": "unvote_review",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id рецензии",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Голоса нет, `value`: `null`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoteResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Рецензия не найдена",
             "content": {
               "application/json": {
                 "schema": {
@@ -3562,6 +3774,8 @@
                 "author",
                 "entity",
                 "is_spoiler",
+                "likes_count",
+                "dislikes_count",
                 "created_at",
                 "updated_at"
               ],
@@ -3579,6 +3793,11 @@
                   "type": "string",
                   "format": "date-time"
                 },
+                "dislikes_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "example": 1
+                },
                 "entity": {
                   "$ref": "#/components/schemas/EntityRef"
                 },
@@ -3589,6 +3808,12 @@
                 "is_spoiler": {
                   "type": "boolean",
                   "description": "В тексте есть спойлеры: фронтенд размывает его, пока читатель не откроет."
+                },
+                "likes_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Лайки. Свой голос — `GET /entities/{slug}/votes/mine`.",
+                  "example": 12
                 },
                 "rating": {
                   "type": [
@@ -3601,7 +3826,8 @@
                 },
                 "updated_at": {
                   "type": "string",
-                  "format": "date-time"
+                  "format": "date-time",
+                  "description": "Когда автор правил рецензию (голоса и комментарии не считаются)."
                 }
               }
             }
@@ -3840,6 +4066,21 @@
         },
         "additionalProperties": false
       },
+      "PutVote": {
+        "type": "object",
+        "description": "Голос за рецензию: `1` — лайк, `-1` — дизлайк.",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "integer",
+            "format": "int32",
+            "example": 1
+          }
+        },
+        "additionalProperties": false
+      },
       "RatingSummary": {
         "type": "object",
         "description": "Сводка оценок сущности. Учитываются все рецензии с оценкой, в том числе без текста.",
@@ -3932,6 +4173,8 @@
           "author",
           "entity",
           "is_spoiler",
+          "likes_count",
+          "dislikes_count",
           "created_at",
           "updated_at"
         ],
@@ -3949,6 +4192,11 @@
             "type": "string",
             "format": "date-time"
           },
+          "dislikes_count": {
+            "type": "integer",
+            "format": "int64",
+            "example": 1
+          },
           "entity": {
             "$ref": "#/components/schemas/EntityRef"
           },
@@ -3959,6 +4207,12 @@
           "is_spoiler": {
             "type": "boolean",
             "description": "В тексте есть спойлеры: фронтенд размывает его, пока читатель не откроет."
+          },
+          "likes_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Лайки. Свой голос — `GET /entities/{slug}/votes/mine`.",
+            "example": 12
           },
           "rating": {
             "type": [
@@ -3971,7 +4225,8 @@
           },
           "updated_at": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Когда автор правил рецензию (голоса и комментарии не считаются)."
           }
         }
       },
@@ -4241,6 +4496,34 @@
           "username": {
             "type": "string",
             "example": "user"
+          }
+        }
+      },
+      "VoteResult": {
+        "type": "object",
+        "description": "Счётчики рецензии после голоса и свой голос (`null` — нет).",
+        "required": [
+          "likes_count",
+          "dislikes_count"
+        ],
+        "properties": {
+          "dislikes_count": {
+            "type": "integer",
+            "format": "int64",
+            "example": 1
+          },
+          "likes_count": {
+            "type": "integer",
+            "format": "int64",
+            "example": 13
+          },
+          "value": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 1
           }
         }
       }
