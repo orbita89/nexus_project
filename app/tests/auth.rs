@@ -714,6 +714,60 @@ async fn admin_endpoints_require_admin_role(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn admin_searches_users_page(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    for name in ["neo", "neon_100", "trinity"] {
+        ctx.register_verified(name).await;
+    }
+    let token = ctx.login_as("boss", "admin").await;
+    let get = |path: &'static str| ctx.call(Method::GET, path, None, &token);
+    let names = |list: &Value| -> Vec<String> {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["username"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let page = get("/admin/users/page?limit=2").await.json();
+    assert_eq!(page["total"], 4);
+    assert_eq!(page["limit"], 2);
+    assert_eq!(names(&page["items"]), ["neo", "neon_100"]);
+    let page = get("/admin/users/page?limit=2&offset=2").await.json();
+    assert_eq!(names(&page["items"]), ["trinity", "boss"]);
+
+    // Подстрока в username или email, без учёта регистра; % и _ — буквально.
+    let page = get("/admin/users/page?q=NEO").await.json();
+    assert_eq!(page["total"], 2);
+    assert_eq!(names(&page["items"]), ["neo", "neon_100"]);
+    let page = get("/admin/users/page?q=trinity@example").await.json();
+    assert_eq!(names(&page["items"]), ["trinity"]);
+    let page = get("/admin/users/page?q=ne_n").await.json();
+    assert_eq!(page["total"], 0);
+
+    // Старый список — тот же порядок и фильтр, но массивом.
+    let list = get("/admin/users?q=neo&limit=1").await.json();
+    assert_eq!(names(&list), ["neo"]);
+
+    let response = get("/admin/users/page?limit=x").await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    let user = ctx.login_as("plain", "user").await;
+    let response = ctx
+        .call(Method::GET, "/admin/users/page", None, &user)
+        .await;
+    assert_eq!(response.status, StatusCode::FORBIDDEN);
+    let response = request(
+        ctx.app(),
+        Method::GET,
+        &format!("{AUTH}/admin/users/page"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
 async fn admin_promotes_user_to_author(pool: PgPool) {
     let ctx = Ctx::new(pool);
     let admin = ctx.login_as("boss", "admin").await;

@@ -267,7 +267,8 @@ API видно в PR. Обновить: `UPDATE_OPENAPI=1 cargo test -p nexus op
 | POST | `password/forgot` | все | Письмо для сброса пароля → 202 |
 | POST | `password/reset` | все | Новый пароль по токену → 204 |
 | POST | `password/change` | вошедший | Сменить пароль → 204 |
-| GET | `admin/users?limit=&offset=` | admin | Список пользователей |
+| GET | `admin/users?q=&limit=&offset=` | admin | Список пользователей массивом, старые сверху (прежний ответ, для совместимости) |
+| GET | `admin/users/page?q=&limit=&offset=` | admin | То же страницей `{items, total, limit, offset}`. `q` — подстрока в username или email без учёта регистра (`%` и `_` — буквально; триграммные индексы, миграция `20261015120000_users_search.sql`) |
 | PATCH | `admin/users/{id}/role` | admin | Сменить роль (себя понизить нельзя) |
 | PATCH | `admin/users/{id}/status` | admin | Заблокировать/разблокировать (себя нельзя) |
 | POST | `dev/login` | все, при `DEV_LOGIN=true` | Вход без пароля |

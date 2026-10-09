@@ -59,6 +59,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(oauth::exchange))
         .routes(routes!(dev::login))
         .routes(routes!(admin::list_users))
+        .routes(routes!(admin::list_users_page))
         .routes(routes!(admin::set_role))
         .routes(routes!(admin::set_status))
         .layer(Extension(Arc::new(RateLimits::default())))

@@ -313,32 +313,4 @@ pub(crate) fn check_year(year: i32) -> AppResult<()> {
     }
 }
 
-/// Шаблон `ILIKE '%...%'` с экранированием `%`, `_` и `\`. Пустой запрос — без фильтра.
-pub(crate) fn like_pattern(q: &str) -> Option<String> {
-    let q = q.trim();
-    if q.is_empty() {
-        return None;
-    }
-    let mut pattern = String::with_capacity(q.len() + 2);
-    pattern.push('%');
-    for c in q.chars() {
-        if matches!(c, '%' | '_' | '\\') {
-            pattern.push('\\');
-        }
-        pattern.push(c);
-    }
-    pattern.push('%');
-    Some(pattern)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn like_pattern_escapes_wildcards() {
-        assert_eq!(like_pattern("  "), None);
-        assert_eq!(like_pattern("дюна").as_deref(), Some("%дюна%"));
-        assert_eq!(like_pattern("100%_\\").as_deref(), Some("%100\\%\\_\\\\%"));
-    }
-}
+pub(crate) use shared::db::like_pattern;

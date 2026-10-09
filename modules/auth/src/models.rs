@@ -117,7 +117,11 @@ pub struct SessionView {
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListUsersQuery {
+    /// Подстрока в username или email, без учёта регистра.
+    #[param(example = "neo")]
+    pub q: Option<String>,
     /// Сколько вернуть, 1–100 (по умолчанию 50).
     pub limit: Option<i64>,
     /// Сколько пропустить (по умолчанию 0).

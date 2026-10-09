@@ -15,32 +15,36 @@
         "tags": [
           "admin"
         ],
-        "summary": "Список пользователей, старые сверху.",
+        "summary": "Список пользователей массивом, старые сверху. Страница с `total` —\n`GET /admin/users/page`.",
         "operationId": "list_users",
         "parameters": [
           {
-            "name": "limit",
-            "in": "path",
-            "description": "Сколько вернуть, 1–100 (по умолчанию 50).",
-            "required": true,
+            "name": "q",
+            "in": "query",
+            "description": "Подстрока в username или email, без учёта регистра.",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "string"
+            },
+            "example": "neo"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Сколько вернуть, 1–100 (по умолчанию 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
               "format": "int64"
             }
           },
           {
             "name": "offset",
-            "in": "path",
+            "in": "query",
             "description": "Сколько пропустить (по умолчанию 0).",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "format": "int64"
             }
           }
@@ -55,6 +59,94 @@
                   "items": {
                     "$ref": "#/components/schemas/UserView"
                   }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/admin/users/page": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Страница пользователей с `total`, старые сверху; `q` — поиск по username и email.",
+        "operationId": "list_users_page",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Подстрока в username или email, без учёта регистра.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "neo"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Сколько вернуть, 1–100 (по умолчанию 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Сколько пропустить (по умолчанию 0).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница пользователей",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_UserView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1692,6 +1784,107 @@
           "password": {
             "type": "string",
             "example": "password123"
+          }
+        }
+      },
+      "Page_UserView": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Пользователь. Хеш пароля наружу не отдаётся никогда.",
+              "required": [
+                "id",
+                "email",
+                "username",
+                "role",
+                "is_active",
+                "has_password",
+                "created_at"
+              ],
+              "properties": {
+                "avatar_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "display_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "email": {
+                  "type": "string",
+                  "example": "user@nexus.local"
+                },
+                "email_verified_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "description": "`null` — email не подтверждён, вход по паролю запрещён."
+                },
+                "has_password": {
+                  "type": "boolean",
+                  "description": "Задан ли пароль. `false` — входит по ссылке из письма или через провайдера: пароль не\nспрашивается при смене email, задать его можно через «забыли пароль»."
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "is_active": {
+                  "type": "boolean",
+                  "description": "`false` — заблокирован админом."
+                },
+                "role": {
+                  "$ref": "#/components/schemas/Role"
+                },
+                "username": {
+                  "type": "string",
+                  "example": "user"
+                },
+                "username_changed_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "description": "Когда username меняли в последний раз (менять можно раз в 30 дней). `null` — не меняли."
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
           }
         }
       },
