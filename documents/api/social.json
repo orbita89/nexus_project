@@ -3012,6 +3012,15 @@
             "description": "`movie`, `series`, `book`, `game`.",
             "example": "movie"
           },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Дата выхода: по году фронтенд различает «Дюна (1984)» и «Дюна (2021)». `null` — неизвестна.",
+            "example": "2021-10-22"
+          },
           "slug": {
             "type": "string",
             "example": "dune-2021"

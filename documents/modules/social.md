@@ -165,7 +165,7 @@
 В обратную сторону `social` сам реализует `InterestDirectory` (`social::directory::PgInterestDirectory`,
 `entity_ids(user)`): по нему `realtime` узнаёт интересы, не читая `user_interests`.
 
-- `EntityRef` — `id`, `kind`, `slug`, `title`, `cover_url`; `UserRef` — `id`, `username`,
+- `EntityRef` — `id`, `kind`, `slug`, `title`, `cover_url`, `release_date` (по году различаются «Дюна» 1984 и 2021); `UserRef` — `id`, `username`,
   `display_name`, `avatar_url`. Это же их вид в ответах API.
 - **Подключение:** `AppState::new(..., Directories { entities, users, interests })`; реализации собирает
   `nexus::directories(pool)` в `app` (и `test_utils::directories` в тестах). Модули по-прежнему

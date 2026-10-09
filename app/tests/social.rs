@@ -175,6 +175,7 @@ async fn put_review_creates_then_replaces(pool: PgPool) {
     assert_eq!(created["entity"]["slug"], "dune-2021");
     assert_eq!(created["entity"]["title"], "Дюна");
     assert_eq!(created["entity"]["kind"], "movie");
+    assert_eq!(created["entity"]["release_date"], "2021-10-22");
 
     // Повторный PUT заменяет целиком: текст убран, оценка изменена, id тот же.
     let replaced = ctx
@@ -1007,6 +1008,7 @@ async fn collection_items(pool: PgPool) {
     assert_eq!(first["position"], 0);
     assert_eq!(first["note"], "Первоисточник");
     assert_eq!(first["entity"]["slug"], "dune-novel");
+    assert_eq!(first["entity"]["release_date"], "1965-08-01");
     let second = ctx
         .expect(
             StatusCode::CREATED,
@@ -1330,6 +1332,7 @@ async fn social_reads_entities_through_directory(pool: PgPool) {
             slug: "renamed".into(),
             title: "Из справочника".into(),
             cover_url: None,
+            release_date: "2021-10-22".parse().ok(),
         },
     });
     let alice = ctx.user("alice").await;
@@ -1338,6 +1341,7 @@ async fn social_reads_entities_through_directory(pool: PgPool) {
         .review(&alice, "renamed", json!({ "rating": 9, "body": "Да" }))
         .await;
     assert_eq!(review["entity"]["title"], "Из справочника");
+    assert_eq!(review["entity"]["release_date"], "2021-10-22");
     let page = ctx.get_ok("/entities/renamed/reviews", None).await;
     assert_eq!(pluck(items(&page), "entity/title"), ["Из справочника"]);
 

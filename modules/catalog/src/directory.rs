@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const REF_COLUMNS: &str = "id, kind::text AS kind, slug, title, cover_url";
+const REF_COLUMNS: &str = "id, kind::text AS kind, slug, title, cover_url, release_date";
 
 pub struct PgEntityDirectory {
     db: PgPool,

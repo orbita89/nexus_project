@@ -30,6 +30,9 @@ pub struct EntityRef {
     #[schema(example = "Дюна")]
     pub title: String,
     pub cover_url: Option<String>,
+    /// Дата выхода: по году фронтенд различает «Дюна (1984)» и «Дюна (2021)». `null` — неизвестна.
+    #[schema(example = "2021-10-22")]
+    pub release_date: Option<chrono::NaiveDate>,
 }
 
 /// Пользователь в чужих ответах (автор рецензии, владелец коллекции, подписчик).
