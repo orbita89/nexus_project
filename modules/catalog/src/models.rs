@@ -136,6 +136,19 @@ pub struct RelationQuery {
     pub kind: RelationKind,
 }
 
+/// Вид тега: `genre` — жанр («Драма», «Космическая опера»), `tag` — остальные метки
+/// («Экранизация», «Открытый мир»).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema,
+)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum TagKind {
+    Genre,
+    #[default]
+    Tag,
+}
+
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct Tag {
     pub id: Uuid,
@@ -143,7 +156,12 @@ pub struct Tag {
     pub slug: String,
     #[schema(example = "Научная фантастика")]
     pub name: String,
+    pub kind: TagKind,
 }
+
+/// Колонки [`Tag`] для `FROM tags t`. Порядок в карточке: жанры первыми, затем по названию.
+pub const TAG_COLUMNS: &str = "t.id, t.slug, t.name, t.kind";
+pub const TAG_ORDER: &str = "t.kind = 'genre' DESC, t.name";
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
 pub struct TagWithCount {
@@ -152,6 +170,7 @@ pub struct TagWithCount {
     pub slug: String,
     #[schema(example = "Научная фантастика")]
     pub name: String,
+    pub kind: TagKind,
     /// Сколько сущностей с этим тегом.
     #[schema(example = 12)]
     pub entities_count: i64,
@@ -440,6 +459,9 @@ pub struct CreateTag {
     pub slug: String,
     #[schema(example = "Научная фантастика")]
     pub name: String,
+    /// По умолчанию `tag`.
+    #[serde(default)]
+    pub kind: TagKind,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -447,6 +469,15 @@ pub struct CreateTag {
 pub struct UpdateTag {
     pub slug: Option<String>,
     pub name: Option<String>,
+    pub kind: Option<TagKind>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListTagsQuery {
+    /// Только жанры или только остальные теги; не передан — все.
+    #[param(inline)]
+    pub kind: Option<TagKind>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

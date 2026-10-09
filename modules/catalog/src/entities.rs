@@ -3,7 +3,7 @@
 use crate::models::{
     page_bounds, Entity, EntityCredit, EntityCreditRow, EntityDetail, EntitySummary,
     ListEntitiesQuery, Page, RelatedWorks, SimilarQuery, Tag, ENTITY_COLUMNS,
-    ENTITY_SUMMARY_COLUMNS,
+    ENTITY_SUMMARY_COLUMNS, TAG_COLUMNS, TAG_ORDER,
 };
 use axum::extract::State;
 use axum::Json;
@@ -100,7 +100,8 @@ pub async fn get(
     ))
 }
 
-/// Похожие на сущность: тот же тип, больше общих тегов — выше, при равенстве — новее. Без самой
+/// Похожие на сущность: тот же тип, больше общих тегов — выше (жанр весит вдвое), при равенстве —
+/// новее. Без самой
 /// сущности и её связанных (они и так на карточке). Нет тегов — пустая страница.
 ///
 /// Первая версия без ML: один запрос с подсчётом пересечения тегов по `entity_tags (tag_id)`.
@@ -136,8 +137,9 @@ pub async fn similar(
     let id = id.ok_or(AppError::NotFound)?;
     let rows: Vec<Similar> = sqlx::query_as(&format!(
         "WITH scored AS (
-             SELECT other.entity_id, count(*) AS score
+             SELECT other.entity_id, sum(CASE WHEN t.kind = 'genre' THEN 2 ELSE 1 END) AS score
              FROM entity_tags mine
+             JOIN tags t ON t.id = mine.tag_id
              JOIN entity_tags other ON other.tag_id = mine.tag_id AND other.entity_id <> mine.entity_id
              WHERE mine.entity_id = $1
              GROUP BY other.entity_id
@@ -203,10 +205,10 @@ pub(crate) async fn details(
     }
 
     let ids: Vec<Uuid> = entities.iter().map(|entity| entity.id).collect();
-    let tags: Vec<TagOf> = sqlx::query_as(
-        "SELECT et.entity_id, t.id, t.slug, t.name FROM entity_tags et JOIN tags t ON t.id = et.tag_id
-         WHERE et.entity_id = ANY($1) ORDER BY t.name",
-    )
+    let tags: Vec<TagOf> = sqlx::query_as(&format!(
+        "SELECT et.entity_id, {TAG_COLUMNS} FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+             WHERE et.entity_id = ANY($1) ORDER BY {TAG_ORDER}"
+    ))
     .bind(&ids)
     .fetch_all(db)
     .await?;
@@ -287,10 +289,10 @@ async fn related(db: impl PgExecutor<'_>, ids: &[Uuid]) -> AppResult<HashMap<Uui
 }
 
 pub(crate) async fn tags_of(db: impl PgExecutor<'_>, entity_id: Uuid) -> AppResult<Vec<Tag>> {
-    Ok(sqlx::query_as(
-        "SELECT t.id, t.slug, t.name FROM entity_tags et JOIN tags t ON t.id = et.tag_id
-         WHERE et.entity_id = $1 ORDER BY t.name",
-    )
+    Ok(sqlx::query_as(&format!(
+        "SELECT {TAG_COLUMNS} FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+         WHERE et.entity_id = $1 ORDER BY {TAG_ORDER}"
+    ))
     .bind(entity_id)
     .fetch_all(db)
     .await?)

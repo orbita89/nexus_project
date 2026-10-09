@@ -36,19 +36,21 @@ pub async fn create(
     validate::slug("slug", &req.slug)?;
     let name = validate::required("name", &req.name, MAX_TITLE)?;
 
-    let tag: Tag =
-        sqlx::query_as("INSERT INTO tags (slug, name) VALUES ($1, $2) RETURNING id, slug, name")
-            .bind(&req.slug)
-            .bind(name)
-            .fetch_one(&state.db)
-            .await
-            .map_err(validate::conflict("slug is already taken"))?;
+    let tag: Tag = sqlx::query_as(
+        "INSERT INTO tags (slug, name, kind) VALUES ($1, $2, $3) RETURNING id, slug, name, kind",
+    )
+    .bind(&req.slug)
+    .bind(name)
+    .bind(req.kind)
+    .fetch_one(&state.db)
+    .await
+    .map_err(validate::conflict("slug is already taken"))?;
 
     tracing::info!(admin_id = %admin.id, tag_id = %tag.id, slug = %tag.slug, "tag created");
     Ok((StatusCode::CREATED, Json(tag)))
 }
 
-/// Переименовать тег или сменить slug.
+/// Переименовать тег, сменить slug или вид (`genre` / `tag`).
 #[utoipa::path(
     patch, operation_id = "update_tag", path = "/admin/tags/{id}", tag = "catalog-admin",
     security(("bearer" = [])),
@@ -78,18 +80,20 @@ pub async fn update(
         .transpose()?;
 
     let tag: Option<Tag> = sqlx::query_as(
-        "UPDATE tags SET slug = COALESCE($2, slug), name = COALESCE($3, name)
-         WHERE id = $1 RETURNING id, slug, name",
+        "UPDATE tags SET slug = COALESCE($2, slug), name = COALESCE($3, name),
+                         kind = COALESCE($4, kind)
+         WHERE id = $1 RETURNING id, slug, name, kind",
     )
     .bind(id)
     .bind(&req.slug)
     .bind(name)
+    .bind(req.kind)
     .fetch_optional(&state.db)
     .await
     .map_err(validate::conflict("slug is already taken"))?;
     let tag = tag.ok_or(AppError::NotFound)?;
 
-    // slug и название тега есть в поисковых документах сущностей.
+    // slug и название тега есть в поисковых документах сущностей, вид — в карточках (жанры в шапке).
     let ids = affected_entities(&state.db, TAG_ENTITIES, id).await?;
     let touched = Touched::collect(&state.db, &ids, &[]).await?;
     publish::run(&state, touched, &Reporter::silent()).await;

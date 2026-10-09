@@ -35,6 +35,13 @@ INSERT INTO tags (slug, name) VALUES
     ('philosophy',      'Философское')
 ON CONFLICT (slug) DO NOTHING;
 
+-- Жанры — списком, не эвристикой: в шапке карточки они отдельно от тегов. Остальные остаются
+-- тегами (Экранизация, Открытый мир, Классика, Философское). UPDATE, а не INSERT: так размечается и
+-- уже загруженная база.
+UPDATE tags SET kind = 'genre'
+WHERE slug IN ('sci-fi', 'fantasy', 'horror', 'drama', 'thriller', 'space-opera', 'cyberpunk',
+               'post-apocalypse', 'dystopia', 'adventure', 'detective', 'rpg', 'shooter', 'animation');
+
 INSERT INTO entities (kind, slug, title, original_title, release_date, description, metadata) VALUES
     -- Дюна
     ('book',   'dune-novel', 'Дюна', 'Dune', '1965-08-01',

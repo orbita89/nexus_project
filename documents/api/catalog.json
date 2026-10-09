@@ -1325,7 +1325,7 @@
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Переименовать тег или сменить slug.",
+        "summary": "Переименовать тег, сменить slug или вид (`genre` / `tag`).",
         "operationId": "update_tag",
         "parameters": [
           {
@@ -1560,7 +1560,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Похожие на сущность: тот же тип, больше общих тегов — выше, при равенстве — новее. Без самой\nсущности и её связанных (они и так на карточке). Нет тегов — пустая страница.",
+        "summary": "Похожие на сущность: тот же тип, больше общих тегов — выше (жанр весит вдвое), при равенстве —\nновее. Без самой\nсущности и её связанных (они и так на карточке). Нет тегов — пустая страница.",
         "description": "Первая версия без ML: один запрос с подсчётом пересечения тегов по `entity_tags (tag_id)`.",
         "operationId": "list_similar_entities",
         "parameters": [
@@ -1821,8 +1821,24 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Все теги по алфавиту с числом сущностей. Тегов немного, поэтому без пагинации.",
+        "summary": "Все теги по алфавиту с числом сущностей; `?kind=genre` — только жанры. Тегов немного, поэтому\nбез пагинации.",
         "operationId": "list_tags",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Только жанры или только остальные теги; не передан — все.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Вид тега: `genre` — жанр («Драма», «Космическая опера»), `tag` — остальные метки\n(«Экранизация», «Открытый мир»).",
+              "enum": [
+                "genre",
+                "tag"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Теги",
@@ -1833,6 +1849,16 @@
                   "items": {
                     "$ref": "#/components/schemas/TagWithCount"
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный `kind`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -2024,6 +2050,10 @@
           "name"
         ],
         "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/TagKind",
+            "description": "По умолчанию `tag`."
+          },
           "name": {
             "type": "string",
             "example": "Научная фантастика"
@@ -3141,12 +3171,16 @@
         "required": [
           "id",
           "slug",
-          "name"
+          "name",
+          "kind"
         ],
         "properties": {
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TagKind"
           },
           "name": {
             "type": "string",
@@ -3158,12 +3192,21 @@
           }
         }
       },
+      "TagKind": {
+        "type": "string",
+        "description": "Вид тега: `genre` — жанр («Драма», «Космическая опера»), `tag` — остальные метки\n(«Экранизация», «Открытый мир»).",
+        "enum": [
+          "genre",
+          "tag"
+        ]
+      },
       "TagWithCount": {
         "type": "object",
         "required": [
           "id",
           "slug",
           "name",
+          "kind",
           "entities_count"
         ],
         "properties": {
@@ -3176,6 +3219,9 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TagKind"
           },
           "name": {
             "type": "string",
@@ -3307,6 +3353,16 @@
       "UpdateTag": {
         "type": "object",
         "properties": {
+          "kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TagKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "type": [
               "string",

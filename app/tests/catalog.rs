@@ -837,6 +837,99 @@ async fn people_crud(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn genres_are_tags_with_kind(pool: PgPool) {
+    let mut ctx = Ctx::without_search(pool);
+    let isr = FakeIsr::start(StatusCode::OK).await;
+    isr.attach(&mut ctx);
+
+    let (status, tag) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/tags",
+            Some(json!({ "slug": "imax", "name": "Аймакс" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{tag}");
+    assert_eq!(tag["kind"], "tag");
+    let (status, tag) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/tags",
+            Some(json!({ "slug": "drama", "name": "Драма", "kind": "genre" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{tag}");
+    assert_eq!(tag["kind"], "genre");
+    let (status, _) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/tags",
+            Some(json!({ "slug": "x", "name": "x", "kind": "mood" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let id = ctx.entity_id("dune-2021").await;
+    let (status, _) = ctx
+        .admin_send(
+            Method::PUT,
+            &format!("/admin/entities/{id}/tags"),
+            Some(json!({ "tags": ["sci-fi", "imax"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let card = ctx.get_ok("/entities/dune-2021").await;
+    assert_eq!(card["tags"][0]["slug"], "imax");
+
+    // Тег стал жанром: в карточке жанры первыми, карточки с тегом пересобраны.
+    let sci_fi = ctx.tag_id("sci-fi").await;
+    let before = isr.paths().len();
+    let (status, tag) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/tags/{sci_fi}"),
+            Some(json!({ "kind": "genre" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tag["kind"], "genre");
+    assert_eq!(tag["name"], "Научная фантастика");
+    let paths = isr.paths()[before..].to_vec();
+    for path in [
+        "/films/dune-2021",
+        "/films/dune-part-two-2024",
+        "/books/dune-novel",
+    ] {
+        assert!(paths.contains(&path.to_string()), "{path}: {paths:?}");
+    }
+    let card = ctx.get_ok("/entities/dune-2021").await;
+    let tags: Vec<(&str, &str)> = card["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["slug"].as_str().unwrap(), t["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(tags, [("sci-fi", "genre"), ("imax", "tag")]);
+
+    let genres = ctx.get_ok("/tags?kind=genre").await;
+    let genres: Vec<&str> = genres
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(genres, ["drama", "sci-fi"]);
+    assert_eq!(
+        ctx.get_ok("/tags?kind=tag").await.as_array().unwrap().len(),
+        3
+    );
+    assert_eq!(
+        ctx.get("/tags?kind=mood").await.status,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn tags_crud(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
 
@@ -1939,6 +2032,26 @@ async fn similar_entities_by_shared_tags(pool: PgPool) {
     assert_eq!(page["total"], 4);
     assert_eq!(page["limit"], 12);
 
+    // Общий жанр весит вдвое: жанр «Космическая опера» поднимает «новый» над тегом sci-fi.
+    sqlx::query("UPDATE tags SET kind = 'genre' WHERE slug = 'space-opera'")
+        .execute(&ctx.state.db)
+        .await
+        .unwrap();
+    let page = ctx.get_ok("/entities/dune-2021/similar").await;
+    assert_eq!(
+        slugs(&page),
+        [
+            "two-tags",
+            "one-tag-new",
+            "dune-part-two-2024",
+            "one-tag-old"
+        ]
+    );
+    sqlx::query("UPDATE tags SET kind = 'tag' WHERE slug = 'space-opera'")
+        .execute(&ctx.state.db)
+        .await
+        .unwrap();
+
     // Связанные (сиквел) уже на карточке — из похожих уходят.
     let first = ctx.entity_id("dune-2021").await;
     let second = ctx.entity_id("dune-part-two-2024").await;
@@ -2013,6 +2126,23 @@ async fn seed_catalog_is_valid(pool: PgPool) {
         .as_str()
         .unwrap()
         .contains("openlibrary.org"));
+
+    // Жанры размечены списком: в карточке первыми, «Экранизация» — тег.
+    let kinds: Vec<(&str, &str)> = dune["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["slug"].as_str().unwrap(), t["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("drama", "genre"),
+            ("space-opera", "genre"),
+            ("sci-fi", "genre"),
+            ("based-on-book", "tag")
+        ]
+    );
 
     // Связанные: ремейк в обе стороны, сиквел и приквел.
     assert_eq!(related_slugs(&dune, "remakes"), ["dune-1984"]);
