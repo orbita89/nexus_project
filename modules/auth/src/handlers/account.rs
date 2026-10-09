@@ -112,7 +112,7 @@ pub async fn login(
     let password_ok = crypto::verify_password(req.password, stored_hash).await?;
     let user = match user {
         Some(user) if password_ok && user.is_active => user,
-        _ => return Err(AppError::Unauthorized),
+        _ => return Err(AppError::Unauthorized.with_code("invalid_credentials")),
     };
     // Проверяем после пароля: иначе по ответу можно было бы узнать, что аккаунт существует.
     if user.email_verified_at.is_none() {

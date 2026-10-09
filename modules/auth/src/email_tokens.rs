@@ -85,5 +85,7 @@ pub async fn consume(
     .await?;
 
     row.map(|(email, user_id)| Consumed { email, user_id })
-        .ok_or_else(|| AppError::BadRequest("invalid or expired token".to_string()))
+        .ok_or_else(|| {
+            AppError::BadRequest("invalid or expired token".to_string()).with_code("invalid_token")
+        })
 }

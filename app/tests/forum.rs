@@ -58,6 +58,7 @@ impl Ctx {
         let body = response.json();
         if !status.is_success() {
             assert!(body["error"].is_string(), "{method} {path}: {body}");
+            assert!(body["code"].is_string(), "{method} {path}: {body}");
         }
         body
     }

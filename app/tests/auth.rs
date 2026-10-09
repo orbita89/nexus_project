@@ -171,6 +171,7 @@ async fn login_requires_verified_email(pool: PgPool) {
     let response = ctx.login("neo").await;
     assert_eq!(response.status, StatusCode::FORBIDDEN);
     assert_eq!(response.json()["error"], "email not verified");
+    assert_eq!(response.json()["code"], "email_not_verified");
 
     // Неверный пароль у неподтверждённого — по-прежнему 401: не раскрываем, что аккаунт есть.
     let response = ctx
@@ -242,6 +243,7 @@ async fn register_rejects_duplicates_case_insensitively(pool: PgPool) {
         .await;
     assert_eq!(response.status, StatusCode::CONFLICT);
     assert_eq!(response.json()["error"], "email already registered");
+    assert_eq!(response.json()["code"], "email_taken");
 
     let response = ctx
         .post(
@@ -251,6 +253,7 @@ async fn register_rejects_duplicates_case_insensitively(pool: PgPool) {
         .await;
     assert_eq!(response.status, StatusCode::CONFLICT);
     assert_eq!(response.json()["error"], "username already taken");
+    assert_eq!(response.json()["code"], "username_taken");
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR")]
@@ -263,12 +266,14 @@ async fn register_validates_input(pool: PgPool) {
         )
         .await;
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(response.json()["code"], "validation");
 
     // Неразобранное тело — 400 {"error": "..."}, а не 422 с текстом.
     for body in [json!({ "email": "neo@example.com" }), json!({ "email": 1 })] {
         let response = ctx.post("/register", body.clone()).await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST, "{body}");
         assert!(response.json()["error"].is_string(), "{body}");
+        assert_eq!(response.json()["code"], "validation", "{body}");
     }
 }
 
@@ -303,6 +308,7 @@ async fn login_fails_the_same_way_for_wrong_password_unknown_user_and_blocked(po
             .post("/login", json!({ "login": login, "password": password }))
             .await;
         assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{login}");
+        assert_eq!(response.json()["code"], "invalid_credentials", "{login}");
     }
 }
 
@@ -687,6 +693,7 @@ async fn admin_endpoints_require_admin_role(pool: PgPool) {
         let token = ctx.login_as(username, role).await;
         let response = ctx.call(Method::GET, "/admin/users", None, &token).await;
         assert_eq!(response.status, StatusCode::FORBIDDEN, "{role}");
+        assert_eq!(response.json()["code"], "forbidden", "{role}");
     }
 
     let response = request(
@@ -698,6 +705,7 @@ async fn admin_endpoints_require_admin_role(pool: PgPool) {
     )
     .await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(response.json()["code"], "unauthorized");
 
     let token = ctx.login_as("boss", "admin").await;
     let response = ctx.call(Method::GET, "/admin/users", None, &token).await;
@@ -816,6 +824,7 @@ async fn login_attempts_are_rate_limited_per_account(pool: PgPool) {
     }
     let response = attempt().await;
     assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.json()["code"], "rate_limited");
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR")]

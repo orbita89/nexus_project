@@ -37,7 +37,38 @@ async fn admin_only(AdminUser(admin): AdminUser, ...) -> AppResult<...>     // �
 | `admin` | + админские эндпоинты (`/api/v1/<модуль>/admin/...`) |
 
 Ошибки — `AppError` (`NotFound`, `BadRequest(msg)`, `Unauthorized`, `Forbidden`, `Conflict(msg)`,
-`Unavailable(msg)` → 503, ...), тело ответа всегда `{"error": "..."}`. Ошибки БД наружу не уходят, только в лог.
+`Unavailable(msg)` → 503, ...), тело ответа всегда `{"error": "...", "code": "..."}`. Ошибки БД наружу не уходят, только в лог.
+
+`error` — английский текст для логов, его формулировка может меняться; клиент выбирает сообщение по
+`code`. Код по умолчанию задаёт вариант ошибки, конкретный — `with_code`, статус и текст при этом
+не меняются:
+
+```rust
+return Err(AppError::Conflict("username already taken".into()).with_code("username_taken"));
+```
+
+| `code` | Статус | Когда |
+|---|---|---|
+| `validation` | 400 | Неверные поля, неразобранные путь, query или тело (`BadRequest`) |
+| `unauthorized` | 401 | Нет токена или он недействителен |
+| `invalid_credentials` | 401 | Вход: неверный логин или пароль, заблокирован |
+| `forbidden` | 403 | Не хватает роли или чужой объект |
+| `email_not_verified` | 403 | Вход по паролю до подтверждения email |
+| `own_review` | 403 | Голос за свою рецензию |
+| `not_found` | 404 | Нет объекта (или он скрыт от вас) |
+| `conflict` | 409 | Общий конфликт: занятый slug, дубль |
+| `username_taken`, `email_taken` | 409 | Регистрация, смена username или email |
+| `not_released` | 409 | Оценка, рецензия или реакция до премьеры |
+| `review_without_text` | 409 | Комментарий к оценке без текста |
+| `self_relation` | 409 | Связь сущности с самой собой |
+| `password_incorrect` | 400 | Смена пароля или email: текущий пароль неверен |
+| `invalid_token` | 400 | Ссылка из письма недействительна или устарела |
+| `username_change_too_soon` | 400 | username меняется не чаще раза в 30 дней |
+| `rate_limited` | 429 | Лимит; ещё `retry_after` и заголовок `Retry-After` |
+| `unavailable` | 503 | Внешний сервис (Meilisearch) недоступен |
+| `internal` | 500 | Внутренняя ошибка, детали только в логе |
+
+Новый код — добавить в эту таблицу: по ней фронтенд переводит сообщения.
 Параметры запроса — через `shared::extract`, а не axum: JSON-тело — `JsonBody<T>` вместо `axum::Json<T>`,
 путь — `Path<T>`, query — `Query<T>`. Тогда и неразобранный запрос (`/x/not-a-uuid`, `?year=abc`, тело
 без поля) даёт `400 {"error": "..."}`, а не текст или 422. `axum::extract::{Path, Query}` в модулях

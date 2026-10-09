@@ -3029,9 +3029,17 @@
           "error"
         ],
         "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Машинный код: по нему клиент выбирает сообщение. Список — `documents/for-other-modules.md`.",
+            "example": "unauthorized"
+          },
           "error": {
             "type": "string",
-            "description": "Описание ошибки.",
+            "description": "Описание ошибки (английский текст для логов; формулировка может меняться).",
             "example": "unauthorized"
           },
           "retry_after": {

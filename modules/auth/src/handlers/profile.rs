@@ -65,7 +65,8 @@ pub async fn update(
                 return Err(AppError::BadRequest(format!(
                     "username can be changed once in {USERNAME_CHANGE_DAYS} days, next change after {}",
                     next.to_rfc3339()
-                )));
+                ))
+                .with_code("username_change_too_soon"));
             }
         }
     }
@@ -145,12 +146,13 @@ pub async fn change_email(
             .password
             .ok_or_else(|| AppError::BadRequest("password is required".into()))?;
         if !crypto::verify_password(password, password_hash).await? {
-            return Err(AppError::BadRequest("password is incorrect".into()));
+            return Err(AppError::BadRequest("password is incorrect".into())
+                .with_code("password_incorrect"));
         }
     }
     limits.check_email(&new_email)?;
     if users::by_email(&mut conn, &new_email).await?.is_some() {
-        return Err(AppError::Conflict("email already registered".into()));
+        return Err(AppError::Conflict("email already registered".into()).with_code("email_taken"));
     }
     drop(conn);
 
@@ -203,9 +205,9 @@ pub async fn confirm_email_change(
 ) -> AppResult<Json<UserView>> {
     let mut tx = state.db.begin().await?;
     let consumed = email_tokens::consume(&mut tx, Purpose::ChangeEmail, &req.token).await?;
-    let user_id = consumed
-        .user_id
-        .ok_or_else(|| AppError::BadRequest("invalid or expired token".into()))?;
+    let user_id = consumed.user_id.ok_or_else(|| {
+        AppError::BadRequest("invalid or expired token".into()).with_code("invalid_token")
+    })?;
     let old_email: Option<String> =
         sqlx::query_scalar("SELECT email::text FROM users WHERE id = $1 AND is_active FOR UPDATE")
             .bind(user_id)

@@ -50,12 +50,12 @@ pub async fn by_login_with_hash(
 pub fn unique_violation(error: sqlx::Error) -> AppError {
     if let Some(db_error) = error.as_database_error() {
         if db_error.is_unique_violation() {
-            let message = match db_error.constraint() {
-                Some("users_email_key") => "email already registered",
-                Some("users_username_key") => "username already taken",
-                _ => "user already exists",
+            let (code, message) = match db_error.constraint() {
+                Some("users_email_key") => ("email_taken", "email already registered"),
+                Some("users_username_key") => ("username_taken", "username already taken"),
+                _ => ("conflict", "user already exists"),
             };
-            return AppError::Conflict(message.to_string());
+            return AppError::Conflict(message.to_string()).with_code(code);
         }
     }
     AppError::Database(error)

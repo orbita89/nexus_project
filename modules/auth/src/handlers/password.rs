@@ -124,9 +124,10 @@ pub async fn change(
         ));
     }
     if !crypto::verify_password(req.current_password, stored_hash).await? {
-        return Err(AppError::BadRequest(
-            "current password is incorrect".to_string(),
-        ));
+        return Err(
+            AppError::BadRequest("current password is incorrect".to_string())
+                .with_code("password_incorrect"),
+        );
     }
 
     let password_hash = crypto::hash_password(req.new_password).await?;

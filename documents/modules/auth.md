@@ -213,7 +213,7 @@ DELETE /me/oauth/{provider}  →  204; не привязан — 404
   | Письма на один адрес | 5 подряд, дальше 1 в 12 минут |
 
   Ответ 429 говорит, когда повторить: заголовок `Retry-After: <секунды>` и то же число в теле —
-  `{"error": "...", "retry_after": 80}`.
+  `{"error": "...", "code": "rate_limited", "retry_after": 80}`.
 
   Счётчики в памяти процесса. При нескольких экземплярах приложения их нужно перенести в Redis.
   IP берётся из `X-Real-IP` от nginx.
@@ -272,7 +272,7 @@ API видно в PR. Обновить: `UPDATE_OPENAPI=1 cargo test -p nexus op
 | PATCH | `admin/users/{id}/status` | admin | Заблокировать/разблокировать (себя нельзя) |
 | POST | `dev/login` | все, при `DEV_LOGIN=true` | Вход без пароля |
 
-**Ошибки:** тело `{"error": "..."}`.
+**Ошибки:** тело `{"error": "...", "code": "..."}`; коды (`invalid_credentials`, `email_not_verified`, `username_taken`, `email_taken`, `invalid_token`, `password_incorrect`, ...) — [for-other-modules.md](../for-other-modules.md#авторизация-в-хендлере).
 
 | Код | Когда |
 |---|---|

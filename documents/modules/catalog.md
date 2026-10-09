@@ -297,7 +297,7 @@ event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"pre
 
 Все пути — от `/api/v1/catalog`. В Swagger (http://localhost/docs) каталог — отдельная вкладка:
 **Select a definition** → **Каталог**, схема `/api-docs/catalog.json`, контракт в репозитории —
-`documents/api/catalog.json`. Токен для админки берётся во вкладке **Nexus API**. Ошибки — `{"error": "..."}`, в том числе для неразобранного
+`documents/api/catalog.json`. Токен для админки берётся во вкладке **Nexus API**. Ошибки — `{"error": "...", "code": "..."}`, в том числе для неразобранного
 JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 
 ### Чтение (без авторизации)
