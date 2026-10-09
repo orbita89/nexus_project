@@ -268,6 +268,35 @@ Content-Type: application/json
     });
 %}
 
+### Награды и факты в metadata книги
+PATCH {{host}}/api/v1/catalog/admin/entities/{{entity_id}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "metadata": { "pages": 100, "awards": [{ "title": " «Хьюго» " , "year": 1966, "won": true }], "trivia": ["Проверка из catalog.http"], "isbn": "978-0-441-01359-3" } }
+
+> {%
+    client.test("200, нормализовано", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.metadata.awards[0].title === "«Хьюго»", JSON.stringify(response.body.metadata));
+        client.assert(response.body.metadata.trivia.length === 1);
+    });
+%}
+
+### Студии у книги — 400
+PATCH {{host}}/api/v1/catalog/admin/entities/{{entity_id}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "metadata": { "studios": ["Legendary"] } }
+
+> {%
+    client.test("400 validation", () => {
+        client.assert(response.status === 400, `got ${response.status}`);
+        client.assert(response.body.code === "validation");
+    });
+%}
+
 ### Добавить участника: Фрэнк Херберт, автор
 GET {{host}}/api/v1/catalog/people/frank-herbert
 

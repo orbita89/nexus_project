@@ -250,6 +250,33 @@ FROM (VALUES
 ) AS v (slug, cover_url, trailers)
 WHERE e.slug = v.slug;
 
+-- Производство, награды и факты (metadata.studios, awards, trivia) — тоже отдельным UPDATE:
+-- повторный make seed дополняет уже загруженную базу.
+UPDATE entities e
+SET metadata = e.metadata || v.extra::jsonb
+FROM (VALUES
+    ('dune-2021', '{
+        "studios": ["Legendary Pictures", "Villeneuve Films"],
+        "awards": [
+            {"title": "«Оскар»: лучший фильм", "year": 2022, "won": false},
+            {"title": "«Оскар»: лучшая операторская работа", "year": 2022, "won": true},
+            {"title": "«Оскар»: лучший монтаж", "year": 2022, "won": true},
+            {"title": "«Оскар»: лучшая музыка", "year": 2022, "won": true},
+            {"title": "«Оскар»: лучший звук", "year": 2022, "won": true},
+            {"title": "«Оскар»: лучшая работа художника-постановщика", "year": 2022, "won": true},
+            {"title": "«Оскар»: лучшие визуальные эффекты", "year": 2022, "won": true}
+        ],
+        "trivia": [
+            "Пустыню Арракиса снимали в Иордании (Вади-Рам) и в Абу-Даби.",
+            "В США фильм вышел одновременно в кинотеатрах и на HBO Max."
+        ]
+    }'),
+    ('the-witcher-3-wild-hunt', '{
+        "awards": [{"title": "The Game Awards: игра года", "year": 2015, "won": true}]
+    }')
+) AS v(slug, extra)
+WHERE e.slug = v.slug;
+
 INSERT INTO people (slug, full_name, birth_date, bio) VALUES
     ('frank-herbert',       'Фрэнк Херберт',        '1920-10-08', 'Американский писатель-фантаст, автор «Дюны».'),
     ('denis-villeneuve',    'Дени Вильнёв',         '1967-10-03', 'Канадский режиссёр.'),

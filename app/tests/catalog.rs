@@ -2117,6 +2117,11 @@ async fn seed_catalog_is_valid(pool: PgPool) {
     assert_eq!(trailers[0]["provider"], "youtube");
     assert_eq!(trailers[0]["id"], "n9xhJrPXop4");
     assert_eq!(trailers[1]["provider"], "rutube");
+    // Производство, награды и факты.
+    assert_eq!(dune["metadata"]["studios"][0], "Legendary Pictures");
+    assert_eq!(dune["metadata"]["awards"].as_array().unwrap().len(), 7);
+    assert_eq!(dune["metadata"]["awards"][1]["won"], true);
+    assert!(dune["metadata"]["trivia"][0].is_string());
     assert!(dune["cover_url"].as_str().unwrap().starts_with("https://"));
     let lynch = ctx.get_ok("/entities/dune-1984").await;
     assert!(lynch["metadata"].get("trailers").is_none());

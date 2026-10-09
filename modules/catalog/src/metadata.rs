@@ -33,6 +33,17 @@ pub struct MovieMetadata {
         { "provider": "rutube", "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4" }
     ]))]
     pub trailers: Option<Vec<TrailerSource>>,
+    /// Студии производства: до 20, каждая 1–120 символов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = json!(["Legendary Pictures", "Villeneuve Films"]))]
+    pub studios: Option<Vec<String>>,
+    /// Награды и номинации: до 50.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awards: Option<Vec<Award>>,
+    /// Факты: до 30, каждый 1–1000 символов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = json!(["Пустыню снимали в Иордании и ОАЭ."]))]
+    pub trivia: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
@@ -69,6 +80,17 @@ pub struct SeriesMetadata {
         { "provider": "rutube", "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4" }
     ]))]
     pub trailers: Option<Vec<TrailerSource>>,
+    /// Студии производства: до 20, каждая 1–120 символов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = json!(["Legendary Pictures", "Villeneuve Films"]))]
+    pub studios: Option<Vec<String>>,
+    /// Награды и номинации: до 50.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awards: Option<Vec<Award>>,
+    /// Факты: до 30, каждый 1–1000 символов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = json!(["Пустыню снимали в Иордании и ОАЭ."]))]
+    pub trivia: Option<Vec<String>>,
 }
 
 /// Поля книги.
@@ -85,6 +107,13 @@ pub struct BookMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = "Ace Books")]
     pub publisher: Option<String>,
+    /// Награды и номинации: до 50.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awards: Option<Vec<Award>>,
+    /// Факты: до 30, каждый 1–1000 символов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = json!(["Пустыню снимали в Иордании и ОАЭ."]))]
+    pub trivia: Option<Vec<String>>,
 }
 
 /// Поля игры.
@@ -107,6 +136,29 @@ pub struct GameMetadata {
         { "provider": "rutube", "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4" }
     ]))]
     pub trailers: Option<Vec<TrailerSource>>,
+    /// Награды и номинации: до 50.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awards: Option<Vec<Award>>,
+    /// Факты: до 30, каждый 1–1000 символов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = json!(["Пустыню снимали в Иордании и ОАЭ."]))]
+    pub trivia: Option<Vec<String>>,
+}
+
+/// Награда или номинация.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Award {
+    /// 1–200 символов.
+    #[schema(example = "«Оскар» за лучшую операторскую работу")]
+    pub title: String,
+    /// 1880–2100; `null` — год неизвестен.
+    #[serde(default)]
+    #[schema(example = 2022, minimum = 1880, maximum = 2100)]
+    pub year: Option<i32>,
+    /// `true` — получена, `false` — номинация. По умолчанию `false`.
+    #[serde(default)]
+    pub won: bool,
 }
 
 /// Видеосервис трейлера. Фронтенд сам строит адрес плеера по провайдеру и id, поэтому в БД не
@@ -214,6 +266,12 @@ pub enum Metadata {
 const MAX_TEXT: usize = 200;
 const MAX_LIST: usize = 30;
 const MAX_TRAILERS: usize = 5;
+const MAX_STUDIOS: usize = 20;
+const MAX_STUDIO: usize = 120;
+const MAX_AWARDS: usize = 50;
+const MAX_AWARD_TITLE: usize = 200;
+const MAX_TRIVIA: usize = 30;
+const MAX_TRIVIA_ITEM: usize = 1000;
 
 /// Проверяет `metadata` для `kind` и возвращает нормализованное значение для записи в БД.
 pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
@@ -227,6 +285,9 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             m.countries = countries(m.countries)?;
             m.age_rating = text("age_rating", m.age_rating, 16)?;
             m.trailers = trailers(m.trailers)?;
+            m.studios = studios(m.studios)?;
+            m.awards = awards(m.awards)?;
+            m.trivia = trivia(m.trivia)?;
             to_value(m)
         }
         EntityKind::Series => {
@@ -235,6 +296,9 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             range("episodes", m.episodes, 1, 100_000)?;
             m.countries = countries(m.countries)?;
             m.trailers = trailers(m.trailers)?;
+            m.studios = studios(m.studios)?;
+            m.awards = awards(m.awards)?;
+            m.trivia = trivia(m.trivia)?;
             to_value(m)
         }
         EntityKind::Book => {
@@ -242,16 +306,18 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             m.isbn = m.isbn.map(|isbn| isbn_normalize(&isbn)).transpose()?;
             range("pages", m.pages, 1, 100_000)?;
             m.publisher = text("publisher", m.publisher, MAX_TEXT)?;
+            m.awards = awards(m.awards)?;
+            m.trivia = trivia(m.trivia)?;
             to_value(m)
         }
         EntityKind::Game => {
             let mut m: GameMetadata = parse(kind, metadata)?;
-            m.platforms = list("platforms", m.platforms, |p| {
-                text("platforms", Some(p), 50).map(|p| p.unwrap_or_default())
-            })?;
+            m.platforms = list("platforms", m.platforms, |p| item("platforms", p, 50))?;
             m.developer = text("developer", m.developer, MAX_TEXT)?;
             m.publisher = text("publisher", m.publisher, MAX_TEXT)?;
             m.trailers = trailers(m.trailers)?;
+            m.awards = awards(m.awards)?;
+            m.trivia = trivia(m.trivia)?;
             to_value(m)
         }
     }
@@ -299,25 +365,61 @@ fn list(
     values: Option<Vec<String>>,
     item: impl Fn(String) -> AppResult<String>,
 ) -> AppResult<Option<Vec<String>>> {
+    list_of(field, values, MAX_LIST, item)
+}
+
+/// [`list`] с другим пределом длины.
+fn list_of<T: PartialEq>(
+    field: &str,
+    values: Option<Vec<T>>,
+    max: usize,
+    item: impl Fn(T) -> AppResult<T>,
+) -> AppResult<Option<Vec<T>>> {
     let Some(values) = values else {
         return Ok(None);
     };
-    if values.len() > MAX_LIST {
-        return Err(bad(format!(
-            "metadata.{field} has more than {MAX_LIST} items"
-        )));
+    if values.len() > max {
+        return Err(bad(format!("metadata.{field} has more than {max} items")));
     }
-    let mut result: Vec<String> = Vec::with_capacity(values.len());
+    let mut result: Vec<T> = Vec::with_capacity(values.len());
     for value in values {
         let value = item(value)?;
-        if value.is_empty() {
-            return Err(bad(format!("metadata.{field} has an empty item")));
-        }
         if !result.contains(&value) {
             result.push(value);
         }
     }
     Ok((!result.is_empty()).then_some(result))
+}
+
+/// Обязательный непустой элемент списка строк: обрезает пробелы, не длиннее `max`.
+fn item(field: &str, value: String, max: usize) -> AppResult<String> {
+    text(field, Some(value), max)?.ok_or_else(|| bad(format!("metadata.{field} has an empty item")))
+}
+
+fn studios(values: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> {
+    list_of("studios", values, MAX_STUDIOS, |v| {
+        item("studios", v, MAX_STUDIO)
+    })
+}
+
+fn trivia(values: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> {
+    list_of("trivia", values, MAX_TRIVIA, |v| {
+        item("trivia", v, MAX_TRIVIA_ITEM)
+    })
+}
+
+fn awards(values: Option<Vec<Award>>) -> AppResult<Option<Vec<Award>>> {
+    list_of("awards", values, MAX_AWARDS, |award| {
+        if let Some(year) = award.year {
+            if !(1880..=2100).contains(&year) {
+                return Err(bad("metadata.awards: year must be between 1880 and 2100"));
+            }
+        }
+        Ok(Award {
+            title: item("awards.title", award.title, MAX_AWARD_TITLE)?,
+            ..award
+        })
+    })
 }
 
 fn countries(values: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> {
@@ -534,6 +636,73 @@ mod tests {
             EntityKind::Book,
             json!(["https://youtu.be/n9xhJrPXop4"])
         ));
+    }
+
+    #[test]
+    fn studios_awards_trivia() {
+        let value = validate(
+            EntityKind::Movie,
+            json!({
+                "studios": [" Legendary ", "Legendary", "Villeneuve Films"],
+                "awards": [
+                    { "title": " «Оскар»: операторская работа ", "year": 2022, "won": true },
+                    { "title": "«Оскар»: лучший фильм", "year": null },
+                    { "title": "«Оскар»: лучший фильм" }
+                ],
+                "trivia": ["  Снимали в Иордании.  "]
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "studios": ["Legendary", "Villeneuve Films"],
+                "awards": [
+                    { "title": "«Оскар»: операторская работа", "year": 2022, "won": true },
+                    { "title": "«Оскар»: лучший фильм", "year": null, "won": false }
+                ],
+                "trivia": ["Снимали в Иордании."]
+            })
+        );
+        // Пустые списки — как отсутствие поля; награды и факты — у всех типов, студии — у кино.
+        for kind in EntityKind::ALL {
+            let empty = json!({ "awards": [], "trivia": [] });
+            assert_eq!(validate(kind, empty).unwrap(), json!({}), "{kind:?}");
+            let fact = json!({ "trivia": ["Факт"] });
+            assert!(validate(kind, fact).is_ok(), "{kind:?}");
+        }
+        assert!(validate(EntityKind::Series, json!({ "studios": ["HBO"] })).is_ok());
+        assert!(validate(EntityKind::Book, json!({ "studios": ["HBO"] })).is_err());
+        assert!(validate(EntityKind::Game, json!({ "studios": ["CDPR"] })).is_err());
+    }
+
+    #[test]
+    fn studios_awards_trivia_limits() {
+        let bad = |metadata: Value| validate(EntityKind::Movie, metadata).is_err();
+        let many = |n: usize, f: &dyn Fn(usize) -> Value| (0..n).map(f).collect::<Vec<_>>();
+        assert!(bad(
+            json!({ "studios": many(21, &|i| json!(format!("s{i}"))) })
+        ));
+        assert!(!bad(
+            json!({ "studios": many(20, &|i| json!(format!("s{i}"))) })
+        ));
+        assert!(bad(json!({ "studios": ["x".repeat(121)] })));
+        assert!(bad(json!({ "studios": ["  "] })));
+        assert!(bad(
+            json!({ "trivia": many(31, &|i| json!(format!("t{i}"))) })
+        ));
+        assert!(bad(json!({ "trivia": ["ы".repeat(1001)] })));
+        assert!(!bad(json!({ "trivia": ["ы".repeat(1000)] })));
+        let award = |i: usize| json!({ "title": format!("a{i}") });
+        assert!(bad(json!({ "awards": many(51, &award) })));
+        assert!(!bad(json!({ "awards": many(50, &award) })));
+        assert!(bad(json!({ "awards": [{ "title": "" }] })));
+        assert!(bad(json!({ "awards": [{ "title": "x".repeat(201) }] })));
+        assert!(bad(json!({ "awards": [{ "title": "x", "year": 1879 }] })));
+        assert!(bad(json!({ "awards": [{ "title": "x", "year": 2101 }] })));
+        assert!(bad(json!({ "awards": [{ "title": "x", "won": "yes" }] })));
+        assert!(bad(json!({ "awards": [{ "title": "x", "place": 1 }] })));
+        assert!(bad(json!({ "awards": ["Оскар"] })));
     }
 
     #[test]

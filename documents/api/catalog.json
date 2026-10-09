@@ -1903,10 +1903,50 @@
         },
         "additionalProperties": false
       },
+      "Award": {
+        "type": "object",
+        "description": "Награда или номинация.",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "1–200 символов.",
+            "example": "«Оскар» за лучшую операторскую работу"
+          },
+          "won": {
+            "type": "boolean",
+            "description": "`true` — получена, `false` — номинация. По умолчанию `false`."
+          },
+          "year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1880–2100; `null` — год неизвестен.",
+            "example": 2022,
+            "maximum": 2100,
+            "minimum": 1880
+          }
+        },
+        "additionalProperties": false
+      },
       "BookMetadata": {
         "type": "object",
         "description": "Поля книги.",
         "properties": {
+          "awards": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Award"
+            },
+            "description": "Награды и номинации: до 50."
+          },
           "isbn": {
             "type": [
               "string",
@@ -1931,6 +1971,19 @@
               "null"
             ],
             "example": "Ace Books"
+          },
+          "trivia": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Факты: до 30, каждый 1–1000 символов.",
+            "example": [
+              "Пустыню снимали в Иордании и ОАЭ."
+            ]
           }
         },
         "additionalProperties": false
@@ -2329,6 +2382,16 @@
         "type": "object",
         "description": "Поля игры.",
         "properties": {
+          "awards": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Award"
+            },
+            "description": "Награды и номинации: до 50."
+          },
           "developer": {
             "type": [
               "string",
@@ -2375,6 +2438,19 @@
                 "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4",
                 "provider": "rutube"
               }
+            ]
+          },
+          "trivia": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Факты: до 30, каждый 1–1000 символов.",
+            "example": [
+              "Пустыню снимали в Иордании и ОАЭ."
             ]
           }
         },
@@ -2505,6 +2581,16 @@
             "description": "Возрастной рейтинг.",
             "example": "PG-13"
           },
+          "awards": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Award"
+            },
+            "description": "Награды и номинации: до 50."
+          },
           "countries": {
             "type": [
               "array",
@@ -2530,6 +2616,20 @@
             "maximum": 10000,
             "minimum": 1
           },
+          "studios": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Студии производства: до 20, каждая 1–120 символов.",
+            "example": [
+              "Legendary Pictures",
+              "Villeneuve Films"
+            ]
+          },
           "trailers": {
             "type": [
               "array",
@@ -2548,6 +2648,19 @@
                 "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4",
                 "provider": "rutube"
               }
+            ]
+          },
+          "trivia": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Факты: до 30, каждый 1–1000 символов.",
+            "example": [
+              "Пустыню снимали в Иордании и ОАЭ."
             ]
           }
         },
@@ -3018,6 +3131,16 @@
         "type": "object",
         "description": "Поля сериала.",
         "properties": {
+          "awards": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Award"
+            },
+            "description": "Награды и номинации: до 50."
+          },
           "countries": {
             "type": [
               "array",
@@ -3061,6 +3184,20 @@
               }
             ]
           },
+          "studios": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Студии производства: до 20, каждая 1–120 символов.",
+            "example": [
+              "Legendary Pictures",
+              "Villeneuve Films"
+            ]
+          },
           "trailers": {
             "type": [
               "array",
@@ -3079,6 +3216,19 @@
                 "id": "0ab1fc1e47f2e9b89e9e59d9db36f2b4",
                 "provider": "rutube"
               }
+            ]
+          },
+          "trivia": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Факты: до 30, каждый 1–1000 символов.",
+            "example": [
+              "Пустыню снимали в Иордании и ОАЭ."
             ]
           }
         },
