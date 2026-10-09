@@ -282,6 +282,11 @@ pub struct Collection {
     /// Сколько произведений.
     #[schema(example = 7)]
     pub items_count: i64,
+    /// Первые 4 произведения по порядку: обложки в карточке коллекции.
+    pub preview: Vec<EntityRef>,
+    /// Есть ли в коллекции сущность из `?contains=`; без параметра поля нет.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contains: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -302,6 +307,19 @@ pub struct CollectionRow {
 pub const COLLECTION_COLUMNS: &str = "c.id, c.user_id, c.title, c.description, c.is_public,
     (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id) AS items_count,
     c.created_at, c.updated_at";
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct UserCollectionsQuery {
+    /// slug сущности: у каждой коллекции появится `contains` — есть ли она там. Кнопка «В коллекцию»
+    /// без запроса каждой коллекции.
+    #[param(example = "dune-2021")]
+    pub contains: Option<String>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
 
 /// Коллекция с содержимым по порядку.
 #[derive(Debug, Serialize, ToSchema)]

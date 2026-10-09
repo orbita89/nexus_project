@@ -4,7 +4,7 @@
 use crate::models::{
     Collection, CollectionDetail, CollectionItem, CollectionItemRow, CollectionRow,
     CreateCollection, PageQuery, PutCollectionItem, ReorderItems, UpdateCollection,
-    COLLECTION_COLUMNS, ITEM_COLUMNS,
+    UserCollectionsQuery, COLLECTION_COLUMNS, ITEM_COLUMNS,
 };
 use crate::refs;
 use crate::validate::{
@@ -34,30 +34,56 @@ pub async fn list_public(
     page(&state, "c.is_public", None, query).await
 }
 
-/// Коллекции пользователя, новые сверху. Владелец видит и свои приватные.
+/// Коллекции пользователя, новые сверху. Владелец видит и свои приватные. `?contains={slug}` —
+/// у каждой коллекции `contains`: есть ли в ней сущность.
 #[utoipa::path(
     get, operation_id = "list_user_collections", path = "/users/{username}/collections", tag = "collections",
     security((), ("bearer" = [])),
-    params(("username" = String, Path, description = "username", example = "user"), PageQuery),
+    params(("username" = String, Path, description = "username", example = "user"), UserCollectionsQuery),
     responses(
         (status = 200, description = "Страница коллекций", body = Page<Collection>),
         (status = 401, description = "Токен передан, но недействителен", body = ErrorBody),
-        (status = 404, description = "Пользователь не найден", body = ErrorBody),
+        (status = 404, description = "Пользователь или сущность из `contains` не найдены", body = ErrorBody),
     )
 )]
 pub async fn list_for_user(
     State(state): State<AppState>,
     viewer: Option<AuthUser>,
     Path(username): Path<String>,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<UserCollectionsQuery>,
 ) -> AppResult<Json<Page<Collection>>> {
     let owner = refs::user(&state, &username).await?;
+    let contains = match &query.contains {
+        Some(slug) => Some(refs::entity(&state, slug).await?.id),
+        None => None,
+    };
     let filter = if viewer.is_some_and(|viewer| viewer.id == owner.id) {
         "c.user_id = $1"
     } else {
         "c.user_id = $1 AND c.is_public"
     };
-    page(&state, filter, Some(owner.id), query).await
+    let page_query = PageQuery {
+        limit: query.limit,
+        offset: query.offset,
+    };
+    let Json(mut page) = page(&state, filter, Some(owner.id), page_query).await?;
+    if let Some(entity) = contains {
+        let ids: Vec<Uuid> = page.items.iter().map(|c| c.id).collect();
+        let with: HashSet<Uuid> = sqlx::query_scalar(
+            "SELECT collection_id FROM collection_items
+             WHERE entity_id = $1 AND collection_id = ANY($2)",
+        )
+        .bind(entity)
+        .bind(&ids)
+        .fetch_all(&state.db)
+        .await?
+        .into_iter()
+        .collect();
+        for collection in &mut page.items {
+            collection.contains = Some(with.contains(&collection.id));
+        }
+    }
+    Ok(Json(page))
 }
 
 /// Публичные коллекции, в которых есть сущность.

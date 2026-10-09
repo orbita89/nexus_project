@@ -109,13 +109,39 @@ pub async fn comments(
         .collect())
 }
 
+/// Сколько произведений коллекции показывать обложками в списке.
+const PREVIEW_ITEMS: i64 = 4;
+
 pub async fn collections(state: &AppState, rows: Vec<CollectionRow>) -> AppResult<Vec<Collection>> {
     let users = users(state, rows.iter().map(|r| r.user_id).collect()).await?;
+    // Первые пункты всех коллекций страницы — одним запросом.
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let firsts: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT collection_id, entity_id FROM (
+             SELECT collection_id, entity_id,
+                    row_number() OVER (PARTITION BY collection_id
+                                       ORDER BY position, added_at, entity_id) AS n
+             FROM collection_items WHERE collection_id = ANY($1)
+         ) i WHERE n <= $2 ORDER BY collection_id, n",
+    )
+    .bind(&ids)
+    .bind(PREVIEW_ITEMS)
+    .fetch_all(&state.db)
+    .await?;
+    let entities = entities(state, firsts.iter().map(|&(_, e)| e).collect()).await?;
+    let mut previews: HashMap<Uuid, Vec<EntityRef>> = HashMap::new();
+    for (collection, entity) in firsts {
+        if let Some(entity) = entities.get(&entity) {
+            previews.entry(collection).or_default().push(entity.clone());
+        }
+    }
     Ok(rows
         .into_iter()
         .filter_map(|row| {
             Some(Collection {
                 owner: users.get(&row.user_id)?.clone(),
+                preview: previews.remove(&row.id).unwrap_or_default(),
+                contains: None,
                 id: row.id,
                 title: row.title,
                 description: row.description,

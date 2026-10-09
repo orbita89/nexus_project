@@ -312,7 +312,7 @@
 | GET | `/collections/{id}` | гость / владелец | Коллекция с содержимым по порядку |
 | PATCH | `/collections/{id}` | владелец | `title`, `description` (`null` очищает), `is_public` |
 | DELETE | `/collections/{id}` | владелец | → 204 |
-| GET | `/users/{username}/collections` | гость / владелец | Коллекции пользователя, новые сверху; владелец видит и приватные |
+| GET | `/users/{username}/collections` | гость / владелец | Коллекции пользователя, новые сверху; владелец видит и приватные. `?contains={slug}` — у каждой `contains: true/false` (кнопка «В коллекцию» одним запросом); неизвестный slug — 404 |
 | GET | `/entities/{slug}/collections` | гость | Публичные коллекции, где есть сущность |
 | PUT | `/collections/{id}/items/{slug}` | владелец | Добавить (201) или изменить пункт (200): `{"position"?, "note"?}`. Тело необязательно. Новый без `position` — в конец; `note: null` очищает, не переданная — не меняется |
 | DELETE | `/collections/{id}/items/{slug}` | владелец | Убрать → 204 |
@@ -325,7 +325,8 @@
 необязательно (`Option<AuthUser>`): без заголовка — гость, с недействительным токеном — 401.
 
 Коллекция в ответе: `id`, `owner` (`UserRef`), `title`, `description`, `is_public`, `items_count`,
-даты; карточка — ещё `items`: `{entity, position, note, added_at}` по `position`, затем по времени
+`preview` (первые 4 произведения по порядку, `EntityRef` — обложки в списке; одним запросом на
+страницу), `contains` (только с `?contains=`), даты; карточка — ещё `items`: `{entity, position, note, added_at}` по `position`, затем по времени
 добавления. Изменение содержимого обновляет `updated_at` коллекции.
 
 ### Форум

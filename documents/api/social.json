@@ -3382,7 +3382,7 @@
         "tags": [
           "collections"
         ],
-        "summary": "Коллекции пользователя, новые сверху. Владелец видит и свои приватные.",
+        "summary": "Коллекции пользователя, новые сверху. Владелец видит и свои приватные. `?contains={slug}` —\nу каждой коллекции `contains`: есть ли в ней сущность.",
         "operationId": "list_user_collections",
         "parameters": [
           {
@@ -3394,6 +3394,16 @@
               "type": "string"
             },
             "example": "user"
+          },
+          {
+            "name": "contains",
+            "in": "query",
+            "description": "slug сущности: у каждой коллекции появится `contains` — есть ли она там. Кнопка «В коллекцию»\nбез запроса каждой коллекции.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
           },
           {
             "name": "limit",
@@ -3438,7 +3448,7 @@
             }
           },
           "404": {
-            "description": "Пользователь не найден",
+            "description": "Пользователь или сущность из `contains` не найдены",
             "content": {
               "application/json": {
                 "schema": {
@@ -3830,10 +3840,18 @@
           "title",
           "is_public",
           "items_count",
+          "preview",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "contains": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Есть ли в коллекции сущность из `?contains=`; без параметра поля нет."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -3860,6 +3878,13 @@
           },
           "owner": {
             "$ref": "#/components/schemas/UserRef"
+          },
+          "preview": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntityRef"
+            },
+            "description": "Первые 4 произведения по порядку: обложки в карточке коллекции."
           },
           "title": {
             "type": "string",
@@ -4347,10 +4372,18 @@
                 "title",
                 "is_public",
                 "items_count",
+                "preview",
                 "created_at",
                 "updated_at"
               ],
               "properties": {
+                "contains": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Есть ли в коллекции сущность из `?contains=`; без параметра поля нет."
+                },
                 "created_at": {
                   "type": "string",
                   "format": "date-time"
@@ -4377,6 +4410,13 @@
                 },
                 "owner": {
                   "$ref": "#/components/schemas/UserRef"
+                },
+                "preview": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EntityRef"
+                  },
+                  "description": "Первые 4 произведения по порядку: обложки в карточке коллекции."
                 },
                 "title": {
                   "type": "string",

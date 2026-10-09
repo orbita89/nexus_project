@@ -528,6 +528,19 @@ Authorization: Bearer {{user_token}}
     });
 %}
 
+### Свои коллекции с отметкой «есть ли Дюна» и превью
+GET {{host}}/api/v1/social/users/user/collections?contains=dune-2021
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200, contains у каждой, превью", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.every(c => typeof c.contains === "boolean" && Array.isArray(c.preview)), JSON.stringify(response.body));
+        client.assert(response.body.items.some(c => c.contains === true));
+        client.assert(response.body.items.some(c => c.preview.length > 0 && c.preview.length <= 4));
+    });
+%}
+
 ### В каких коллекциях есть «Дюна» 2021
 GET {{host}}/api/v1/social/entities/dune-2021/collections
 

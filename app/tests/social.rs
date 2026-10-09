@@ -2091,6 +2091,72 @@ async fn reorder_collection_items(pool: PgPool) {
         .await;
 }
 
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn collections_have_preview_and_contains(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let full = ctx
+        .collection(&alice, json!({ "title": "Всё", "is_public": false }))
+        .await;
+    for slug in [
+        "dune-novel",
+        "dune-2021",
+        "witcher-3",
+        "no-date",
+        "dune-part-two-2024",
+    ] {
+        ctx.add_item(&alice, &full, slug).await;
+    }
+    let empty = ctx.collection(&alice, json!({ "title": "Пусто" })).await;
+
+    // Первые 4 по порядку — в списках и карточке.
+    let list_path = format!("/users/{}/collections", alice.username);
+    let page = ctx.get_ok(&list_path, Some(&alice)).await;
+    let find = |page: &Value, id: &str| {
+        items(page)
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("{id} in {page}"))
+            .clone()
+    };
+    let collection = find(&page, &full);
+    assert_eq!(
+        pluck(collection["preview"].as_array().unwrap(), "slug"),
+        ["dune-novel", "dune-2021", "witcher-3", "no-date"]
+    );
+    assert_eq!(collection["preview"][0]["release_date"], "1965-08-01");
+    assert!(collection.get("contains").is_none());
+    assert_eq!(find(&page, &empty)["preview"], json!([]));
+
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &format!("/collections/{full}/items"),
+        Some(json!({ "entities": ["dune-part-two-2024", "dune-novel", "dune-2021", "witcher-3", "no-date"] })),
+        Some(&alice),
+    )
+    .await;
+    let detail = ctx
+        .get_ok(&format!("/collections/{full}"), Some(&alice))
+        .await;
+    assert_eq!(detail["preview"][0]["slug"], "dune-part-two-2024");
+
+    // ?contains= — отметки для кнопки «В коллекцию», в том числе у приватной (для владельца).
+    let page = ctx
+        .get_ok(&format!("{list_path}?contains=witcher-3"), Some(&alice))
+        .await;
+    assert_eq!(find(&page, &full)["contains"], true);
+    assert_eq!(find(&page, &empty)["contains"], false);
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        &format!("{list_path}?contains=no-such"),
+        None,
+        Some(&alice),
+    )
+    .await;
+}
+
 // ---------------------------------------------------------------- модерация
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
