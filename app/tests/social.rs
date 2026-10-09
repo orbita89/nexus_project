@@ -483,7 +483,10 @@ async fn rating_summary(pool: PgPool) {
     let empty = ctx.get_ok("/entities/dune-2021/rating", None).await;
     assert_eq!(
         empty,
-        json!({ "average": null, "count": 0, "distribution": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] })
+        json!({
+            "average": null, "count": 0, "distribution": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "reactions": { "fire": 0, "sad": 0, "think": 0, "bored": 0 },
+        })
     );
 
     for (name, review) in [
@@ -500,7 +503,10 @@ async fn rating_summary(pool: PgPool) {
     let summary = ctx.get_ok("/entities/dune-2021/rating", None).await;
     assert_eq!(
         summary,
-        json!({ "average": 8.7, "count": 3, "distribution": [0, 0, 0, 0, 0, 0, 0, 2, 0, 1] })
+        json!({
+            "average": 8.7, "count": 3, "distribution": [0, 0, 0, 0, 0, 0, 0, 2, 0, 1],
+            "reactions": { "fire": 0, "sad": 0, "think": 0, "bored": 0 },
+        })
     );
 
     ctx.expect(
@@ -959,6 +965,112 @@ async fn review_comments_errors(pool: PgPool) {
         )
         .await;
     assert_eq!(error["code"], "review_without_text");
+}
+
+// ---------------------------------------------------------------- реакции
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reactions_count_one_per_viewer(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let (alice, bob, carol) = (
+        ctx.user("alice").await,
+        ctx.user("bob").await,
+        ctx.user("carol").await,
+    );
+    let path = "/entities/dune-2021/reaction";
+    let react = |user, kind: &str| {
+        ctx.expect(
+            StatusCode::OK,
+            Method::PUT,
+            path,
+            Some(json!({ "kind": kind })),
+            Some(user),
+        )
+    };
+
+    ctx.expect(StatusCode::NOT_FOUND, Method::GET, path, None, Some(&alice))
+        .await;
+    assert_eq!(react(&alice, "fire").await, json!({ "kind": "fire" }));
+    react(&bob, "fire").await;
+    react(&carol, "sad").await;
+    // Другая реакция заменяет прежнюю: у зрителя одна.
+    react(&carol, "think").await;
+    assert_eq!(
+        ctx.get_ok(path, Some(&carol)).await,
+        json!({ "kind": "think" })
+    );
+    let summary = ctx.get_ok("/entities/dune-2021/rating", None).await;
+    assert_eq!(
+        summary["reactions"],
+        json!({ "fire": 2, "sad": 0, "think": 1, "bored": 0 })
+    );
+
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        path,
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        path,
+        None,
+        Some(&bob),
+    )
+    .await;
+    let summary = ctx.get_ok("/entities/dune-2021/rating", None).await;
+    assert_eq!(summary["reactions"]["fire"], 1);
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reactions_errors(pool: PgPool) {
+    entity_released_in(&pool, "next-year", 365).await;
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let path = "/entities/dune-2021/reaction";
+
+    for body in [json!({ "kind": "love" }), json!({}), json!({ "kind": 1 })] {
+        ctx.expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            path,
+            Some(body),
+            Some(&alice),
+        )
+        .await;
+    }
+    for method in [Method::GET, Method::PUT, Method::DELETE] {
+        let body = (method == Method::PUT).then(|| json!({ "kind": "fire" }));
+        ctx.expect(
+            StatusCode::UNAUTHORIZED,
+            method.clone(),
+            path,
+            body.clone(),
+            None,
+        )
+        .await;
+        ctx.expect(
+            StatusCode::NOT_FOUND,
+            method,
+            "/entities/no-such/reaction",
+            body,
+            Some(&alice),
+        )
+        .await;
+    }
+    let error = ctx
+        .expect(
+            StatusCode::CONFLICT,
+            Method::PUT,
+            "/entities/next-year/reaction",
+            Some(json!({ "kind": "fire" })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(error["code"], "not_released");
 }
 
 // ---------------------------------------------------------------- подписки

@@ -2,8 +2,8 @@
 
 use crate::events;
 use crate::models::{
-    ListReviewsQuery, PageQuery, PutReview, RatingSummary, Review, ReviewRow, ReviewSort,
-    REVIEW_COLUMNS,
+    ListReviewsQuery, PageQuery, PutReview, RatingSummary, ReactionKind, Reactions, Review,
+    ReviewRow, ReviewSort, REVIEW_COLUMNS,
 };
 use crate::refs;
 use crate::validate::{self, MAX_REVIEW_BODY};
@@ -66,7 +66,7 @@ pub async fn list_for_entity(
     }))
 }
 
-/// Сводка оценок сущности: средняя, количество, распределение.
+/// Сводка оценок сущности: средняя, количество, распределение и реакции зрителей.
 #[utoipa::path(
     get, path = "/entities/{slug}/rating", tag = "reviews",
     params(("slug" = String, Path, description = "slug сущности", example = "dune-2021")),
@@ -87,7 +87,22 @@ pub async fn rating(
     .bind(entity.id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(summary(&counts)))
+    let reactions: Vec<(ReactionKind, i64)> = sqlx::query_as(
+        "SELECT kind, count(*) FROM entity_reactions WHERE entity_id = $1 GROUP BY kind",
+    )
+    .bind(entity.id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut summary = summary(&counts);
+    for (kind, n) in reactions {
+        *match kind {
+            ReactionKind::Fire => &mut summary.reactions.fire,
+            ReactionKind::Sad => &mut summary.reactions.sad,
+            ReactionKind::Think => &mut summary.reactions.think,
+            ReactionKind::Bored => &mut summary.reactions.bored,
+        } = n;
+    }
+    Ok(Json(summary))
 }
 
 /// Сводка из пар «оценка — сколько раз».
@@ -109,6 +124,7 @@ fn summary(counts: &[(i16, i64)]) -> RatingSummary {
         average,
         count,
         distribution,
+        reactions: Reactions::default(),
     }
 }
 

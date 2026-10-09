@@ -83,6 +83,19 @@
 `review_comments_count`. **Индексы:** частичный (`review_id`, `created_at`) для неудалённых —
 комментарии рецензии по порядку.
 
+### `entity_reactions` ✅ — реакции на произведение
+
+🔥 😢 🤔 😴 под оценкой на карточке. Миграция `20261014130000_entity_reactions.sql`.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `entity_id` | `uuid` | PK, FK → `entities`, CASCADE | |
+| `user_id` | `uuid` | PK, FK → `users`, CASCADE | |
+| `kind` | `text` | NOT NULL, `fire` / `sad` / `think` / `bored` | |
+| `created_at` | `timestamptz` | NOT NULL | Когда поставлена (смена реакции — заново) |
+
+Одна реакция на зрителя: другая заменяет прежнюю. **Индексы:** PK — подсчёт по сущности; `user_id`.
+
 ### `collections` ✅ — коллекции
 
 Пользовательские подборки: «Лучшая фантастика», «Экранизации Кинга: книга vs фильм». В одной
@@ -238,7 +251,7 @@
 | Метод | Путь | Доступ | Что делает |
 |---|---|---|---|
 | GET | `/entities/{slug}/reviews` | гость | Рецензии на сущность. По умолчанию только с текстом; `all=true` — и оценки без текста. `sort`: `new` (по умолчанию), `rating_desc`, `rating_asc` (без оценки — в конце) |
-| GET | `/entities/{slug}/rating` | гость | Сводка: `{"average": 8.3, "count": 12, "distribution": [n1, ..., n10]}`. Среднее округлено до 0.1, без оценок — `null`. Учитываются все оценки, в том числе без текста |
+| GET | `/entities/{slug}/rating` | гость | Сводка: `{"average": 8.3, "count": 12, "distribution": [n1, ..., n10], "reactions": {"fire": 12, "sad": 3, "think": 5, "bored": 1}}`. Среднее округлено до 0.1, без оценок — `null`. Учитываются все оценки, в том числе без текста; в `reactions` всегда все четыре ключа |
 | GET | `/entities/{slug}/review` | user | Своя рецензия, нет — 404 |
 | PUT | `/entities/{slug}/review` | user | `{"rating": 1–10, "body": "...", "is_spoiler": false}`: создать (201) или заменить целиком (200). Нужна оценка или текст; `is_spoiler` по умолчанию `false`. До выхода (`release_date` позже сегодняшней даты UTC) — 409 `not_released`; без даты — можно |
 | DELETE | `/entities/{slug}/review` | user | Удалить свою → 204, нет — 404. Можно и до выхода (премьеру перенесли) |
@@ -248,6 +261,9 @@
 | GET | `/reviews/{id}/comments` | гость | Комментарии к рецензии, старые сверху: `{id, review_id, author, body, created_at, updated_at}` |
 | POST | `/reviews/{id}/comments` | user | `{"body": "..."}` (1–2000 символов) → 201. Оценку без текста — 409 `review_without_text` |
 | DELETE | `/review-comments/{id}` | автор комментария | → 204; чужой — 403, уже удалён — 404 |
+| GET | `/entities/{slug}/reaction` | user | Своя реакция `{"kind": "fire"}`, нет — 404 |
+| PUT | `/entities/{slug}/reaction` | user | `{"kind": "fire" \| "sad" \| "think" \| "bored"}` → 200 `{"kind"}`, другая заменяет прежнюю. До выхода — 409 `not_released` |
+| DELETE | `/entities/{slug}/reaction` | user | Убрать → 204 (даже если не было) |
 | GET | `/entities/{slug}/votes/mine` | user | Свои голоса за рецензии сущности: `{"<id рецензии>": 1 \| -1}` — один запрос на карточку |
 
 Рецензия в ответе: `id`, `author` (`UserRef`), `entity` (`EntityRef`), `rating`, `body`,

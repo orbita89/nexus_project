@@ -110,6 +110,50 @@ GET {{host}}/api/v1/social/entities/dune-2021/rating
     });
 %}
 
+### Реакция на «Дюну» 2021
+PUT {{host}}/api/v1/social/entities/dune-2021/reaction
+Authorization: Bearer {{user_token}}
+Content-Type: application/json
+
+{ "kind": "fire" }
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.kind === "fire");
+    });
+%}
+
+### Своя реакция
+GET {{host}}/api/v1/social/entities/dune-2021/reaction
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("200, fire", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.kind === "fire");
+    });
+%}
+
+### Реакции в сводке
+GET {{host}}/api/v1/social/entities/dune-2021/rating
+
+> {%
+    client.test("200, все четыре ключа, fire ≥ 1", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const r = response.body.reactions;
+        client.assert(r.fire >= 1 && [r.sad, r.think, r.bored].every(n => typeof n === "number"), JSON.stringify(r));
+    });
+%}
+
+### Убрать реакцию
+DELETE {{host}}/api/v1/social/entities/dune-2021/reaction
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
 ### Неизвестная сущность — 404
 GET {{host}}/api/v1/social/entities/no-such-entity/rating
 

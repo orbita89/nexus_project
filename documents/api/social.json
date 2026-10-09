@@ -1236,7 +1236,7 @@
         "tags": [
           "reviews"
         ],
-        "summary": "Сводка оценок сущности: средняя, количество, распределение.",
+        "summary": "Сводка оценок сущности: средняя, количество, распределение и реакции зрителей.",
         "operationId": "rating",
         "parameters": [
           {
@@ -1272,6 +1272,199 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/social/entities/{slug}/reaction": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Своя реакция на произведение.",
+        "operationId": "get_own_reaction",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Реакция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reaction"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена или реакции нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Поставить реакцию; другая заменяет прежнюю. До выхода — нельзя, как и оценки.",
+        "operationId": "put_reaction",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Reaction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Реакция сохранена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reaction"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестная реакция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Ещё не вышла (`code`: `not_released`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Убрать свою реакцию → 204 (даже если её не было).",
+        "operationId": "delete_reaction",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Реакции нет"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/social/entities/{slug}/review": {
@@ -4457,7 +4650,8 @@
         "description": "Сводка оценок сущности. Учитываются все рецензии с оценкой, в том числе без текста.",
         "required": [
           "count",
-          "distribution"
+          "distribution",
+          "reactions"
         ],
         "properties": {
           "average": {
@@ -4494,6 +4688,69 @@
               4,
               2
             ]
+          },
+          "reactions": {
+            "$ref": "#/components/schemas/Reactions",
+            "description": "Реакции зрителей. Своя — `GET /entities/{slug}/reaction`."
+          }
+        }
+      },
+      "Reaction": {
+        "type": "object",
+        "description": "Своя реакция.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ReactionKind"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReactionKind": {
+        "type": "string",
+        "description": "Реакция на произведение: 🔥 `fire`, 😢 `sad`, 🤔 `think`, 😴 `bored`.",
+        "enum": [
+          "fire",
+          "sad",
+          "think",
+          "bored"
+        ]
+      },
+      "Reactions": {
+        "type": "object",
+        "description": "Сколько зрителей выбрали каждую реакцию: всегда все четыре ключа.",
+        "required": [
+          "fire",
+          "sad",
+          "think",
+          "bored"
+        ],
+        "properties": {
+          "bored": {
+            "type": "integer",
+            "format": "int64",
+            "description": "😴",
+            "example": 1
+          },
+          "fire": {
+            "type": "integer",
+            "format": "int64",
+            "description": "🔥",
+            "example": 12
+          },
+          "sad": {
+            "type": "integer",
+            "format": "int64",
+            "description": "😢",
+            "example": 3
+          },
+          "think": {
+            "type": "integer",
+            "format": "int64",
+            "description": "🤔",
+            "example": 5
           }
         }
       },

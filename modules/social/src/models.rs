@@ -131,6 +131,43 @@ pub struct RatingSummary {
     /// Число оценок 1, 2, ..., 10: всегда 10 элементов.
     #[schema(example = json!([0, 0, 0, 0, 1, 0, 2, 3, 4, 2]))]
     pub distribution: Vec<i64>,
+    /// Реакции зрителей. Своя — `GET /entities/{slug}/reaction`.
+    pub reactions: Reactions,
+}
+
+/// Сколько зрителей выбрали каждую реакцию: всегда все четыре ключа.
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct Reactions {
+    /// 🔥
+    #[schema(example = 12)]
+    pub fire: i64,
+    /// 😢
+    #[schema(example = 3)]
+    pub sad: i64,
+    /// 🤔
+    #[schema(example = 5)]
+    pub think: i64,
+    /// 😴
+    #[schema(example = 1)]
+    pub bored: i64,
+}
+
+/// Реакция на произведение: 🔥 `fire`, 😢 `sad`, 🤔 `think`, 😴 `bored`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum ReactionKind {
+    Fire,
+    Sad,
+    Think,
+    Bored,
+}
+
+/// Своя реакция.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Reaction {
+    pub kind: ReactionKind,
 }
 
 /// Порядок рецензий сущности.
