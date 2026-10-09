@@ -22,6 +22,19 @@ pub async fn entity(state: &AppState, slug: &str) -> AppResult<EntityRef> {
         .ok_or(AppError::NotFound)
 }
 
+/// Оценки, рецензии и реакции — только после выхода: дата выхода позже сегодняшней (UTC) → 409
+/// `not_released`. Без даты — можно.
+pub fn require_released(entity: &EntityRef) -> AppResult<()> {
+    let today = chrono::Utc::now().date_naive();
+    match entity.release_date {
+        Some(date) if date > today => Err(AppError::Conflict(format!(
+            "entity is not released yet (release date {date})"
+        ))
+        .with_code("not_released")),
+        _ => Ok(()),
+    }
+}
+
 /// Активный пользователь по username из URL, иначе 404.
 pub async fn user(state: &AppState, username: &str) -> AppResult<UserRef> {
     state

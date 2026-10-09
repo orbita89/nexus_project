@@ -152,6 +152,7 @@ pub async fn get_own(
         (status = 400, description = "Неверные поля или нет ни оценки, ни текста", body = ErrorBody),
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 404, description = "Сущность не найдена", body = ErrorBody),
+        (status = 409, description = "Ещё не вышла (`code`: `not_released`)", body = ErrorBody),
     )
 )]
 pub async fn put_own(
@@ -166,6 +167,7 @@ pub async fn put_own(
         return Err(AppError::BadRequest("rating or body is required".into()));
     }
     let entity = refs::entity(&state, &slug).await?;
+    refs::require_released(&entity)?;
 
     // xmax = 0 только у только что вставленной строки: так отличаем создание от замены.
     let saved: Saved = sqlx::query_as(&format!(

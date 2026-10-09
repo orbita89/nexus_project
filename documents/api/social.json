@@ -1348,6 +1348,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Ещё не вышла (`code`: `not_released`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [

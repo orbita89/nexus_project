@@ -244,6 +244,62 @@ async fn review_spoiler_flag(pool: PgPool) {
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
 }
 
+/// Сущность с датой выхода через `days` дней от сегодняшней (UTC) даты БД.
+async fn entity_released_in(pool: &PgPool, slug: &str, days: i32) {
+    sqlx::query(
+        "INSERT INTO entities (kind, slug, title, release_date)
+         VALUES ('movie', $1, 'Скоро', (now() AT TIME ZONE 'UTC')::date + $2)",
+    )
+    .bind(slug)
+    .bind(days)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reviews_open_after_release(pool: PgPool) {
+    entity_released_in(&pool, "next-year", 365).await;
+    entity_released_in(&pool, "today", 0).await;
+    let ctx = Ctx::new(pool.clone());
+    let alice = ctx.user("alice").await;
+
+    for body in [json!({ "rating": 9 }), json!({ "body": "Жду!" })] {
+        let error = ctx
+            .expect(
+                StatusCode::CONFLICT,
+                Method::PUT,
+                "/entities/next-year/review",
+                Some(body),
+                Some(&alice),
+            )
+            .await;
+        assert_eq!(error["code"], "not_released");
+    }
+    // Вышла сегодня или дата неизвестна — можно.
+    ctx.review(&alice, "today", json!({ "rating": 9 })).await;
+    ctx.review(&alice, "no-date", json!({ "rating": 9 })).await;
+
+    // Рецензию, оставленную до переноса премьеры, удалить можно всегда.
+    sqlx::query(
+        "INSERT INTO reviews (user_id, entity_id, rating)
+         SELECT id, (SELECT id FROM entities WHERE slug = 'next-year'), 5
+         FROM users WHERE username = $1",
+    )
+    .bind(&alice.username)
+    .execute(&pool)
+    .await
+    .unwrap();
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        "/entities/next-year/review",
+        None,
+        Some(&alice),
+    )
+    .await;
+}
+
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn put_review_validates(pool: PgPool) {
     let ctx = Ctx::new(pool);
