@@ -1,0 +1,439 @@
+# Модуль `auth` — LOD 2
+
+**Summary (EN):** registration & login (password, email link, OAuth, dev), JWT tokens & sessions, profile, passwords, roles, blocking, mail.
+**Отвечает за:** регистрацию и вход, токены и сессии, пароли, свой профиль (username, имя,
+аватар, email, привязанные провайдеры), роли, блокировку пользователей.
+**URL:** `/api/v1/auth` · **Код:** `modules/auth/` (выдача токенов), `libs/shared/src/auth.rs`
+(проверка токенов и ролей — ей пользуются все модули), `libs/shared/src/mail.rs` (письма).
+**Источник (LOD 3):** `documents/modules/auth.md`
+
+**Статус:** ✅ готов. Интерактивная документация — **http://localhost/docs** (Swagger UI).
+
+<tables>
+
+## Таблицы
+
+### `users` ✅ — пользователи
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK | Идентификатор |
+| `email` | `citext` | NOT NULL, UNIQUE | Email; уникален без учёта регистра |
+| `username` | `citext` | NOT NULL, UNIQUE | Логин, тоже без учёта регистра |
+| `password_hash` | `text` | | Хеш Argon2id. `NULL` — пароль не задан (вход по ссылке или через провайдера) |
+| `display_name` | `text` | | Отображаемое имя |
+| `avatar_url` | `text` | | Ссылка на аватар |
+| `role` | `user_role` | NOT NULL, default `user` | `user`, `author`, `admin` |
+| `is_active` | `boolean` | NOT NULL, default `true` | `false` — заблокирован админом |
+| `email_verified_at` | `timestamptz` | | Когда подтверждён email. `NULL` — вход по паролю запрещён |
+| `username_changed_at` | `timestamptz` | | Когда username меняли в последний раз (раз в 30 дней). `NULL` — не меняли |
+| `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
+
+**`user_role`** — enum (`user`, `author`, `admin`). Порядок значений задаёт старшинство, в SQL
+работает `role >= 'author'`.
+
+### `refresh_tokens` ✅ — сессии
+
+Каждая запись — одна выдача refresh-токена. При обновлении создаётся новая, старая отзывается.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK | id сессии (он же `sid` в access-токене) |
+| `user_id` | `uuid` | NOT NULL, FK → `users`, CASCADE | Чья сессия |
+| `token_hash` | `text` | NOT NULL, UNIQUE | SHA-256 токена |
+| `expires_at` | `timestamptz` | NOT NULL | Выдача + 30 дней |
+| `revoked_at` | `timestamptz` | | Когда отозван. `NULL` — активен |
+| `replaced_by` | `uuid` | FK → `refresh_tokens`, SET NULL | Чем заменён при обновлении. Задан и токен пришёл снова после окна повтора (30 с) — кража |
+| `user_agent` | `text` | | Браузер или устройство (для списка сессий) |
+| `ip` | `inet` | | IP (из `X-Real-IP`) |
+| `created_at` | `timestamptz` | NOT NULL | Когда выдан |
+
+### `email_tokens` ✅ — одноразовые ссылки
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK | |
+| `purpose` | `email_token_purpose` | NOT NULL | `verify_email` (24 ч), `login` (15 мин), `reset_password` (1 ч), `oauth_login` (2 мин, код с OAuth-провайдера), `change_email` (1 ч, новый адрес) |
+| `email` | `citext` | NOT NULL | Куда отправлена |
+| `user_id` | `uuid` | FK → `users`, CASCADE | `NULL` — вход по ссылке для адреса, у которого ещё нет аккаунта |
+| `token_hash` | `text` | NOT NULL, UNIQUE | SHA-256 токена |
+| `expires_at` | `timestamptz` | NOT NULL | |
+| `used_at` | `timestamptz` | | Когда использован или погашен новым письмом |
+| `created_at` | `timestamptz` | NOT NULL | |
+
+### `oauth_accounts` ✅ — привязанные аккаунты провайдеров
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `provider` | `text` | PK | `google`, `github`, `yandex` |
+| `provider_user_id` | `text` | PK | id пользователя у провайдера |
+| `user_id` | `uuid` | NOT NULL, FK → `users`, CASCADE | Наш пользователь |
+| `email` | `citext` | | Email от провайдера на момент привязки |
+| `created_at` | `timestamptz` | NOT NULL | |
+
+### `oauth_states` ✅ — начатые входы через провайдера
+
+`state_hash` (PK, SHA-256 параметра `state`), `provider`, `code_verifier` (PKCE), `expires_at` (10 минут),
+`user_id` (FK → `users`, CASCADE; задан — это привязка из профиля, а не вход).
+Запись удаляется при возврате от провайдера или фоновой чисткой.
+
+### `user_interests` — интересы пользователя (в `social`)
+
+Решено держать в модуле `social`: таблица ссылается на `entities`, ею пользуются лента и `realtime`.
+См. [social.md](social.md#user_interests---интересы).
+
+</tables>
+
+<deps>
+
+## Зависимости
+
+- `libs/shared/src/auth.rs` — выдача и проверка токенов, ролей (`AuthUser`, `AdminUser`, `Role`): ею пользуются все модули, поэтому проверка лежит в `shared`, а не в `auth`.
+- `libs/shared/src/mail.rs` — письма (SMTP/`lettre`, dev — Mailpit).
+- `libs/shared/src/config.rs` — `OAuthProviderConfig::presets()`: пресеты OAuth-провайдеров.
+- `shared::directory::UserDirectory` реализует `auth` (`by_username` только активные, `by_ids` включая заблокированных) — его читают `social` и другие модули, не обращаясь к `users` напрямую.
+
+</deps>
+
+<endpoints>
+
+## Способы входа
+
+| Способ | Как | Email подтверждён? |
+|---|---|---|
+| **Email + пароль** | `register` → письмо → `email/verify` → вход | Обязательно: до подтверждения `login` даёт 403 |
+| **Ссылка из письма** (без пароля) | `email/login` → письмо → `email/login/confirm` | Да — переход по ссылке и есть подтверждение |
+| **OAuth-провайдер** (Google, GitHub, Яндекс) | `oauth/{provider}/start` → провайдер → `oauth/exchange` | Если провайдер подтвердил адрес |
+| **Dev login** (только разработка) | `dev/login` с любым email/username | Не проверяется |
+
+Все способы ведут к одному аккаунту, если email совпадает: зарегистрировался по паролю, потом
+вошёл по ссылке или через Google с тем же адресом — это тот же пользователь.
+
+### Email + пароль
+
+```
+POST /register {email, username, password}  →  201, аккаунт не подтверждён, письмо со ссылкой
+                                                {APP_BASE_URL}/auth/verify-email?token=...
+POST /email/verify {token}                  →  200, email подтверждён + пара токенов (сразу вход)
+POST /login {login, password}               →  200 пара токенов   (до подтверждения — 403)
+```
+Письмо потерялось: `POST /email/verify/resend {email}`. Новое письмо гасит ссылку из старого.
+
+### Вход по ссылке из письма (без пароля)
+
+```
+POST /email/login {email}            →  202, письмо со ссылкой {APP_BASE_URL}/auth/email-login?token=...
+POST /email/login/confirm {token}    →  200 пара токенов. Адреса не было — аккаунт создан
+```
+У созданного так пользователя нет пароля. Задать его можно через «забыл пароль».
+username генерируется из email (`neo.anderson_3f9a1c`).
+
+### OAuth-провайдеры
+
+```
+браузер → GET /oauth/{provider}/start             → 303 на страницу входа провайдера
+провайдер → GET /oauth/{provider}/callback?code=…  → 303 на {APP_BASE_URL}/auth/oauth/callback?code=…
+фронтенд  → POST /oauth/exchange {code}            → 200 пара токенов
+```
+- `start` открывается в браузере (ссылкой или `window.location`), а не через `fetch`.
+- Токены не попадают в адресную строку: фронтенд получает одноразовый код на 2 минуты и меняет его на токены.
+- **Защита:** `state` против подделки запроса, PKCE против перехвата кода.
+- **Привязка аккаунтов.** Аккаунт провайдера привязывается к существующему пользователю с тем же
+  email, только если провайдер **подтвердил** адрес. Иначе — ошибка `email_in_use`: так нельзя
+  захватить чужой аккаунт, указав у провайдера чужой адрес.
+- **Ошибки** приходят на фронтенд как `?error=`: `access_denied` (пользователь отменил вход),
+  `invalid_state` (ссылка устарела), `provider_error`, `email_required` (провайдер не дал email),
+  `email_in_use`, `account_blocked`, `internal_error`.
+- `GET /oauth/providers` — список включённых провайдеров, чтобы показывать нужные кнопки.
+
+#### Как подключить провайдера
+
+Провайдер включается, когда заданы оба ключа. Ключи кладутся в `infra/.env` (он в `.gitignore`),
+в репозиторий и в чат их не отправлять. После изменения: `make up`.
+
+**Redirect URI**, который указывается у провайдера: `{PUBLIC_URL}/api/v1/auth/oauth/<provider>/callback`.
+В dev это `http://localhost/api/v1/auth/oauth/google/callback`.
+
+| Провайдер | Где создать приложение | Переменные | Права (scopes) |
+|---|---|---|---|
+| Google | console.cloud.google.com → APIs & Services → Credentials → OAuth client ID (Web application) | `OAUTH_GOOGLE_CLIENT_ID`, `OAUTH_GOOGLE_CLIENT_SECRET` | `openid email profile` |
+| GitHub | github.com → Settings → Developer settings → OAuth Apps → New | `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET` | `read:user user:email` |
+| Яндекс ID | oauth.yandex.ru → Создать приложение (веб-сервисы), доступы: email, имя, аватар | `OAUTH_YANDEX_CLIENT_ID`, `OAUTH_YANDEX_CLIENT_SECRET` | `login:email login:info login:avatar` |
+
+Проверка: `GET /api/v1/auth/oauth/providers` должен вернуть провайдера, а открытие
+`http://localhost/api/v1/auth/oauth/<provider>/start` в браузере — привести на страницу входа.
+
+**Новый провайдер.** Если он поддерживает OpenID Connect, достаточно добавить пресет
+в `OAuthProviderConfig::presets()` (`libs/shared/src/config.rs`). Если нет (VK ID и т. п.) —
+нужен ещё разбор профиля в `modules/auth/src/oauth/provider.rs`.
+
+### Dev login (только для разработки)
+
+`POST /dev/login {"login": "author"}` — вход под любым пользователем без пароля и письма.
+- Неизвестный email — пользователь создаётся.
+- `"role": "admin"` — роль выставляется перед входом.
+- Работает только при `DEV_LOGIN=true` (в dev-окружении включено). Иначе отвечает 404, как будто
+  эндпоинта нет. **В проде не включать.** Каждый такой вход пишется в лог с уровнем WARN.
+
+### Профиль
+
+Всё — с токеном (`Authorization: Bearer`), кроме подтверждения нового email по ссылке.
+
+- **`PATCH /me`** — `username`, `display_name` (до 64 символов), `avatar_url` (только `https://…`,
+  до 500 символов). Не переданное не меняется, `null` или пустая строка очищают имя и аватар.
+  Неизвестные поля — 400 (email и роль так не меняются).
+- **username** — раз в 30 дней (`username_changed_at` в профиле; первый раз — сразу, в том числе
+  сгенерированный `neo.anderson_3f9a1c`). Тот же username — не смена. Занят — 409. Старое имя
+  освобождается сразу; ссылки на профиль в `social` идут по username, старые перестают работать.
+- **Аватар** — только ссылка. Загрузка файлов появится вместе с хранилищем (S3/MinIO).
+- **`has_password`** в профиле (`UserView`) — задан ли пароль. `false` у аккаунтов, созданных входом
+  по ссылке или через провайдера: пароль при смене email не спрашивается, задать его можно через
+  «забыли пароль». Сам хеш наружу не отдаётся никогда.
+
+#### Смена email
+
+```
+POST /me/email {new_email, password}   →  202, на НОВЫЙ адрес — ссылка {APP_BASE_URL}/auth/change-email?token=...
+POST /email/change/confirm {token}     →  200 UserView: email заменён и подтверждён
+```
+- **Пароль** обязателен, если он задан: угнанный access-токен не позволит увести аккаунт на чужую
+  почту. Аккаунту без пароля (вход по ссылке или через провайдера) он не нужен.
+- Ссылка живёт 1 час; новый запрос гасит ссылку из предыдущего. Адрес занят — 409 (и при запросе,
+  и при подтверждении, если его успели занять).
+- **Подтверждение** не требует входа: ссылку открывают с любого устройства. После него на
+  **старый** адрес уходит уведомление, все ссылки из писем на старый адрес гаснут, все сессии
+  отзываются — кроме текущей, если запрос пришёл с токеном этого пользователя.
+
+#### Привязка провайдеров
+
+```
+GET    /me/oauth             →  [{provider, email, created_at}] — привязанные аккаунты
+POST   /me/oauth/{provider}  →  {url}: фронтенд открывает её в браузере (window.location)
+         провайдер → callback → 303 на {APP_BASE_URL}/settings/accounts?linked={provider} или ?error=...
+DELETE /me/oauth/{provider}  →  204; не привязан — 404
+```
+- Привязка начинается запросом с токеном, а не ссылкой: браузерный переход к провайдеру не несёт
+  заголовок `Authorization`. Пользователь запоминается в `oauth_states` вместе с `state`.
+- Аккаунт провайдера привязывается **к текущему пользователю**, какой бы email ни был у
+  провайдера: владение аккаунтом подтверждает вход в профиль. После этого вход через провайдера
+  ведёт в этот аккаунт.
+- Ошибки в `?error=`: те же, что при входе, и ещё `already_linked` (аккаунт провайдера привязан к
+  другому пользователю), `provider_already_linked` (у вас уже привязан другой аккаунт этого
+  провайдера — сначала отвяжите его).
+- Отвязать можно всегда: войти по ссылке на email можно и без провайдера.
+
+### Пароль
+
+- `POST /password/forgot {email}` → 202 и письмо со ссылкой `{APP_BASE_URL}/auth/reset-password?token=...` (живёт 1 час).
+- `POST /password/reset {token, password}` → 204. Все устройства разлогинены, email считается подтверждённым.
+- `POST /password/change {current_password, new_password}` (с токеном) → 204. Остальные устройства
+  разлогинены, текущее — нет.
+
+Пароли хешируются Argon2id в отдельном пуле потоков. Правила: 8–128 символов.
+
+## Эндпоинты
+
+Полный список с описанием полей и примерами — в Swagger: http://localhost/docs.
+Контракт API в репозитории: `documents/api/openapi.json`. Его проверяет тест, и любое изменение
+API видно в PR. Обновить: `UPDATE_OPENAPI=1 cargo test -p nexus openapi`.
+
+| Метод | Путь (`/api/v1/auth/...`) | Доступ | Что делает |
+|---|---|---|---|
+| POST | `register` | все | Регистрация по паролю → 201, письмо |
+| POST | `email/verify` | все | Подтвердить email по токену → токены |
+| POST | `email/verify/resend` | все | Письмо с подтверждением ещё раз → 202 |
+| POST | `login` | все | Вход по email/username и паролю → токены |
+| POST | `email/login` | все | Ссылка для входа без пароля → 202 |
+| POST | `email/login/confirm` | все | Вход по ссылке → токены |
+| GET | `oauth/providers` | все | Включённые провайдеры |
+| GET | `oauth/{provider}/start` | все | Редирект к провайдеру |
+| GET | `oauth/{provider}/callback` | провайдер | Возврат от провайдера → редирект на фронтенд |
+| POST | `oauth/exchange` | все | Код с фронтенда → токены |
+| POST | `refresh` | все | Новая пара токенов |
+| POST | `logout` | все | Выйти (отозвать refresh) → 204 |
+| POST | `logout-all` | вошедший | Выйти на всех устройствах → 204 |
+| GET | `sessions` | вошедший | Мои активные сессии |
+| DELETE | `sessions/{id}` | вошедший | Завершить сессию → 204 |
+| GET | `me` | вошедший | Мой профиль |
+| PATCH | `me` | вошедший | Изменить username (раз в 30 дней), имя, аватар |
+| POST | `me/email` | вошедший | Сменить email: ссылка на новый адрес → 202 |
+| POST | `email/change/confirm` | все (по ссылке) | Подтвердить новый email → профиль |
+| GET | `me/oauth` | вошедший | Привязанные провайдеры |
+| POST | `me/oauth/{provider}` | вошедший | Начать привязку провайдера → `{url}` |
+| DELETE | `me/oauth/{provider}` | вошедший | Отвязать провайдера → 204 |
+| POST | `password/forgot` | все | Письмо для сброса пароля → 202 |
+| POST | `password/reset` | все | Новый пароль по токену → 204 |
+| POST | `password/change` | вошедший | Сменить пароль → 204 |
+| GET | `admin/users?q=&limit=&offset=` | admin | Список пользователей массивом, старые сверху (прежний ответ, для совместимости) |
+| GET | `admin/users/page?q=&limit=&offset=` | admin | То же страницей `{items, total, limit, offset}`. `q` — подстрока в username или email без учёта регистра (`%` и `_` — буквально; триграммные индексы, миграция `20261015120000_users_search.sql`) |
+| PATCH | `admin/users/{id}/role` | admin | Сменить роль (себя понизить нельзя) |
+| PATCH | `admin/users/{id}/status` | admin | Заблокировать/разблокировать (себя нельзя) |
+| POST | `dev/login` | все, при `DEV_LOGIN=true` | Вход без пароля |
+
+**Ошибки:** тело `{"error": "...", "code": "..."}`; коды (`invalid_credentials`, `email_not_verified`, `username_taken`, `email_taken`, `invalid_token`, `password_incorrect`, ...) — [for-other-modules.md](../../documents/for-other-modules.md#авторизация-в-хендлере).
+
+| Код | Когда |
+|---|---|
+| 400 | Невалидные поля, недействительный или просроченный токен из письма, username менялся меньше 30 дней назад, неверный пароль при смене email |
+| 401 | Нет токена, токен недействителен, неверный логин или пароль, аккаунт заблокирован |
+| 403 | Роль ниже нужной; `email not verified` при входе по паролю |
+| 404 | Не найдено; `dev/login` при выключенном `DEV_LOGIN` |
+| 409 | Email или username заняты |
+| 429 | Слишком много запросов; когда повторить — `Retry-After` и `retry_after` в теле |
+
+</endpoints>
+
+<logic>
+
+## Роли
+
+| Роль | Кто это | Что может |
+|---|---|---|
+| гость | без токена | Читать каталог и форум |
+| `user` | любой зарегистрированный | + отзывы и оценки, коллекции, **ответы в темах форума** |
+| `author` | назначает админ | + **создавать форумы и темы** |
+| `admin` | назначает админ | + админские эндпоинты (`/api/v1/<модуль>/admin/...`) |
+
+Роли упорядочены: `user < author < admin`. Новый пользователь всегда получает `user`.
+
+### Как проверять права в коде
+
+Проверка лежит в `shared`, поэтому любой модуль проверяет права, не завися от `auth`.
+
+```rust
+use shared::{AdminUser, AuthUser, Role};
+
+// Нужен любой вошедший пользователь (иначе 401)
+async fn create_review(user: AuthUser, ...) -> AppResult<...> { ... }
+
+// Нужна роль не ниже author (иначе 403)
+async fn create_thread(user: AuthUser, ...) -> AppResult<...> {
+    user.require(Role::Author)?;
+    ...
+}
+
+// Только админ: 401 без токена, 403 с другой ролью
+async fn admin_action(AdminUser(admin): AdminUser, ...) -> AppResult<...> { ... }
+```
+В описании эндпоинта для Swagger: `security(("bearer" = []))`, тогда в UI появится замок.
+
+## Токены и сессии
+
+| | Access-токен | Refresh-токен |
+|---|---|---|
+| Что это | JWT (HS256), подписан `JWT_SECRET` | Случайная строка, 64 hex-символа |
+| Живёт | 15 минут | 30 дней |
+| На сервере | не хранится, проверяется по подписи | хеш SHA-256 в `refresh_tokens` |
+| Как передаётся | `Authorization: Bearer <token>` | в теле `/refresh` и `/logout` |
+| Содержимое | `sub` (id пользователя), `role`, `sid` (id сессии), `iat`, `exp` | — |
+
+- **Ротация.** `refresh` выдаёт новую пару, старый refresh-токен отзывается и запоминает, чем заменён.
+- **Окно повтора.** В течение 30 с после замены повтор старого токена — не кража: клиент мог
+  не получить ответ (вкладку перезагрузили, пока `refresh` был в пути). Выдаётся новая пара, а
+  неполученные токены цепочки `replaced_by` отзываются — сессия остаётся одна.
+- **Кража.** Заменённый токен пришёл снова после окна — значит, его украли (или клиент сломан):
+  отзываются **все** сессии пользователя. Отозванный выходом токен просто даёт 401.
+  Следствие для фронтенда: запросы на обновление всё равно нужно выстраивать в очередь —
+  проигравший в гонке вкладок токен через 30 с станет «украденным».
+- **Сессии.** `GET /sessions` — активные устройства, текущее помечено `current: true`.
+  `DELETE /sessions/{id}` — выйти на одном устройстве, `POST /logout-all` — на всех.
+- **Смена роли и блокировка** вступают в силу при следующем refresh, то есть не позже чем через
+  15 минут. При блокировке все сессии отзываются сразу.
+
+**`JWT_SECRET`:** не короче 32 символов, иначе приложение не стартует. В проде обязательно свой
+(`openssl rand -base64 48`). Смена секрета делает недействительными все access-токены.
+
+## Защита
+
+- **Не раскрываем, есть ли аккаунт.** Неверный логин, неверный пароль и блокировка дают одинаковый 401;
+  пароль проверяется даже для несуществующего логина, чтобы время ответа было одинаковым.
+  `forgot`, `resend`, `email/login` всегда отвечают 202.
+- **Rate limiting** (ответ 429):
+
+  | Что ограничено | Лимит |
+  |---|---|
+  | Вход, регистрация, письма, OAuth с одного IP | 30 в минуту |
+  | Попытки входа в один аккаунт (с любых IP) | 10 подряд, дальше 1 в 90 с |
+  | Письма на один адрес | 5 подряд, дальше 1 в 12 минут |
+
+  Ответ 429 говорит, когда повторить: заголовок `Retry-After: <секунды>` и то же число в теле —
+  `{"error": "...", "code": "rate_limited", "retry_after": 80}`.
+
+  Счётчики в памяти процесса. При нескольких экземплярах приложения их нужно перенести в Redis.
+  IP берётся из `X-Real-IP` от nginx.
+- **Одноразовые ссылки.** В БД хранится только хеш. Новая ссылка гасит предыдущие того же назначения.
+- **Фоновая чистка** раз в час: просроченные refresh-токены, ссылки из писем, незавершённые OAuth-входы.
+
+## Письма
+
+В dev все письма ловит **Mailpit**: **http://localhost:8025**. Ссылки в письмах ведут на фронтенд
+(`APP_BASE_URL`), токен — параметр `token=`. Пока фронтенда нет, токен копируют из письма и
+отправляют через Swagger.
+
+| Переменная | Что это | dev |
+|---|---|---|
+| `SMTP_URL` | SMTP-сервер. Не задан — письма только в лог | `smtp://mailpit:1025` |
+| `MAIL_FROM` | Отправитель | `Nexus <no-reply@nexus.local>` |
+| `APP_BASE_URL` | Адрес фронтенда для ссылок | `http://localhost` |
+
+В проде: `SMTP_URL=smtps://user:password@smtp.example.com` (TLS) или `smtp://...?tls=required`.
+
+</logic>
+
+<events>
+
+## События для EventBus
+
+`auth` **не публикует** событий в `shared::events::EventBus`: он только выдаёт токены и меняет
+пользователей. Уведомления другим модулям не нужны — остальные читают данные через
+`shared::directory` (`UserDirectory`), а не следят за изменениями.
+
+</events>
+
+<code_map>
+
+## Код
+
+| Файл / путь | Что внутри |
+|---|---|
+| `modules/auth/` | Выдача токенов, эндпоинты модуля |
+| `modules/auth/src/oauth/provider.rs` | Разбор профиля провайдера без OpenID Connect |
+| `libs/shared/src/auth.rs` | Выдача и проверка токенов, ролей (`AuthUser`, `AdminUser`, `Role`) — общие для всех модулей |
+| `libs/shared/src/mail.rs` | Письма (SMTP/`lettre`, dev — Mailpit) |
+| `libs/shared/src/config.rs` | `OAuthProviderConfig::presets()` — пресеты провайдеров |
+| `modules/auth/examples/hash_password` | `cargo run -p auth --example hash_password -- 'пароль'` — хеш для своих сидов |
+| `app/tests/…` | HTTP-тесты модуля (openapi-контракт проверяет тест `nexus openapi`) |
+
+</code_map>
+
+<seed>
+
+## Тестовые пользователи (dev)
+
+`make seed` загружает `seeds/dev.sql`. Пароль у всех **`password123`**, email у всех подтверждён.
+
+| username | email | Роль | |
+|---|---|---|---|
+| `admin` | admin@nexus.local | admin | |
+| `author` | author@nexus.local | author | |
+| `user` | user@nexus.local | user | |
+| `blocked` | blocked@nexus.local | user | заблокирован, вход → 401 |
+
+Быстрее всего в Swagger: `POST /dev/login {"login": "admin"}`. Хеш пароля для своих сидов:
+`cargo run -p auth --example hash_password -- 'пароль'`.
+
+Дамп из прода позже заменит эти сиды, но только **после обезличивания**: email, имена, хеши
+паролей и IP не должны попасть в репозиторий.
+
+</seed>
+
+<roadmap>
+
+## Дальше 🕓
+
+- Загрузка аватара файлом — вместе с хранилищем (S3/MinIO).
+- Удаление своего аккаунта: решить, удалять ли рецензии, темы и коллекции или обезличивать.
+- VK ID (нестандартный OAuth, нужен отдельный разбор профиля).
+- Rate limiting в Redis — когда экземпляров приложения станет несколько.
+
+</roadmap>

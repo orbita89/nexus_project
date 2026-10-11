@@ -1,0 +1,8 @@
+# Nexus — ignore rules for AI indexing (.claudignore)
+# Legacy human documentation. Duplicates the agent-facing context in .docs/backend/ —
+# scanning it would waste tokens on a second copy. NEVER index it; never read it as context.
+documents/
+
+# Build and IDE noise — no project knowledge
+target/
+.idea/
