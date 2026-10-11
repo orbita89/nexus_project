@@ -97,8 +97,8 @@ GET {{host}}/api/v1/catalog/entities/dune-2021
         client.assert(response.body.credits[0].person.slug === "denis-villeneuve");
         client.assert(response.body.tags.some(t => t.slug === "sci-fi"));
         client.assert(response.body.metadata.runtime_min === 155);
-        client.assert(response.body.related.remakes.some(e => e.slug === "dune-1984"), JSON.stringify(response.body.related));
-        client.assert(response.body.related.sequels.some(e => e.slug === "dune-part-two-2024"));
+        client.assert(response.body.related.some(e => e.slug === "dune-1984" && e.relation === "remake"), JSON.stringify(response.body.related));
+        client.assert(response.body.related.some(e => e.slug === "dune-part-two-2024" && e.relation === "sequel"));
     });
 %}
 
@@ -371,7 +371,7 @@ Content-Type: application/json
 > {%
     client.test("200, приквел — роман", () => {
         client.assert(response.status === 200, `got ${response.status}`);
-        client.assert(response.body.prequels.some(e => e.slug === "dune-novel"), JSON.stringify(response.body));
+        client.assert(response.body.some(e => e.slug === "dune-novel" && e.relation === "prequel"), JSON.stringify(response.body));
     });
 %}
 
@@ -379,9 +379,9 @@ Content-Type: application/json
 GET {{host}}/api/v1/catalog/entities/dune-novel
 
 > {%
-    client.test("200, новая книга в sequels", () => {
+    client.test("200, новая книга — сиквел в related", () => {
         client.assert(response.status === 200, `got ${response.status}`);
-        client.assert(response.body.related.sequels.some(e => e.id === client.global.get("entity_id")), JSON.stringify(response.body.related));
+        client.assert(response.body.related.some(e => e.id === client.global.get("entity_id") && e.relation === "sequel"), JSON.stringify(response.body.related));
     });
 %}
 

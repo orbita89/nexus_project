@@ -1849,11 +1849,13 @@ async fn admin_writes_revalidate_static_pages(pool: PgPool) {
 
 // ---------------------------------------------------------------- связанные произведения
 
-fn related_slugs<'a>(card: &'a Value, group: &str) -> Vec<&'a str> {
-    card["related"][group]
+/// Слаги связанных произведений одного типа связи: `related` — общий список для карусели.
+fn related_slugs<'a>(card: &'a Value, relation: &str) -> Vec<&'a str> {
+    card["related"]
         .as_array()
-        .unwrap_or_else(|| panic!("related.{group} in {card}"))
+        .unwrap_or_else(|| panic!("related in {card}"))
         .iter()
+        .filter(|item| item["relation"] == relation)
         .map(|item| item["slug"].as_str().unwrap())
         .collect()
 }
@@ -1868,12 +1870,9 @@ async fn relations_show_in_both_cards(pool: PgPool) {
     let novel = ctx.entity_id("dune-novel").await;
     let undated = ctx.entity_id("no-date").await;
 
-    // Связей нет — группы пустые, но есть.
+    // Связей нет — пустая лента, но поле есть.
     let card = ctx.get_ok("/entities/dune-2021").await;
-    assert_eq!(
-        card["related"],
-        json!({ "prequels": [], "sequels": [], "remakes": [] })
-    );
+    assert_eq!(card["related"], json!([]));
 
     let relate = |id: &str, kind: &str, to: &str| {
         let path = format!("/admin/entities/{id}/relations");
@@ -1883,8 +1882,9 @@ async fn relations_show_in_both_cards(pool: PgPool) {
     };
     let (status, related) = relate(&first, "sequel", &second).await;
     assert_eq!(status, StatusCode::OK, "{related}");
-    assert_eq!(related["sequels"][0]["slug"], "dune-part-two-2024");
-    assert_eq!(related["sequels"][0]["release_date"], "2024-03-01");
+    assert_eq!(related[0]["slug"], "dune-part-two-2024");
+    assert_eq!(related[0]["relation"], "sequel");
+    assert_eq!(related[0]["release_date"], "2024-03-01");
     // Публикуются обе карточки.
     let paths = isr.paths();
     assert!(paths.contains(&"/films/dune-2021".to_string()), "{paths:?}");
@@ -1893,8 +1893,8 @@ async fn relations_show_in_both_cards(pool: PgPool) {
         "{paths:?}"
     );
     let card = ctx.get_ok("/entities/dune-part-two-2024").await;
-    assert_eq!(related_slugs(&card, "prequels"), ["dune-2021"]);
-    assert!(related_slugs(&card, "sequels").is_empty());
+    assert_eq!(related_slugs(&card, "prequel"), ["dune-2021"]);
+    assert!(related_slugs(&card, "sequel").is_empty());
 
     // Тот же сиквел с другой стороны (как приквел) или повтор — 409.
     for (id, kind, to) in [(&second, "prequel", &first), (&first, "sequel", &second)] {
@@ -1902,12 +1902,12 @@ async fn relations_show_in_both_cards(pool: PgPool) {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["code"], "conflict");
     }
-    // Приквел записывается как сиквел наоборот; без даты — в конце группы.
+    // Приквел записывается как сиквел наоборот; без даты — в конце общей ленты.
     let (status, _) = relate(&undated, "prequel", &first).await;
     assert_eq!(status, StatusCode::OK);
     let card = ctx.get_ok("/entities/dune-2021").await;
     assert_eq!(
-        related_slugs(&card, "sequels"),
+        related_slugs(&card, "sequel"),
         ["dune-part-two-2024", "no-date"]
     );
 
@@ -1915,11 +1915,11 @@ async fn relations_show_in_both_cards(pool: PgPool) {
     let (status, _) = relate(&novel, "remake", &first).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        related_slugs(&ctx.get_ok("/entities/dune-2021").await, "remakes"),
+        related_slugs(&ctx.get_ok("/entities/dune-2021").await, "remake"),
         ["dune-novel"]
     );
     assert_eq!(
-        related_slugs(&ctx.get_ok("/entities/dune-novel").await, "remakes"),
+        related_slugs(&ctx.get_ok("/entities/dune-novel").await, "remake"),
         ["dune-2021"]
     );
     let (status, _) = relate(&first, "remake", &novel).await;
@@ -1944,8 +1944,8 @@ async fn relations_show_in_both_cards(pool: PgPool) {
         StatusCode::NO_CONTENT
     );
     let card = ctx.get_ok("/entities/dune-2021").await;
-    assert_eq!(related_slugs(&card, "sequels"), ["no-date"]);
-    assert!(related_slugs(&card, "remakes").is_empty());
+    assert_eq!(related_slugs(&card, "sequel"), ["no-date"]);
+    assert!(related_slugs(&card, "remake").is_empty());
 
     // Удаление сущности убирает связи и пересобирает связанные карточки.
     let before = isr.paths().len();
@@ -1955,7 +1955,7 @@ async fn relations_show_in_both_cards(pool: PgPool) {
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(isr.paths()[before..].contains(&"/films/dune-2021".to_string()));
     let card = ctx.get_ok("/entities/dune-2021").await;
-    assert!(related_slugs(&card, "sequels").is_empty());
+    assert!(related_slugs(&card, "sequel").is_empty());
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
@@ -2156,17 +2156,17 @@ async fn seed_catalog_is_valid(pool: PgPool) {
         ]
     );
 
-    // Связанные: ремейк в обе стороны, сиквел и приквел.
-    assert_eq!(related_slugs(&dune, "remakes"), ["dune-1984"]);
-    assert_eq!(related_slugs(&dune, "sequels"), ["dune-part-two-2024"]);
-    assert_eq!(related_slugs(&lynch, "remakes"), ["dune-2021"]);
+    // Связанные: ремейк в обе стороны, сиквел и приквел — одной лентой, тип у каждой карточки.
+    assert_eq!(related_slugs(&dune, "remake"), ["dune-1984"]);
+    assert_eq!(related_slugs(&dune, "sequel"), ["dune-part-two-2024"]);
+    assert_eq!(related_slugs(&lynch, "remake"), ["dune-2021"]);
     let fellowship = ctx.get_ok("/entities/lotr-fellowship-2001").await;
     assert_eq!(
-        related_slugs(&fellowship, "prequels"),
+        related_slugs(&fellowship, "prequel"),
         ["the-hobbit-unexpected-journey-2012"]
     );
     assert_eq!(
-        related_slugs(&fellowship, "sequels"),
+        related_slugs(&fellowship, "sequel"),
         ["lotr-two-towers-2002"]
     );
 

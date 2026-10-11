@@ -443,11 +443,14 @@
         },
         "responses": {
           "200": {
-            "description": "Связанные произведения сущности после правки",
+            "description": "Связанные произведения сущности после правки (общая лента для карусели)",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RelatedWorks"
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RelatedWork"
+                  }
                 }
               }
             }
@@ -545,7 +548,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "description": "Вид связи в админке. `prequel` — то же, что `sequel` в обратную сторону.",
+              "description": "Вид связи в админке и в `related` карточки. `prequel` — то же, что `sequel` в обратную сторону.",
               "enum": [
                 "sequel",
                 "prequel",
@@ -2329,7 +2332,10 @@
                 }
               },
               "related": {
-                "$ref": "#/components/schemas/RelatedWorks"
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RelatedWork"
+                }
               },
               "tags": {
                 "type": "array",
@@ -3149,41 +3155,28 @@
           }
         }
       },
-      "RelatedWorks": {
-        "type": "object",
-        "description": "Связанные произведения, каждая группа — по дате выхода (без даты — в конце). Пустые — `[]`.",
-        "required": [
-          "prequels",
-          "sequels",
-          "remakes"
-        ],
-        "properties": {
-          "prequels": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EntitySummary"
-            },
-            "description": "Это сиквел для них."
+      "RelatedWork": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EntitySummary"
           },
-          "remakes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EntitySummary"
-            },
-            "description": "Ремейки в обе стороны: оригинал видит ремейки, ремейк — оригинал."
-          },
-          "sequels": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EntitySummary"
-            },
-            "description": "Сиквелы этого."
+          {
+            "type": "object",
+            "required": [
+              "relation"
+            ],
+            "properties": {
+              "relation": {
+                "$ref": "#/components/schemas/RelationKind"
+              }
+            }
           }
-        }
+        ],
+        "description": "Связанное произведение в общей ленте карусели: сиквелы, ремейки и приквелы идут одним\nсписком хронологически (по `release_date`, без даты — в конце), у каждой карточки — тип связи."
       },
       "RelationKind": {
         "type": "string",
-        "description": "Вид связи в админке. `prequel` — то же, что `sequel` в обратную сторону.",
+        "description": "Вид связи в админке и в `related` карточки. `prequel` — то же, что `sequel` в обратную сторону.",
         "enum": [
           "sequel",
           "prequel",

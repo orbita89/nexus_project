@@ -92,22 +92,20 @@ pub struct EntityDetail {
     pub entity: Entity,
     pub tags: Vec<Tag>,
     pub credits: Vec<EntityCredit>,
-    pub related: RelatedWorks,
+    pub related: Vec<RelatedWork>,
 }
 
-/// Связанные произведения, каждая группа — по дате выхода (без даты — в конце). Пустые — `[]`.
-#[derive(Debug, Default, Serialize, ToSchema)]
-pub struct RelatedWorks {
-    /// Это сиквел для них.
-    pub prequels: Vec<EntitySummary>,
-    /// Сиквелы этого.
-    pub sequels: Vec<EntitySummary>,
-    /// Ремейки в обе стороны: оригинал видит ремейки, ремейк — оригинал.
-    pub remakes: Vec<EntitySummary>,
+/// Связанное произведение в общей ленте карусели: сиквелы, ремейки и приквелы идут одним
+/// списком хронологически (по `release_date`, без даты — в конце), у каждой карточки — тип связи.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RelatedWork {
+    #[serde(flatten)]
+    pub entity: EntitySummary,
+    pub relation: RelationKind,
 }
 
-/// Вид связи в админке. `prequel` — то же, что `sequel` в обратную сторону.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+/// Вид связи в админке и в `related` карточки. `prequel` — то же, что `sequel` в обратную сторону.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RelationKind {
     /// `to_id` — сиквел этой сущности.

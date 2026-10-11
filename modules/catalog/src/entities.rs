@@ -2,7 +2,7 @@
 
 use crate::models::{
     page_bounds, Entity, EntityCredit, EntityCreditRow, EntityDetail, EntitySort, EntitySummary,
-    ListEntitiesQuery, Page, RelatedWorks, SimilarQuery, Tag, ENTITY_COLUMNS,
+    ListEntitiesQuery, Page, RelatedWork, RelationKind, SimilarQuery, Tag, ENTITY_COLUMNS,
     ENTITY_SUMMARY_COLUMNS, TAG_COLUMNS, TAG_ORDER,
 };
 use axum::extract::State;
@@ -257,29 +257,33 @@ pub(crate) async fn details(
         .collect())
 }
 
-/// Связанные произведения сущностей `ids`. Сиквел в таблице — `from → to`: для `from` это сиквел,
-/// для `to` — приквел; ремейк виден с обеих сторон.
-async fn related(db: impl PgExecutor<'_>, ids: &[Uuid]) -> AppResult<HashMap<Uuid, RelatedWorks>> {
+/// Связанные произведения сущностей `ids` одной лентой (для карусели). Сиквел в таблице —
+/// `from → to`: для `from` это сиквел, для `to` — приквел; ремейк виден с обеих сторон.
+/// Список хронологический: `release_date`, затем `position`, затем заголовок.
+async fn related(
+    db: impl PgExecutor<'_>,
+    ids: &[Uuid],
+) -> AppResult<HashMap<Uuid, Vec<RelatedWork>>> {
     #[derive(sqlx::FromRow)]
     struct RelatedOf {
         owner: Uuid,
-        group_name: String,
+        relation: String,
         #[sqlx(flatten)]
         entity: EntitySummary,
     }
     let rows: Vec<RelatedOf> = sqlx::query_as(&format!(
-        "SELECT v.owner, v.group_name, {ENTITY_SUMMARY_COLUMNS}
+        "SELECT v.owner, v.relation, {ENTITY_SUMMARY_COLUMNS}
          FROM (
-             SELECT from_id AS owner, to_id AS other, 'sequels' AS group_name, position
+             SELECT from_id AS owner, to_id AS other, 'sequel' AS relation, position
              FROM entity_relations WHERE kind = 'sequel' AND from_id = ANY($1)
              UNION ALL
-             SELECT to_id, from_id, 'prequels', position
+             SELECT to_id, from_id, 'prequel', position
              FROM entity_relations WHERE kind = 'sequel' AND to_id = ANY($1)
              UNION ALL
-             SELECT from_id, to_id, 'remakes', position
+             SELECT from_id, to_id, 'remake', position
              FROM entity_relations WHERE kind = 'remake' AND from_id = ANY($1)
              UNION ALL
-             SELECT to_id, from_id, 'remakes', position
+             SELECT to_id, from_id, 'remake', position
              FROM entity_relations WHERE kind = 'remake' AND to_id = ANY($1)
          ) v JOIN entities e ON e.id = v.other
          ORDER BY e.release_date NULLS LAST, v.position, e.title, e.id"
@@ -288,19 +292,21 @@ async fn related(db: impl PgExecutor<'_>, ids: &[Uuid]) -> AppResult<HashMap<Uui
     .fetch_all(db)
     .await?;
 
-    let mut by: HashMap<Uuid, RelatedWorks> = HashMap::new();
+    let mut by: HashMap<Uuid, Vec<RelatedWork>> = HashMap::new();
     for RelatedOf {
         owner,
-        group_name,
+        relation,
         entity,
     } in rows
     {
-        let works = by.entry(owner).or_default();
-        match group_name.as_str() {
-            "sequels" => works.sequels.push(entity),
-            "prequels" => works.prequels.push(entity),
-            _ => works.remakes.push(entity),
-        }
+        let relation = match relation.as_str() {
+            "sequel" => RelationKind::Sequel,
+            "prequel" => RelationKind::Prequel,
+            _ => RelationKind::Remake,
+        };
+        by.entry(owner)
+            .or_default()
+            .push(RelatedWork { entity, relation });
     }
     Ok(by)
 }

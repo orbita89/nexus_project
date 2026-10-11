@@ -3,7 +3,7 @@
 
 use crate::entities::detail_by_id;
 use crate::jobs::Reporter;
-use crate::models::{PutRelation, RelatedWorks, RelationKind, RelationQuery};
+use crate::models::{PutRelation, RelatedWork, RelationKind, RelationQuery};
 use crate::publish::{self, Touched};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -30,7 +30,7 @@ fn stored(id: Uuid, other: Uuid, kind: RelationKind) -> (Uuid, Uuid, &'static st
     params(("id" = Uuid, Path, description = "id сущности")),
     request_body = PutRelation,
     responses(
-        (status = 200, description = "Связанные произведения сущности после правки", body = RelatedWorks),
+        (status = 200, description = "Связанные произведения сущности после правки (общая лента для карусели)", body = Vec<RelatedWork>),
         (status = 400, description = "Неверные поля или `to_id` не найдена", body = ErrorBody),
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Нужна роль admin", body = ErrorBody),
@@ -43,7 +43,7 @@ pub async fn put(
     AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
     JsonBody(req): JsonBody<PutRelation>,
-) -> AppResult<Json<RelatedWorks>> {
+) -> AppResult<Json<Vec<RelatedWork>>> {
     if req.to_id == id {
         return Err(
             AppError::Conflict("entity cannot relate to itself".into()).with_code("self_relation")
