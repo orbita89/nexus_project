@@ -12,7 +12,7 @@
 //! читает индекс `entities` (роль алиаса: в Meilisearch 1.15 алиасов нет):
 //! 1. создаётся теневой `entities_v<unix ms>`;
 //! 2. все сущности из БД пачками по [`BATCH`] уходят в него (`progress` в потоке);
-//! 3. новый индекс должен быть не меньше [`MIN_SIZE_PERCENT`]% текущего — иначе поиск не
+//! 3. новый индекс должен быть не меньше `SEARCH_REINDEX_MIN_PERCENT`% текущего (80, в dev — 0) — иначе поиск не
 //!    переключается (сломанная или неполная выборка), теневой удаляется; `force` — пропустить;
 //! 4. `swap-indexes`: `entities` получает новые документы атомарно для всех инстансов, а
 //!    `entities_v<ms>` — предыдущую версию (откат — swap обратно);
@@ -53,9 +53,6 @@ pub const INDEX: &str = "entities";
 
 /// Сколько сущностей читать из БД и отправлять одним запросом при перестройке.
 pub const BATCH: usize = 500;
-
-/// Новый индекс меньше этой доли текущего — поиск на него не переключается.
-pub const MIN_SIZE_PERCENT: u64 = 80;
 
 /// Перестройка по расписанию: одна на все инстансы за интервал.
 const SCHEDULE_LOCK: &str = "catalog:reindex-lock";
@@ -210,7 +207,7 @@ async fn upsert_and_delete(
 /// Как перестраивать.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReindexOptions {
-    /// Переключить поиск, даже если новый индекс меньше [`MIN_SIZE_PERCENT`]% текущего.
+    /// Переключить поиск, даже если новый индекс меньше `search_reindex_min_percent`% текущего.
     pub force: bool,
     /// Пересобрать всю статику фронтенда в конце. При старте и по расписанию — нет.
     pub revalidate: bool,
@@ -242,6 +239,8 @@ pub enum ReindexError {
     TooSmall {
         new: u64,
         current: u64,
+        /// Порог, `search_reindex_min_percent`.
+        min: u64,
     },
     Failed(String),
 }
@@ -251,10 +250,10 @@ impl fmt::Display for ReindexError {
         match self {
             Self::Disabled => write!(f, "search is disabled"),
             Self::Busy => write!(f, "reindex is already running"),
-            Self::TooSmall { new, current } => write!(
+            Self::TooSmall { new, current, min } => write!(
                 f,
                 "new index has {new} documents, current has {current}: less than \
-                 {MIN_SIZE_PERCENT}%, search was not switched (use force=true if intended)"
+                 {min}%, search was not switched (use force=true if intended)"
             ),
             Self::Failed(error) => write!(f, "reindex failed: {error}"),
         }
@@ -413,7 +412,8 @@ pub async fn reindex_locked(
         }
     };
     let percent = (new * 100).checked_div(current).unwrap_or(100);
-    if new * 100 < current * MIN_SIZE_PERCENT {
+    let min = state.config.search_reindex_min_percent;
+    if new * 100 < current * min {
         if !options.force {
             drop_index(search, &version).await;
             report.finish(
@@ -421,19 +421,19 @@ pub async fn reindex_locked(
                 StepStatus::Failed,
                 format!(
                     "Новый индекс: {new} документов, текущий: {current} ({percent}%). Нужно не \
-                     меньше {MIN_SIZE_PERCENT}% — поиск не переключён, теневой индекс удалён. \
+                     меньше {min}% — поиск не переключён, теневой индекс удалён. \
                      Если сущности удалены намеренно — повторить с force=true"
                 ),
                 started,
             );
-            return Err(ReindexError::TooSmall { new, current });
+            return Err(ReindexError::TooSmall { new, current, min });
         }
         report.finish(
             Step::Check,
             StepStatus::Done,
             format!(
                 "Новый индекс: {new} документов, текущий: {current} ({percent}%) — меньше \
-                 {MIN_SIZE_PERCENT}%, но force=true"
+                 {min}%, но force=true"
             ),
             started,
         );

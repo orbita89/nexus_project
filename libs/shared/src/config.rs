@@ -22,6 +22,10 @@ pub struct Config {
     /// Полная перестройка поискового индекса по расписанию, `SEARCH_REINDEX_INTERVAL_SECS`.
     /// `0` — только при старте и вручную.
     pub search_reindex_interval_secs: u64,
+    /// Перестройка поиска не переключается на новый индекс меньше этой доли текущего, в
+    /// процентах, `SEARCH_REINDEX_MIN_PERCENT` (0–100). `0` — без проверки (dev: каталог
+    /// часто перезаливается целиком).
+    pub search_reindex_min_percent: u64,
     /// Секрет подписи JWT (HS256). Не короче [`MIN_JWT_SECRET_LEN`] байт.
     pub jwt_secret: String,
     /// SMTP для писем, например `smtp://mailpit:1025` или `smtps://user:pass@smtp.example.com`.
@@ -158,6 +162,7 @@ impl Config {
             cache_l1_capacity: number_or("CACHE_L1_CAPACITY", 10_000),
             cache_l2_ttl_secs: number_or("CACHE_L2_TTL_SECS", 86_400),
             search_reindex_interval_secs: number_or("SEARCH_REINDEX_INTERVAL_SECS", 86_400),
+            search_reindex_min_percent: percent_or("SEARCH_REINDEX_MIN_PERCENT", 80),
             jwt_secret: jwt_secret_from_env(),
             smtp_url: env::var("SMTP_URL").ok().filter(|url| !url.is_empty()),
             mail_from: var_or("MAIL_FROM", "Nexus <no-reply@nexus.local>"),
@@ -187,6 +192,12 @@ fn var_or(key: &str, default: &str) -> String {
 }
 
 /// Число из env. Неверное значение — не стартовать, а не молча взять дефолт.
+fn percent_or(key: &str, default: u64) -> u64 {
+    let value = number_or(key, default);
+    assert!(value <= 100, "{key} must be between 0 and 100, got {value}");
+    value
+}
+
 fn number_or(key: &str, default: u64) -> u64 {
     match env::var(key) {
         Ok(value) => value

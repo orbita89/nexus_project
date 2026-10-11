@@ -74,6 +74,9 @@ services:
       REDIS_URL: redis://redis:6379
       MEILI_URL: http://meilisearch:7700
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-nexus_dev_master_key}
+      # Перестройка поиска переключается на индекс любого размера: в разработке каталог часто
+      # перезаливается целиком. В проде (docker-compose.prod.yml) — по умолчанию 80%.
+      SEARCH_REINDEX_MIN_PERCENT: ${SEARCH_REINDEX_MIN_PERCENT:-0}
       # Не короче 32 символов. В проде — свой случайный секрет (openssl rand -base64 48).
       JWT_SECRET: ${JWT_SECRET:-nexus-dev-jwt-secret-change-me-in-production}
       # Письма уходят в Mailpit: веб-интерфейс http://localhost:8025.

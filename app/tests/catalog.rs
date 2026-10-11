@@ -33,6 +33,8 @@ impl Ctx {
     fn base(pool: PgPool) -> AppState {
         let mut config = Config::from_env();
         config.dev_login = true;
+        // Как в проде, независимо от окружения (в dev-контейнере проверка выключена).
+        config.search_reindex_min_percent = 80;
         test_utils::state_with_config(pool, config).0
     }
 
@@ -1408,6 +1410,21 @@ async fn reindex_refuses_to_switch_to_much_smaller_index(pool: PgPool) {
     assert_eq!(body["indexed"], 1);
     assert_eq!(body["previous_count"], 5);
     assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 0);
+}
+
+/// `SEARCH_REINDEX_MIN_PERCENT=0` (dev) — переключается на индекс любого размера без `force`.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reindex_without_size_check_when_min_percent_is_zero(pool: PgPool) {
+    let mut ctx = Ctx::new(pool).await;
+    let mut config = (*ctx.state.config).clone();
+    config.search_reindex_min_percent = 0;
+    ctx.state.config = Arc::new(config);
+
+    ctx.delete_entities_except(&["witcher-3"]).await;
+    let (status, body) = ctx.reindex("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["indexed"], 1);
+    assert_eq!(body["previous_count"], 5);
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
