@@ -44,6 +44,8 @@ pub trait L2Store: Send + Sync {
     async fn del_prefix(&self, prefix: &str) -> Result<u64, CacheError>;
     /// `SET key NX EX ttl`: `true`, если ключ поставлен (блокировка взята).
     async fn try_lock(&self, key: &str, ttl: Duration) -> Result<bool, CacheError>;
+    /// `EXPIRE key ttl`: продлить блокировку; `false`, если ключа уже нет.
+    async fn extend(&self, key: &str, ttl: Duration) -> Result<bool, CacheError>;
 }
 
 /// Redis через пул соединений deadpool. Соединения открываются при первом запросе,
@@ -149,6 +151,17 @@ impl L2Store for RedisStore {
             .await
             .map_err(redis_error)?;
         Ok(reply.is_some())
+    }
+
+    async fn extend(&self, key: &str, ttl: Duration) -> Result<bool, CacheError> {
+        let mut conn = self.conn().await?;
+        let set: i64 = redis::cmd("EXPIRE")
+            .arg(key)
+            .arg(ttl.as_secs().max(1))
+            .query_async(&mut conn)
+            .await
+            .map_err(redis_error)?;
+        Ok(set == 1)
     }
 }
 
@@ -298,6 +311,20 @@ impl Cache {
         .map_err(|_| CacheError::Timeout)?
     }
 
+    /// Продлить блокировку [`Cache::try_lock`] на `ttl`: держать её, пока работа идёт, с коротким
+    /// TTL — упавший процесс не оставит её надолго. `false` — блокировки уже нет.
+    pub async fn extend_lock(&self, key: &str, ttl: Duration) -> Result<bool, CacheError> {
+        let Some(inner) = &self.inner else {
+            return Ok(true);
+        };
+        tokio::time::timeout(
+            inner.settings.l2_timeout,
+            inner.l2.extend(&inner.key(key), ttl),
+        )
+        .await
+        .map_err(|_| CacheError::Timeout)?
+    }
+
     /// Снять блокировку [`Cache::try_lock`] раньше TTL. Таймаут длинный, как у массовых операций:
     /// не снятая блокировка держится до конца TTL. Ошибка Redis — только warning.
     pub async fn unlock(&self, key: &str) {
@@ -428,6 +455,9 @@ mod tests {
             Ok(0)
         }
         async fn try_lock(&self, _: &str, _: Duration) -> Result<bool, CacheError> {
+            Ok(true)
+        }
+        async fn extend(&self, _: &str, _: Duration) -> Result<bool, CacheError> {
             Ok(true)
         }
     }

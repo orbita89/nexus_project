@@ -59,7 +59,11 @@ pub const BATCH: usize = 500;
 const SCHEDULE_LOCK: &str = "catalog:reindex-lock";
 /// Идёт перестройка (любая): одна на все инстансы. TTL — на случай падения процесса.
 const RUNNING_LOCK: &str = "catalog:reindex-running";
-const RUNNING_LOCK_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+/// Короткий TTL, который работающая перестройка продлевает каждые [`RUNNING_LOCK_RENEW`]: процесс
+/// убит посреди работы (перезапуск, деплой) — блокировка сама снимется через 2 мин, а не держит
+/// перестройку и операции админки («уже идёт», 409) часами.
+const RUNNING_LOCK_TTL: Duration = Duration::from_secs(120);
+const RUNNING_LOCK_RENEW: Duration = Duration::from_secs(30);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -315,6 +319,8 @@ fn set_shadow(main: &str, shadow: Option<String>) {
 pub struct ReindexLock {
     main: String,
     redis: bool,
+    /// Продление блокировки в Redis, пока она взята.
+    renew: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ReindexLock {
@@ -331,9 +337,26 @@ impl ReindexLock {
         {
             return Err(ReindexError::Busy);
         }
-        let mut lock = Self { main, redis: false };
+        let mut lock = Self {
+            main,
+            redis: false,
+            renew: None,
+        };
         match state.cache.try_lock(RUNNING_LOCK, RUNNING_LOCK_TTL).await {
-            Ok(true) => lock.redis = true,
+            Ok(true) => {
+                lock.redis = true;
+                let cache = state.cache.clone();
+                lock.renew = Some(tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(RUNNING_LOCK_RENEW).await;
+                        match cache.extend_lock(RUNNING_LOCK, RUNNING_LOCK_TTL).await {
+                            Ok(true) => {}
+                            Ok(false) => tracing::warn!("reindex lock expired while running"),
+                            Err(error) => tracing::warn!(%error, "reindex lock renewal failed"),
+                        }
+                    }
+                }));
+            }
             Ok(false) => return Err(ReindexError::Busy),
             // Без Redis не узнать про другие инстансы: перестраиваем, как раньше.
             Err(error) => tracing::warn!(%error, "reindex lock unavailable, rebuilding anyway"),
@@ -342,6 +365,9 @@ impl ReindexLock {
     }
 
     pub async fn release(mut self, state: &AppState) {
+        if let Some(renew) = self.renew.take() {
+            renew.abort();
+        }
         if std::mem::take(&mut self.redis) {
             state.cache.unlock(RUNNING_LOCK).await;
         }
@@ -350,6 +376,9 @@ impl ReindexLock {
 
 impl Drop for ReindexLock {
     fn drop(&mut self) {
+        if let Some(renew) = self.renew.take() {
+            renew.abort();
+        }
         if let Some(running) = RUNNING.lock().unwrap().as_mut() {
             running.remove(&self.main);
         }
