@@ -231,27 +231,41 @@ pub(crate) async fn download_export(base: &str) -> Result<(String, Vec<(i32, f64
 }
 
 fn parse_export(gz: &[u8]) -> Result<Vec<(i32, f64)>, String> {
+    // В дампе бывают `"video": null` и прочие пропуски: всё, кроме id, необязательно.
     #[derive(Deserialize)]
     struct Row {
         id: i64,
         popularity: Option<f64>,
-        #[serde(default)]
-        video: bool,
+        video: Option<bool>,
     }
     let reader = std::io::BufReader::new(flate2::read::GzDecoder::new(gz));
-    let mut rows = Vec::new();
+    let (mut rows, mut bad) = (Vec::new(), 0usize);
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
         if line.trim().is_empty() {
             continue;
         }
-        let row: Row = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        // Битая строка — пропустить, а не терять весь дамп.
+        let Ok(row) = serde_json::from_str::<Row>(&line) else {
+            bad += 1;
+            continue;
+        };
         let (Ok(id), Some(popularity)) = (i32::try_from(row.id), row.popularity) else {
             continue;
         };
-        if !row.video && popularity.is_finite() && (0.0..=1_000_000.0).contains(&popularity) {
+        if row.video != Some(true)
+            && popularity.is_finite()
+            && (0.0..=1_000_000.0).contains(&popularity)
+        {
             rows.push((id, (popularity * 1000.0).round() / 1000.0));
         }
+    }
+    // Битых больше, чем годных, — формат сменился: лучше ошибка, чем пустая popularity.
+    if bad > rows.len() {
+        return Err(format!("{bad} unreadable lines, {} usable", rows.len()));
+    }
+    if bad > 0 {
+        tracing::warn!(bad, "tmdb export: unreadable lines skipped");
     }
     Ok(rows)
 }
@@ -515,9 +529,13 @@ mod tests {
             r#"{"adult":false,"id":7,"original_title":"Clip","popularity":3.0,"video":true}"#,
             "\n",
             r#"{"adult":false,"id":8,"original_title":"No popularity","video":false}"#,
-            "\n\n"
+            "\n",
+            r#"{"adult":false,"id":9,"original_title":"Null video","popularity":1.5,"video":null}"#,
+            "\n",
+            "not json\n\n"
         );
-        assert_eq!(parse_export(&gz(lines)).unwrap(), [(550, 61.405)]);
+        assert_eq!(parse_export(&gz(lines)).unwrap(), [(550, 61.405), (9, 1.5)]);
+        assert!(parse_export(&gz("garbage\nmore garbage\n")).is_err());
     }
 
     #[test]
