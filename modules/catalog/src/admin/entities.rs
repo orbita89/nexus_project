@@ -81,8 +81,8 @@ pub async fn create(
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO entities
              (kind, slug, title, original_title, description, release_date, cover_url, metadata,
-              active)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+              active, active_manual)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
     )
     .bind(req.kind)
     .bind(&req.slug)
@@ -93,6 +93,7 @@ pub async fn create(
     .bind(cover_url)
     .bind(metadata)
     .bind(req.active.unwrap_or(true))
+    .bind(req.active.is_some())
     .fetch_one(&mut *tx)
     .await
     .map_err(validate::conflict("slug is already taken"))?;
@@ -109,7 +110,8 @@ pub async fn create(
 
 /// Изменить сущность. Переданные поля заменяются, `null` очищает необязательное поле;
 /// `metadata` заменяется целиком. `kind` не меняется. `active: false` скрывает с сайта: поиск
-/// удаляет документ, фронтенд по ISR получает 404 и удаляет статику.
+/// удаляет документ, фронтенд по ISR получает 404 и удаляет статику. Переключение `active`
+/// помечает `active_manual`: «пересобрать активные» её больше не трогает.
 #[utoipa::path(
     patch, operation_id = "update_entity", path = "/admin/entities/{id}", tag = "catalog-admin",
     security(("bearer" = [])),
@@ -221,7 +223,8 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
              release_date = CASE WHEN $8 THEN $9 ELSE release_date END,
              cover_url = CASE WHEN $10 THEN $11 ELSE cover_url END,
              metadata = COALESCE($12, metadata),
-             active = COALESCE($13, active)
+             active = COALESCE($13, active),
+             active_manual = active_manual OR $13 IS NOT NULL
          WHERE id = $1",
     )
     .bind(id)

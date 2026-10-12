@@ -14,6 +14,7 @@ pub mod people;
 pub mod publish;
 pub mod search;
 pub mod tags;
+pub mod tmdb;
 mod validate;
 
 use shared::AppState;
@@ -44,4 +45,6 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::tags::update, admin::tags::delete))
         .routes(routes!(search::reindex_handler))
         .routes(routes!(search::reindex_stream))
+        .routes(routes!(tmdb::popularity_stream))
+        .routes(routes!(tmdb::active_stream))
 }

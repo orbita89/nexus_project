@@ -279,7 +279,7 @@
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Изменить сущность. Переданные поля заменяются, `null` очищает необязательное поле;\n`metadata` заменяется целиком. `kind` не меняется. `active: false` скрывает с сайта: поиск\nудаляет документ, фронтенд по ISR получает 404 и удаляет статику.",
+        "summary": "Изменить сущность. Переданные поля заменяются, `null` очищает необязательное поле;\n`metadata` заменяется целиком. `kind` не меняется. `active: false` скрывает с сайта: поиск\nудаляет документ, фронтенд по ISR получает 404 и удаляет статику. Переключение `active`\nпомечает `active_manual`: «пересобрать активные» её больше не трогает.",
         "operationId": "update_entity",
         "parameters": [
           {
@@ -1550,6 +1550,152 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/tmdb/active/stream": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Пересобрать активные: из сущностей со связью TMDB, кроме переключённых вручную\n(`active_manual`), активны топ `by_votes` по `metadata.vote_count` и ещё `by_popularity` самых\nпопулярных (`metadata.popularity`) из остальных, без повторов; остальные скрыты. Потоком: шаг\n`activate`, затем перестройка поиска (без проверки размера — состав меняется намеренно) и\nпересборка статики, последним `done` (`active` — итог).",
+        "description": "Включённые и скрытые в админке (`PATCH active`), сиды и сущности без TMDB не трогаются.",
+        "operationId": "active_stream",
+        "parameters": [
+          {
+            "name": "by_votes",
+            "in": "query",
+            "description": "Топ по `metadata.vote_count`, 0–1000000, по умолчанию 40000.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "by_popularity",
+            "in": "query",
+            "description": "Плюс самые популярные (`metadata.popularity`) из остальных, 0–1000000, по умолчанию 40000.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Поток событий",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobEvent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные числа",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже идёт перестройка поиска или операция TMDB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/tmdb/popularity/stream": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Обновить `metadata.popularity` фильмов из ежедневного дампа TMDB (без ключа API), потоком\n`text/event-stream`: `plan`, `step` по шагам `tmdb_export`, `popularity` (с `progress`), затем\nшаги перестройки поиска, последним `done` (`popularity` — итог).",
+        "description": "Меняется только ключ `popularity` (остальная `metadata` — как есть), только у фильмов со\nсвязью в `entity_tmdb`. Уже идёт перестройка или другая такая операция — `409` до потока.\nДоводится до конца, даже если клиент закрыл соединение.",
+        "operationId": "popularity_stream",
+        "responses": {
+          "200": {
+            "description": "Поток событий",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobEvent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже идёт перестройка поиска или операция TMDB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/entities": {
       "get": {
         "tags": [
@@ -2095,6 +2241,30 @@
   },
   "components": {
     "schemas": {
+      "ActiveResult": {
+        "type": "object",
+        "description": "Итог «пересобрать активные».",
+        "required": [
+          "activated",
+          "deactivated",
+          "active"
+        ],
+        "properties": {
+          "activated": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "active": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Активных сущностей после (всех, не только из TMDB)."
+          },
+          "deactivated": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "AddCredit": {
         "type": "object",
         "required": [
@@ -2137,11 +2307,16 @@
           {
             "type": "object",
             "required": [
-              "active"
+              "active",
+              "active_manual"
             ],
             "properties": {
               "active": {
                 "type": "boolean"
+              },
+              "active_manual": {
+                "type": "boolean",
+                "description": "`active` переключали в админке: «пересобрать активные» её не трогает."
               }
             }
           }
@@ -2377,6 +2552,17 @@
           "ok"
         ],
         "properties": {
+          "active": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ActiveResult",
+                "description": "«Пересобрать активные»: итог шага `activate`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "entity": {
             "oneOf": [
               {
@@ -2391,6 +2577,17 @@
           "ok": {
             "type": "boolean",
             "description": "Ни один шаг не упал (пропущенные не считаются)."
+          },
+          "popularity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PopularityResult",
+                "description": "«Обновить popularity»: итог шага `popularity`."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reindex": {
             "oneOf": [
@@ -2977,11 +3174,16 @@
                 {
                   "type": "object",
                   "required": [
-                    "active"
+                    "active",
+                    "active_manual"
                   ],
                   "properties": {
                     "active": {
                       "type": "boolean"
+                    },
+                    "active_manual": {
+                      "type": "boolean",
+                      "description": "`active` переключали в админке: «пересобрать активные» её не трогает."
                     }
                   }
                 }
@@ -3336,6 +3538,36 @@
           }
         }
       },
+      "PopularityResult": {
+        "type": "object",
+        "description": "Итог «обновить popularity».",
+        "required": [
+          "export",
+          "films",
+          "updated"
+        ],
+        "properties": {
+          "export": {
+            "type": "string",
+            "description": "Файл дампа.",
+            "example": "movie_ids_10_11_2026.json.gz"
+          },
+          "films": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Фильмов с popularity в дампе.",
+            "example": 1192090,
+            "minimum": 0
+          },
+          "updated": {
+            "type": "integer",
+            "format": "int64",
+            "description": "У скольких сущностей popularity изменилась.",
+            "example": 950000,
+            "minimum": 0
+          }
+        }
+      },
       "ProgressEvent": {
         "type": "object",
         "description": "Счётчик длинного шага: «Проиндексировано 500/100000».",
@@ -3609,7 +3841,10 @@
           "check",
           "swap",
           "rotate",
-          "isr"
+          "isr",
+          "tmdb_export",
+          "popularity",
+          "activate"
         ]
       },
       "StepEvent": {
@@ -3753,7 +3988,7 @@
               "boolean",
               "null"
             ],
-            "description": "Включить (`true`) или скрыть с сайта (`false`)."
+            "description": "Включить (`true`) или скрыть с сайта (`false`). Помечает `active_manual`: «пересобрать\nактивные» эту сущность больше не трогает."
           },
           "cover_url": {
             "type": [

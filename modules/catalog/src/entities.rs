@@ -97,7 +97,7 @@ pub(crate) async fn list_page(
         EntitySort::Title => "e.title, e.release_date DESC NULLS LAST, e.id",
     };
     let items = sqlx::query_as(&format!(
-        "SELECT {ENTITY_SUMMARY_COLUMNS}, e.active {filter}
+        "SELECT {ENTITY_SUMMARY_COLUMNS}, e.active, e.active_manual {filter}
          ORDER BY {order}
          LIMIT $6 OFFSET $7"
     ))

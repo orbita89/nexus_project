@@ -81,6 +81,8 @@ mockall = "0.15"
 # WebSocket-клиент для тестов realtime (те же версии, что у axum).
 tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Распаковка ежедневного дампа TMDB (`movie_ids_*.json.gz`) в catalog.
+flate2 = "1"
 
 [profile.dev]
 # Меньше отладочной информации -> заметно быстрее линковка и меньше target/ при hot-reload.

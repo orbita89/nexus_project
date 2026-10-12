@@ -316,6 +316,41 @@ pub struct AdminEntitySummary {
     #[sqlx(flatten)]
     pub entity: EntitySummary,
     pub active: bool,
+    /// `active` переключали в админке: «пересобрать активные» её не трогает.
+    pub active_manual: bool,
+}
+
+/// Итог «обновить popularity».
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PopularityResult {
+    /// Файл дампа.
+    #[schema(example = "movie_ids_10_11_2026.json.gz")]
+    pub export: String,
+    /// Фильмов с popularity в дампе.
+    #[schema(example = 1_192_090)]
+    pub films: u64,
+    /// У скольких сущностей popularity изменилась.
+    #[schema(example = 950_000)]
+    pub updated: u64,
+}
+
+/// Итог «пересобрать активные».
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ActiveResult {
+    pub activated: i64,
+    pub deactivated: i64,
+    /// Активных сущностей после (всех, не только из TMDB).
+    pub active: i64,
+}
+
+/// Сколько активных: топ по оценкам и ещё самые популярные из остальных.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ActiveQuery {
+    /// Топ по `metadata.vote_count`, 0–1000000, по умолчанию 40000.
+    pub by_votes: Option<i64>,
+    /// Плюс самые популярные (`metadata.popularity`) из остальных, 0–1000000, по умолчанию 40000.
+    pub by_popularity: Option<i64>,
 }
 
 /// Порядок списка сущностей.
@@ -461,7 +496,8 @@ pub struct UpdateEntity {
     pub cover_url: Option<Option<String>>,
     #[schema(value_type = Option<crate::metadata::Metadata>)]
     pub metadata: Option<Value>,
-    /// Включить (`true`) или скрыть с сайта (`false`).
+    /// Включить (`true`) или скрыть с сайта (`false`). Помечает `active_manual`: «пересобрать
+    /// активные» эту сущность больше не трогает.
     pub active: Option<bool>,
 }
 

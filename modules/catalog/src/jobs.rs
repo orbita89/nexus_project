@@ -1,11 +1,11 @@
-//! Долгие операции админки с логом шагов: публикация правки ([`crate::publish`]) и перестройка
-//! поиска ([`crate::search::reindex`]).
+//! Долгие операции админки с логом шагов: публикация правки ([`crate::publish`]), перестройка
+//! поиска ([`crate::search::reindex`]) и операции с данными TMDB ([`crate::tmdb`]).
 //!
 //! События общие, чтобы админка рисовала один лог в стиле GitHub Actions: `plan` (все шаги
 //! операции), `step` (`running`, затем итог), `progress` (счётчик длинного шага), `done`.
 //! Поток — `text/event-stream`: `event:` — тип, `data:` — JSON события с тем же `type`.
 
-use crate::models::{EntityDetail, ReindexResult};
+use crate::models::{ActiveResult, EntityDetail, PopularityResult, ReindexResult};
 use axum::http::HeaderName;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -36,6 +36,12 @@ pub enum Step {
     Rotate,
     /// Пересборка статических страниц фронтенда.
     Isr,
+    /// TMDB: скачивание ежедневного дампа.
+    TmdbExport,
+    /// TMDB: `metadata.popularity` фильмов (с `progress`).
+    Popularity,
+    /// TMDB: выбор активных по `vote_count` и `popularity`.
+    Activate,
 }
 
 impl Step {
@@ -49,6 +55,9 @@ impl Step {
             Self::Swap => "Переключение поиска на новый индекс",
             Self::Rotate => "Удаление устаревших индексов",
             Self::Isr => "Пересборка статики (ISR)",
+            Self::TmdbExport => "Скачивание дампа TMDB",
+            Self::Popularity => "Обновление popularity",
+            Self::Activate => "Выбор активных",
         }
     }
 }
@@ -105,6 +114,12 @@ pub struct DoneEvent {
     /// Перестройка: что получилось (нет, если она прервалась).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reindex: Option<ReindexResult>,
+    /// «Обновить popularity»: итог шага `popularity`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub popularity: Option<PopularityResult>,
+    /// «Пересобрать активные»: итог шага `activate`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<ActiveResult>,
 }
 
 /// Событие потока.

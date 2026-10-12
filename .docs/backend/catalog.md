@@ -34,6 +34,7 @@
 | `cover_url` | `text` | | Постер или обложка |
 | `metadata` | `jsonb` | NOT NULL, default `{}` | Поля, специфичные для типа (см. ниже) |
 | `active` | `boolean` | NOT NULL, default `true` | Видна на сайте. Миграция `20261016100000_entity_active.sql`, см. ниже |
+| `active_manual` | `boolean` | NOT NULL, default `false` | `active` переключали в админке (`PATCH`, `POST` с `active`) или это сид, привязанный импортом: «Пересобрать активные» не трогает. Миграция `20261017100000_entity_tmdb.sql` |
 | `created_at` | `timestamptz` | NOT NULL | |
 | `updated_at` | `timestamptz` | NOT NULL | Обновляется триггером |
 
@@ -147,9 +148,22 @@
 удаление активной сущности — её работы вычитаются до каскада). Отдельная узкая таблица, а не
 колонки `people`: заполнить — один `INSERT … GROUP BY` (у 2,2 млн людей перезапись строк вместе с
 триграммным индексом имён шла 15+ мин); проверка «есть ли активная работа» запросом по 7 млн титров
-— 9 с на каждый список. Массовое переключение `active` (импорт) — с выключенным триггером
-`entities_active_changed` и пересчётом счётчиков целиком, иначе построчный триггер миллион раз
-переписал бы одни и те же строки тегов в одной транзакции.
+— 9 с на каждый список. Смена `active` — операторный триггер `entities_active_changed`
+(`20261017100000_entity_tmdb.sql`, transition tables `old_rows`/`new_rows`): один пересчёт
+счётчиков на весь `UPDATE`. Построчный (первая версия) при массовом переключении миллион раз
+переписывал бы одни и те же строки тегов в одной транзакции, а обход через `ALTER TABLE … DISABLE
+TRIGGER` держал бы `entities` эксклюзивно — сайт стоял бы минуты.
+
+### `entity_tmdb` ✅ — связь с TMDB
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `entity_id` | `uuid` | PK, FK → `entities`, CASCADE | |
+| `tmdb_id` | `integer` | NOT NULL, UNIQUE | id фильма в TMDB |
+
+Миграция `20261017100000_entity_tmdb.sql` (перенос связей из `catalog_import.movies`, если импорт
+был). Пишет импорт (`merge.py`), читают операции админки «Обновить popularity» и «Пересобрать
+активные» ([`catalog::tmdb`](#данные-tmdb-в-админке-)).
 
 ### `entity_credits` ✅ — участие людей в произведениях
 
@@ -217,6 +231,7 @@
 | `EntityRatings` (реализует `catalog`: `PgEntityRatings`) | `shared::directory`, `state.ratings` | `social` пишет сводки оценок для сортировок `popular`/`rating` |
 | Поиск | `shared::search` (HTTP API Meilisearch через reqwest, без SDK) | индекс `entities`, `update_index`, перестройка |
 | ISR-вебхук фронтенда | `shared::isr` (`POST {ISR_URL}/_isr/revalidate`) | пересборка статики после правок |
+| Ежедневный дамп TMDB | `reqwest` + `flate2` (распаковка `.gz`), `TMDB_EXPORTS_URL` (по умолчанию `https://files.tmdb.org/p/exports`), без ключа | «Обновить popularity» в админке |
 | Блокировки перестройки | Redis (`shared::cache`): `nexus:v1:catalog:reindex-running`, `nexus:v1:catalog:reindex-lock` | «одна перестройка за раз» между инстансами |
 
 </deps>
@@ -460,7 +475,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 |---|---|---|
 | GET | `/admin/entities` | Все сущности, включая скрытые: фильтры и `sort` как у `/entities` плюс `active=true\|false` → `Page<AdminEntitySummary>` (`EntitySummary` + `active`) |
 | POST | `/admin/entities` | Создать сущность (можно сразу с `tags`: slug'и; `active`, по умолчанию `true`) → 201, карточка |
-| PATCH | `/admin/entities/{id}` | Изменить: переданные поля заменяются, `null` очищает необязательное, `metadata` заменяется целиком, `active` включает или скрывает. `kind` не меняется |
+| PATCH | `/admin/entities/{id}` | Изменить: переданные поля заменяются, `null` очищает необязательное, `metadata` заменяется целиком, `active` включает или скрывает (и ставит `active_manual`). `kind` не меняется |
 | PATCH | `/admin/entities/{id}/stream` | То же, ход публикации потоком `text/event-stream` ([«Публикация»](#публикация-правок-)) |
 | DELETE | `/admin/entities/{id}` | Удалить (каскадно теги, участники, рецензии, элементы коллекций) → 204 |
 | PUT | `/admin/entities/{id}/tags` | Заменить набор тегов: `{"tags": ["sci-fi"]}` |
@@ -474,6 +489,8 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | PATCH / DELETE | `/admin/tags/{id}` | Переименовать, сменить slug или `kind` / удалить (снимается со всех сущностей). Карточки с тегом пересобираются |
 | POST | `/admin/search/reindex` | Перестроить поисковый индекс без простоя (`?force=true` — без проверки размера, `SEARCH_REINDEX_MIN_PERCENT`: 80, в dev 0) → `ReindexResult`; `409` — уже идёт или новый индекс слишком мал |
 | POST | `/admin/search/reindex/stream` | То же потоком `text/event-stream` ([«Перестройка поиска»](#перестройка-поиска-)) |
+| POST | `/admin/tmdb/popularity/stream` | «Обновить popularity» из ежедневного дампа TMDB, потоком: шаги `tmdb_export`, `popularity` (с `progress`), перестройка поиска; `done.popularity` — `{export, films, updated}`. `409` — уже идёт перестройка или операция TMDB ([«Данные TMDB»](#данные-tmdb-в-админке-)) |
+| POST | `/admin/tmdb/active/stream` | «Пересобрать активные»: `?by_votes=` (40000) `&by_popularity=` (40000), 0–1000000, иначе 400; потоком: шаг `activate`, перестройка поиска без проверки размера, ISR `{"all": true}`; `done.active` — `{activated, deactivated, active}`. `409` — как выше |
 
 **Проверки:** `slug` — `a-z`, `0-9`, одиночные дефисы, до 100 символов; занятый slug — 409.
 Названия и имена обязательны, до 300 символов, пробелы по краям обрезаются. `cover_url` и
@@ -633,15 +650,45 @@ the TMDB API but is not endorsed or certified by TMDB» — задача фро�
 отдельная лицензия TMDB; права на постеры у правообладателей. Wikidata — CC0, тексты Википедии —
 CC BY-SA, Commons — по лицензии файла с атрибуцией.
 
-**Активные (`activate_top` в конце `merge.py`).** Из созданных импортом активны топ 40 000 по
-`metadata.vote_count` и ещё 40 000 самых популярных (`metadata.popularity`) из остальных — всего
-80 000 (`--active-by-votes`, `--active-by-popularity`; оба 0 — флаги не трогать); остальные скрыты,
-новые фильмы вставляются скрытыми. Сиды и админские строки не трогаются. Флаг под той же защитой
-правок: в `written.active` — что поставил скрипт, переключение в админке не перезаписывается.
-Переключение — одним `UPDATE` с выключенным триггером `entities_active_changed` и пересчётом
-`person_credit_counts` и `tags.entities_count` целиком (`ALTER TABLE` держит `entities` до коммита).
-`popularity` (до тысячных) и `vote_count` пишутся в `metadata` фильмов из TMDB; `popularity` у TMDB
-меняется ежедневно — свежие значения дадут повторные `fetch_tmdb.py` и `merge.py`.
+**Активные.** `merge.py` вставляет новые фильмы скрытыми и пишет связи в `entity_tmdb`; включает
+кнопка админки «Пересобрать активные» ([«Данные TMDB»](#данные-tmdb-в-админке-)). Первая раскладка
+на dev (2026-10-12) — ещё скриптом: активны 40 000 по `vote_count` + 40 000 по `popularity` = 80 000
+и 46 сидов, скрыто 1 116 032 (один `UPDATE` 1,1 млн строк — 24 мин, разово; дальше меняется только
+разница). Привязанные готовые строки (сиды) получают `active_manual = true`.
+
+**Поля TMDB в `metadata`** (`popularity` до тысячных, `vote_count`) — не под защитой правок
+(`TMDB_KEYS` в `merge.py`): `merge.py` сравнивает `metadata` без них, `vote_count` берёт из кэша TMDB,
+`popularity` — оставляет текущую (свежую пишет админка из дампа), пишет из кэша только если её нет.
+`merge.py --numbers-only` — то же одним `UPDATE` (после свежего `fetch_tmdb.py`; полное слияние ради
+чисел шло бы часы, ~100 фильмов/с: каждая строка перестраивает GIN-индексы `metadata` и названия;
+`UPDATE` ~1 млн строк — 25 мин).
+
+## Данные TMDB в админке ✅
+
+`catalog::tmdb` (`modules/catalog/src/tmdb.rs`) — две операции, запускаются вручную (расписания
+нет), ход — потоком `text/event-stream` ([`JobEvent`](#публикация-правок-): `plan`, `step`,
+`progress`, `done`), доводятся до конца, даже если клиент ушёл. Одна долгая операция каталога за
+раз — общая блокировка с перестройкой поиска (`ReindexLock`, процесс + Redis): занято — `409` до
+потока. Meilisearch выключен — только БД, без шагов поиска.
+
+- **Обновить popularity** (`POST /admin/tmdb/popularity/stream`). Скачивает
+  `movie_ids_MM_DD_YYYY.json.gz` из `TMDB_EXPORTS_URL` (сегодняшнего нет — до 3 дней назад; ключ
+  API не нужен, ~28 МБ), берёт фильмы кроме `video`, popularity 0–1000000 до тысячных, во временную
+  таблицу; `UPDATE` пачками по 20 000 связей `entity_tmdb` (keyset по `entity_id`, ход в
+  `progress`): только ключ `metadata.popularity` и только у `kind = movie`, где значение другое.
+  Затем перестройка поиска (сортировка `popularity`). `vote_count` в дампе нет — его обновляет
+  `fetch_tmdb.py` + `merge.py --numbers-only` (API, ~8 ч).
+- **Пересобрать активные** (`POST /admin/tmdb/active/stream?by_votes=40000&by_popularity=40000`).
+  Кандидаты — сущности со связью `entity_tmdb` и `active_manual = false`; активны топ `by_votes` по
+  `metadata.vote_count` и ещё `by_popularity` по `metadata.popularity` из остальных (без повторов,
+  без значения — в конце), остальные кандидаты скрыты. Один `UPDATE` разницы; счётчики людей и тегов
+  сдвигает операторный триггер. Затем перестройка поиска с `force` (состав меняется намеренно, без
+  проверки размера) и ISR `{"all": true}` (скрытые страницы фронтенд удалит по 404). Включённые и
+  скрытые вручную, сиды и сущности без TMDB не трогаются.
+
+Тесты — `popularity_refresh_from_tmdb_export` (фейковый каталог дампов, повтор — 0 изменений,
+книги и видео не трогаются), `active_rebuild_picks_top_and_keeps_manual` (ручное переключение
+сохраняется, счётчики сходятся с пересчётом, поиск перестроен), разбор дампа — модульный тест.
 
 ## Импорт фильмов из TMDB
 
@@ -783,6 +830,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `validate.rs` | Проверка slug, строк, URL, ролей; UNIQUE → 409 |
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
 | `search.rs` | Индекс `entities`, `update_index`, перестройка с версиями (в т.ч. по расписанию), `GET /search` |
+| `tmdb.rs` | Операции админки с TMDB: «Обновить popularity» (дамп), «Пересобрать активные» |
 | `publish.rs` | Публикация правки: `Touched`, поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |
 | `admin/` | Админские эндпоинты (`relations.rs` — связанные произведения) |
