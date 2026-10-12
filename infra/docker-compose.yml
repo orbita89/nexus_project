@@ -64,6 +64,10 @@ services:
     container_name: nexus-app
     restart: unless-stopped
     command: ["cargo", "watch", "-x", "run -p nexus"]
+    # Внешние имена — через публичные DNS: резолвер по умолчанию (например, Яндекс) отвечает на
+    # files.tmdb.org заглушкой 127.0.0.1, и «Обновить рейтинги» не скачивает дамп TMDB. Имена
+    # сервисов (postgres, redis, …) по-прежнему резолвит встроенный DNS Docker.
+    dns: [1.1.1.1, 8.8.8.8]
     volumes:
       - ..:/app
       - cargo-registry:/cargo-cache

@@ -680,7 +680,10 @@ IMDb `(v·r + m·C)/(v + m)` (`m` = `trust_votes`, `C` — средний), шк
   (`TMDB_EXPORTS_URL`, без ключа, ~28 МБ; кроме `video`) → `tmdb_popularity`; IMDb
   `title.ratings.tsv.gz` (`IMDB_DATASETS_URL`, без ключа, ~9 МБ) → `imdb_rating`, `imdb_votes` по
   `imdb_id`; шаги `tmdb_export`, `imdb_ratings`, `stats` (с `progress`), `rank`, затем перестройка
-  поиска; `done.stats` — `{tmdb_export, tmdb_updated, imdb_updated, ranked}`.
+  поиска; `done.stats` — `{tmdb_export, tmdb_updated, imdb_updated, ranked}`. Ошибка скачивания —
+  с причиной (`… Connection refused`). Некоторые DNS (Яндекс `77.88.8.8`, часть провайдеров)
+  отвечают на `files.tmdb.org` заглушкой `127.0.0.1`: в dev у `app` — `dns: [1.1.1.1, 8.8.8.8]`
+  (`infra/docker-compose.yml`), на проде нужен такой же резолвер или зеркало (`TMDB_EXPORTS_URL`).
 - **Пересобрать активные** — `POST /admin/tmdb/active/stream?count=80000` (0–1000000; 250 000 —
   `?count=250000`): из связанных с TMDB без `active_manual` активны топ `count` вышедших по баллу
   (без балла — по `tmdb_votes`, `tmdb_popularity`) и все `soon`; остальные (в том числе анонсы и без

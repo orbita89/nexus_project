@@ -175,6 +175,18 @@ async fn refresh_stats(state: &AppState, report: &Reporter) -> Result<StatsResul
     })
 }
 
+/// Ошибка с причинами: у reqwest верхний уровень — только «error sending request».
+fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 async fn get_bytes(url: &str) -> Result<Option<Vec<u8>>, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
@@ -184,7 +196,7 @@ async fn get_bytes(url: &str) -> Result<Option<Vec<u8>>, String> {
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("{url}: {e}"))?;
+        .map_err(|e| format!("{url}: {}", chain(&e)))?;
     let status = response.status().as_u16();
     if status == 403 || status == 404 {
         return Ok(None);
@@ -192,7 +204,10 @@ async fn get_bytes(url: &str) -> Result<Option<Vec<u8>>, String> {
     if !response.status().is_success() {
         return Err(format!("{url}: HTTP {status}"));
     }
-    let body = response.bytes().await.map_err(|e| format!("{url}: {e}"))?;
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| format!("{url}: {}", chain(&e)))?;
     Ok(Some(body.to_vec()))
 }
 
