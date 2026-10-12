@@ -12,6 +12,7 @@ pub mod metadata;
 pub mod models;
 pub mod people;
 pub mod publish;
+pub mod ranking;
 pub mod search;
 pub mod tags;
 pub mod tmdb;
@@ -45,6 +46,9 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::tags::update, admin::tags::delete))
         .routes(routes!(search::reindex_handler))
         .routes(routes!(search::reindex_stream))
-        .routes(routes!(tmdb::popularity_stream))
+        .routes(routes!(tmdb::stats_stream))
         .routes(routes!(tmdb::active_stream))
+        .routes(routes!(ranking::get))
+        .routes(routes!(ranking::preview))
+        .routes(routes!(ranking::save_stream))
 }

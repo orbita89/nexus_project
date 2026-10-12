@@ -1,6 +1,7 @@
 //! Справочник сущностей для других модулей (`shared::directory::EntityDirectory`) и сводки оценок
 //! от `social` для сортировок (`shared::directory::EntityRatings`).
 
+use crate::models::VISIBLE;
 use shared::directory::{async_trait, EntityDirectory, EntityRatings, EntityRef, RatingStats};
 use shared::AppResult;
 use sqlx::PgPool;
@@ -19,14 +20,14 @@ impl PgEntityDirectory {
     }
 }
 
-/// По slug (новые рецензии, оценки, коллекции, темы: адрес пришёл с сайта) — только активные:
-/// неактивной сущности на сайте нет, другие модули отвечают 404. По id (то, что уже сохранено)
+/// По slug (новые рецензии, оценки, коллекции, темы: адрес пришёл с сайта) — только видимые
+/// (`VISIBLE`): невидимой на сайте нет, другие модули отвечают 404. По id (то, что уже сохранено)
 /// — все: коллекции и ленты не теряют элементы, если сущность скрыли.
 #[async_trait]
 impl EntityDirectory for PgEntityDirectory {
     async fn by_slug(&self, slug: &str) -> AppResult<Option<EntityRef>> {
         Ok(sqlx::query_as(&format!(
-            "SELECT {REF_COLUMNS} FROM entities WHERE slug = $1 AND active"
+            "SELECT {REF_COLUMNS} FROM entities e WHERE e.slug = $1 AND {VISIBLE}"
         ))
         .bind(slug)
         .fetch_optional(&self.db)
@@ -51,7 +52,7 @@ impl EntityDirectory for PgEntityDirectory {
             return Ok(HashMap::new());
         }
         let rows: Vec<EntityRef> = sqlx::query_as(&format!(
-            "SELECT {REF_COLUMNS} FROM entities WHERE slug = ANY($1) AND active"
+            "SELECT {REF_COLUMNS} FROM entities e WHERE e.slug = ANY($1) AND {VISIBLE}"
         ))
         .bind(slugs)
         .fetch_all(&self.db)

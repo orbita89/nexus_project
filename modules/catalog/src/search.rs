@@ -27,7 +27,8 @@ use crate::entities::{check_year, details};
 use crate::jobs::{self, DoneEvent, JobEvent, Reporter, Step, StepStatus};
 use crate::models::{
     page_bounds, Entity, EntityDetail, EntityKind, EntitySummary, Page, ReindexQuery,
-    ReindexResult, SearchQuery, SearchSort, ENTITY_COLUMNS,
+    ReindexResult, ReleaseStatus, SearchQuery, SearchSort, ENTITY_COLUMNS, ENTITY_STATS_JOIN,
+    VISIBLE,
 };
 use crate::publish::Touched;
 use crate::validate;
@@ -81,9 +82,14 @@ struct SearchDoc {
     tag_names: Vec<String>,
     /// Имена участников: поиск («вильнёв» находит его фильмы).
     people: Vec<String>,
-    /// `metadata.popularity` и `metadata.vote_count` (TMDB): сортировки `popularity`, `votes`.
+    /// Статистика (`entity_stats`): сортировки `recommended` (`rank_score`), `trending`
+    /// (`popularity`), `top_rated` (`quality`); рейтинг IMDb и статус выхода — для выдачи.
+    rank_score: Option<f64>,
     popularity: Option<f64>,
-    vote_count: Option<u64>,
+    quality: Option<f64>,
+    imdb_rating: Option<f64>,
+    imdb_votes: Option<i32>,
+    release_status: ReleaseStatus,
     /// Карточка целиком. Никем не читается (карточка — из БД и статики), пока остаётся в
     /// документе. Не ищется и не отдаётся поиском.
     card: EntityDetail,
@@ -115,8 +121,12 @@ impl From<EntityDetail> for SearchDoc {
             release_date: entity.release_date,
             cover_url: entity.cover_url.clone(),
             year: entity.release_date.map(|date| date.year()),
-            popularity: entity.metadata.get("popularity").and_then(Value::as_f64),
-            vote_count: entity.metadata.get("vote_count").and_then(Value::as_u64),
+            rank_score: entity.rank_score,
+            popularity: entity.tmdb_popularity,
+            quality: entity.quality,
+            imdb_rating: entity.imdb_rating,
+            imdb_votes: entity.imdb_votes,
+            release_status: entity.release_status,
             tag_names: tags.iter().map(|(_, name)| name.clone()).collect(),
             tags: tags.into_iter().map(|(slug, _)| slug).collect(),
             people,
@@ -130,7 +140,7 @@ fn entity_settings() -> Value {
         // Порядок задаёт вес: совпадение в названии важнее, чем в описании.
         "searchableAttributes": ["title", "original_title", "people", "tag_names", "description"],
         "filterableAttributes": ["kind", "tags", "year", "slug"],
-        "sortableAttributes": ["popularity", "vote_count"],
+        "sortableAttributes": ["rank_score", "popularity", "quality"],
     })
 }
 
@@ -143,14 +153,15 @@ async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchD
 }
 
 /// Переотправляет затронутое в индекс (и в теневой, если идёт перестройка) и ждёт применения;
-/// удалённое из БД и неактивное удаляет из индекса. Вызывается из [`crate::publish::run`] после
+/// удалённое из БД и невидимое удаляет из индекса. Вызывается из [`crate::publish::run`] после
 /// коммита.
 pub(crate) async fn update_index(state: &AppState, touched: &Touched) -> Result<(), BoxError> {
     if touched.entities.is_empty() {
         return Ok(());
     }
     let entities: Vec<Entity> = sqlx::query_as(&format!(
-        "SELECT {ENTITY_COLUMNS} FROM entities e WHERE e.id = ANY($1) AND e.active ORDER BY e.id"
+        "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN}
+         WHERE e.id = ANY($1) AND {VISIBLE} ORDER BY e.id"
     ))
     .bind(&touched.entities)
     .fetch_all(&state.db)
@@ -563,12 +574,13 @@ async fn create_version(search: &Search, main: &str, version: &str) -> Result<()
     )
 }
 
-/// Все активные сущности из БД пачками по [`BATCH`] (keyset по id) в индекс `version`. Пока Meilisearch
+/// Все видимые сущности из БД пачками по [`BATCH`] (keyset по id) в индекс `version`. Пока Meilisearch
 /// применяет пачку, читается следующая. Возвращает число отправленных документов.
 async fn fill(state: &AppState, version: &str, report: &Reporter) -> Result<usize, BoxError> {
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM entities WHERE active")
-        .fetch_one(&state.db)
-        .await?;
+    let total: i64 =
+        sqlx::query_scalar(&format!("SELECT count(*) FROM entities e WHERE {VISIBLE}"))
+            .fetch_one(&state.db)
+            .await?;
     let total = u64::try_from(total).unwrap_or(0);
     report.progress(Step::Fill, 0, total);
 
@@ -577,8 +589,8 @@ async fn fill(state: &AppState, version: &str, report: &Reporter) -> Result<usiz
     let mut pending: Option<(Value, usize)> = None;
     loop {
         let entities: Vec<Entity> = sqlx::query_as(&format!(
-            "SELECT {ENTITY_COLUMNS} FROM entities e
-             WHERE e.active AND ($1::uuid IS NULL OR e.id > $1) ORDER BY e.id LIMIT $2"
+            "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN}
+             WHERE {VISIBLE} AND ($1::uuid IS NULL OR e.id > $1) ORDER BY e.id LIMIT $2"
         ))
         .bind(after)
         .bind(BATCH as i64)
@@ -706,8 +718,8 @@ pub(crate) fn unavailable() -> AppError {
 }
 
 /// Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры.
-/// Сортировка по релевантности; `sort=popularity` / `sort=votes` — по `metadata.popularity` /
-/// `metadata.vote_count` (TMDB), у кого поля нет — в конце.
+/// Сортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу
+/// «Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце).
 ///
 /// Индекс обновляется после изменений в админке с задержкой в доли секунды.
 #[utoipa::path(
@@ -743,12 +755,14 @@ pub async fn search(
         "limit": limit,
         "offset": offset,
         "attributesToRetrieve":
-            ["id", "kind", "slug", "title", "original_title", "release_date", "cover_url"],
+            ["id", "kind", "slug", "title", "original_title", "release_date", "cover_url",
+             "release_status", "imdb_rating", "imdb_votes"],
     });
     let mut body = body;
     match query.sort {
-        Some(SearchSort::Popularity) => body["sort"] = json!(["popularity:desc"]),
-        Some(SearchSort::Votes) => body["sort"] = json!(["vote_count:desc"]),
+        Some(SearchSort::Recommended) => body["sort"] = json!(["rank_score:desc"]),
+        Some(SearchSort::Trending) => body["sort"] = json!(["popularity:desc"]),
+        Some(SearchSort::TopRated) => body["sort"] = json!(["quality:desc"]),
         None => {}
     }
 

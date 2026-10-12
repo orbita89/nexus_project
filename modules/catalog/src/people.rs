@@ -3,7 +3,7 @@
 use crate::entities::like_pattern;
 use crate::models::{
     page_bounds, ListPeopleQuery, Page, Person, PersonCreditRow, PersonDetail, PersonSummary,
-    ENTITY_SUMMARY_COLUMNS, PERSON_COLUMNS,
+    ENTITY_SUMMARY_COLUMNS, PERSON_COLUMNS, VISIBLE,
 };
 use axum::extract::State;
 use axum::Json;
@@ -88,12 +88,12 @@ pub async fn get(
     ))
 }
 
-/// Карточка из БД: фильмография — только активные сущности (админу — все).
+/// Карточка из БД: фильмография — только видимые сущности (админу — все).
 async fn detail(db: &sqlx::PgPool, person: Person, with_inactive: bool) -> AppResult<PersonDetail> {
     let rows: Vec<PersonCreditRow> = sqlx::query_as(&format!(
         "SELECT c.id, c.role, c.character_name, {ENTITY_SUMMARY_COLUMNS}
          FROM entity_credits c JOIN entities e ON e.id = c.entity_id
-         WHERE c.person_id = $1 AND ($2 OR e.active)
+         WHERE c.person_id = $1 AND ($2 OR {VISIBLE})
          ORDER BY e.release_date DESC NULLS LAST, e.title, c.position, c.id"
     ))
     .bind(person.id)

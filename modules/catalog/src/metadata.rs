@@ -44,14 +44,15 @@ pub struct MovieMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = json!(["Пустыню снимали в Иордании и ОАЭ."]))]
     pub trivia: Option<Vec<String>>,
-    /// Популярность TMDB: активность за последние дни, сортировка поиска `popularity`. 0–1000000.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = 704.107, minimum = 0, maximum = 1000000)]
-    pub popularity: Option<f64>,
-    /// Число оценок на TMDB: известность за всё время, сортировка поиска `votes`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = 867)]
-    pub vote_count: Option<u32>,
+    /// Устарело: TMDB popularity — в `entity_stats` (`tmdb_popularity` в карточке). Принимается
+    /// и отбрасывается, чтобы старые формы админки не получали 400.
+    #[serde(default, skip_serializing)]
+    #[schema(ignore)]
+    pub popularity: Option<serde_json::Value>,
+    /// Устарело: число оценок TMDB — в `entity_stats` (`tmdb_votes`). Отбрасывается.
+    #[serde(default, skip_serializing)]
+    #[schema(ignore)]
+    pub vote_count: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
@@ -296,7 +297,9 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             m.studios = studios(m.studios)?;
             m.awards = awards(m.awards)?;
             m.trivia = trivia(m.trivia)?;
-            m.popularity = popularity(m.popularity)?;
+            // Устаревшие ключи (теперь entity_stats) не записываются.
+            m.popularity = None;
+            m.vote_count = None;
             to_value(m)
         }
         EntityKind::Series => {
@@ -343,17 +346,6 @@ fn parse<T: DeserializeOwned>(kind: EntityKind, metadata: Value) -> AppResult<T>
 
 fn to_value<T: Serialize>(metadata: T) -> AppResult<Value> {
     serde_json::to_value(metadata).map_err(|e| AppError::Internal(e.to_string()))
-}
-
-/// 0–1000000, округление до тысячных (так отдаёт TMDB).
-fn popularity(value: Option<f64>) -> AppResult<Option<f64>> {
-    match value {
-        Some(v) if !v.is_finite() || !(0.0..=1_000_000.0).contains(&v) => {
-            Err(bad("metadata.popularity must be between 0 and 1000000"))
-        }
-        Some(v) => Ok(Some((v * 1000.0).round() / 1000.0)),
-        None => Ok(None),
-    }
 }
 
 fn range(field: &str, value: Option<u32>, min: u32, max: u32) -> AppResult<()> {

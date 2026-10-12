@@ -54,7 +54,11 @@ struct ApiDoc;
     ),
     modifiers(&BearerAuth),
     // Enum из query-параметров utoipa сам в components не кладёт.
-    components(schemas(catalog::models::EntitySort, catalog::models::SearchSort)),
+    components(schemas(
+        catalog::models::EntitySort,
+        catalog::models::SearchSort,
+        catalog::models::ReleaseStatus
+    )),
     tags(
         (name = "catalog", description = "Каталог: сущности, люди, теги, поиск. Без авторизации"),
         (name = "catalog-admin", description = "Управление каталогом. Только роль admin"),

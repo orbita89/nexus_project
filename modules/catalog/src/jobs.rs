@@ -5,7 +5,7 @@
 //! операции), `step` (`running`, затем итог), `progress` (счётчик длинного шага), `done`.
 //! Поток — `text/event-stream`: `event:` — тип, `data:` — JSON события с тем же `type`.
 
-use crate::models::{ActiveResult, EntityDetail, PopularityResult, ReindexResult};
+use crate::models::{ActiveResult, EntityDetail, ReindexResult, StatsResult};
 use axum::http::HeaderName;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -38,8 +38,12 @@ pub enum Step {
     Isr,
     /// TMDB: скачивание ежедневного дампа.
     TmdbExport,
-    /// TMDB: `metadata.popularity` фильмов (с `progress`).
-    Popularity,
+    /// IMDb: скачивание `title.ratings.tsv.gz`.
+    ImdbRatings,
+    /// Запись TMDB popularity и рейтингов IMDb в `entity_stats` (с `progress`).
+    Stats,
+    /// Пересчёт балла «Рекомендуемые».
+    Rank,
     /// TMDB: выбор активных по `vote_count` и `popularity`.
     Activate,
 }
@@ -56,7 +60,9 @@ impl Step {
             Self::Rotate => "Удаление устаревших индексов",
             Self::Isr => "Пересборка статики (ISR)",
             Self::TmdbExport => "Скачивание дампа TMDB",
-            Self::Popularity => "Обновление popularity",
+            Self::ImdbRatings => "Скачивание рейтингов IMDb",
+            Self::Stats => "Обновление статистики",
+            Self::Rank => "Пересчёт балла «Рекомендуемые»",
             Self::Activate => "Выбор активных",
         }
     }
@@ -114,9 +120,9 @@ pub struct DoneEvent {
     /// Перестройка: что получилось (нет, если она прервалась).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reindex: Option<ReindexResult>,
-    /// «Обновить popularity»: итог шага `popularity`.
+    /// «Обновить рейтинги»: итог.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub popularity: Option<PopularityResult>,
+    pub stats: Option<StatsResult>,
     /// «Пересобрать активные»: итог шага `activate`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active: Option<ActiveResult>,

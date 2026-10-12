@@ -3,7 +3,8 @@
 use crate::models::{
     page_bounds, AdminEntitySummary, Entity, EntityCredit, EntityCreditRow, EntityDetail,
     EntitySort, EntitySummary, ListEntitiesQuery, Page, RelatedWork, RelationKind, SimilarQuery,
-    Tag, ENTITY_COLUMNS, ENTITY_SUMMARY_COLUMNS, TAG_COLUMNS, TAG_ORDER,
+    Tag, ENTITY_COLUMNS, ENTITY_STATS_JOIN, ENTITY_SUMMARY_COLUMNS, TAG_COLUMNS, TAG_ORDER,
+    VISIBLE,
 };
 use axum::extract::State;
 use axum::Json;
@@ -15,8 +16,9 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Общий WHERE списка: $1 kind, $2 slug тега, $3 год, $4 шаблон ILIKE, $5 `active` (NULL — все).
+/// `st` — статистика для сортировок.
 const LIST_FILTER: &str = "
-    FROM entities e
+    FROM entities e LEFT JOIN entity_stats st ON st.entity_id = e.id
     WHERE ($1::entity_kind IS NULL OR e.kind = $1)
       AND ($2::text IS NULL OR EXISTS (
             SELECT 1 FROM entity_tags et JOIN tags t ON t.id = et.tag_id
@@ -31,11 +33,13 @@ pub(crate) fn is_admin(viewer: Option<&AuthUser>) -> bool {
     viewer.is_some_and(|user| user.role == Role::Admin)
 }
 
-/// Список сущностей. `sort`: `new` (по умолчанию: новинки сверху, без даты — в конце), `popular`
-/// (больше оценок), `rating` (выше средняя, без оценок — в конце), `title`.
+/// Список видимых сущностей (активные; фильмы из TMDB — вышедшие или «Скоро премьера»). `sort`:
+/// `recommended` (по умолчанию: балл — рейтинг IMDb + популярность + свежесть), `trending`
+/// (смотрят сейчас), `top_rated` (рейтинг IMDb), `new` (вышедшие, новые сверху), `soon` (ближайшие
+/// премьеры), `popular` (больше наших оценок), `rating` (выше наша средняя), `title`.
 ///
-/// Оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в
-/// таблицы рецензий не ходит. Только активные сущности.
+/// Наши оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в
+/// таблицы рецензий не ходит.
 #[utoipa::path(
     get, operation_id = "list_entities", path = "/entities", tag = "catalog",
     params(ListEntitiesQuery),
@@ -57,7 +61,7 @@ pub async fn list(
     }))
 }
 
-/// Страница списка: публичный (`active = Some(true)`) и админский (`active` из запроса).
+/// Страница списка: публичный (`active = Some(true)`: видимые) и админский (`active` из запроса).
 pub(crate) async fn list_page(
     db: &PgPool,
     query: ListEntitiesQuery,
@@ -68,11 +72,20 @@ pub(crate) async fn list_page(
         check_year(year)?;
     }
     let pattern = query.q.as_deref().and_then(like_pattern);
-    // Литерал рядом с параметром: планировщик берёт частичный индекс `WHERE active`.
+    let sort = query.sort.unwrap_or_default();
+    // Сортировки по статусу выхода — со своим фильтром.
+    let by_sort = match sort {
+        EntitySort::New => " AND e.release_date <= current_date",
+        EntitySort::Soon => " AND e.release_date > current_date",
+        EntitySort::Trending => " AND e.release_date <= current_date AND st.rank_score IS NOT NULL",
+        EntitySort::TopRated => " AND st.quality IS NOT NULL",
+        _ => "",
+    };
+    // VISIBLE начинается с `e.active`: планировщик берёт частичный индекс `WHERE active`.
     let filter = if active == Some(true) {
-        format!("{LIST_FILTER} AND e.active")
+        format!("{LIST_FILTER} AND {VISIBLE}{by_sort}")
     } else {
-        LIST_FILTER.to_string()
+        format!("{LIST_FILTER}{by_sort}")
     };
 
     let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) {filter}"))
@@ -83,8 +96,14 @@ pub(crate) async fn list_page(
         .bind(active)
         .fetch_one(db)
         .await?;
-    let order = match query.sort.unwrap_or_default() {
+    let order = match sort {
+        EntitySort::Recommended => {
+            "st.rank_score DESC NULLS LAST, e.release_date DESC NULLS LAST, e.title, e.id"
+        }
+        EntitySort::Trending => "st.tmdb_popularity DESC NULLS LAST, e.id",
+        EntitySort::TopRated => "st.quality DESC, st.imdb_votes DESC NULLS LAST, e.id",
         EntitySort::New => "e.release_date DESC NULLS LAST, e.title, e.id",
+        EntitySort::Soon => "e.release_date, e.title, e.id",
         EntitySort::Popular => {
             "COALESCE((SELECT r.count FROM entity_ratings r WHERE r.entity_id = e.id), 0) DESC,
              e.release_date DESC NULLS LAST, e.id"
@@ -97,7 +116,7 @@ pub(crate) async fn list_page(
         EntitySort::Title => "e.title, e.release_date DESC NULLS LAST, e.id",
     };
     let items = sqlx::query_as(&format!(
-        "SELECT {ENTITY_SUMMARY_COLUMNS}, e.active, e.active_manual {filter}
+        "SELECT {ENTITY_SUMMARY_COLUMNS}, e.active, e.active_manual, {VISIBLE} AS visible {filter}
          ORDER BY {order}
          LIMIT $6 OFFSET $7"
     ))
@@ -124,7 +143,8 @@ pub(crate) async fn list_page(
 /// Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика
 /// фронтенда (SSG/ISR), сюда приходят её пересборка и админка.
 ///
-/// Неактивная сущность — 404 для всех, кроме админа (ему — с неактивными связанными).
+/// Невидимая (скрыта или фильм из TMDB ещё не в окне «Скоро премьера») — 404 для всех, кроме
+/// админа (ему — и невидимые связанные).
 #[utoipa::path(
     get, operation_id = "get_entity", path = "/entities/{slug}", tag = "catalog",
     security((), ("bearer" = [])),
@@ -142,19 +162,19 @@ pub async fn get(
 ) -> AppResult<Json<EntityDetail>> {
     let admin = is_admin(viewer.as_ref());
     let entity: Option<Entity> = sqlx::query_as(&format!(
-        "SELECT {ENTITY_COLUMNS} FROM entities e WHERE e.slug = $1"
+        "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN} WHERE e.slug = $1"
     ))
     .bind(&slug)
     .fetch_optional(&state.db)
     .await?;
     let entity = entity
-        .filter(|entity| entity.active || admin)
+        .filter(|entity| entity.visible || admin)
         .ok_or(AppError::NotFound)?;
     Ok(Json(detail(&state.db, entity, admin).await?))
 }
 
 /// Похожие на сущность: тот же тип, больше общих тегов — выше (жанр весит вдвое), при равенстве —
-/// новее. Только активные; у неактивной — 404. Без самой
+/// новее. Только видимые; у невидимой — 404. Без самой
 /// сущности и её связанных (они и так на карточке). Нет тегов — пустая страница.
 ///
 /// Первая версия без ML: один запрос с подсчётом пересечения тегов по `entity_tags (tag_id)`.
@@ -183,10 +203,12 @@ pub async fn similar(
     }
 
     let limit = query.limit.unwrap_or(12).clamp(1, 24);
-    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM entities WHERE slug = $1 AND active")
-        .bind(&slug)
-        .fetch_optional(&state.db)
-        .await?;
+    let id: Option<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT e.id FROM entities e WHERE e.slug = $1 AND {VISIBLE}"
+    ))
+    .bind(&slug)
+    .fetch_optional(&state.db)
+    .await?;
     let id = id.ok_or(AppError::NotFound)?;
     let rows: Vec<Similar> = sqlx::query_as(&format!(
         "WITH scored AS (
@@ -200,7 +222,7 @@ pub async fn similar(
          SELECT count(*) OVER () AS total, {ENTITY_SUMMARY_COLUMNS}
          FROM scored s JOIN entities e ON e.id = s.entity_id
          WHERE e.kind = (SELECT kind FROM entities WHERE id = $1)
-           AND e.active
+           AND {VISIBLE}
            AND NOT EXISTS (SELECT 1 FROM entity_relations r
                            WHERE (r.from_id = $1 AND r.to_id = e.id)
                               OR (r.to_id = $1 AND r.from_id = e.id))
@@ -226,7 +248,7 @@ pub(crate) async fn detail_by_id(
     id: Uuid,
 ) -> AppResult<EntityDetail> {
     let entity: Option<Entity> = sqlx::query_as(&format!(
-        "SELECT {ENTITY_COLUMNS} FROM entities e WHERE e.id = $1"
+        "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN} WHERE e.id = $1"
     ))
     .bind(id)
     .fetch_optional(db)
@@ -329,7 +351,7 @@ async fn related(
              SELECT to_id, from_id, 'remake', position
              FROM entity_relations WHERE kind = 'remake' AND to_id = ANY($1)
          ) v JOIN entities e ON e.id = v.other
-         WHERE $2 OR e.active
+         WHERE $2 OR {VISIBLE}
          ORDER BY e.release_date NULLS LAST, v.position, e.title, e.id"
     ))
     .bind(ids)

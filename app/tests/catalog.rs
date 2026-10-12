@@ -2361,88 +2361,298 @@ async fn create_hidden_entity_and_directory(pool: PgPool) {
     assert!(directory.by_ids(&[id]).await.unwrap().contains_key(&id));
 }
 
-/// Поиск: скрытая уходит из выдачи; `sort=votes` / `sort=popularity` — по `metadata` (TMDB).
+/// Статистика сущности (`entity_stats`) напрямую: для сортировок и балла.
+async fn set_stats(ctx: &Ctx, slug: &str, stats: Value) {
+    sqlx::query(
+        "INSERT INTO entity_stats (entity_id, imdb_id, tmdb_popularity, tmdb_votes, imdb_rating,
+                                   imdb_votes, quality, rank_score)
+         SELECT e.id, s.imdb_id, s.tmdb_popularity, s.tmdb_votes, s.imdb_rating, s.imdb_votes,
+                s.quality, s.rank_score
+         FROM entities e,
+              jsonb_to_record($2) AS s(imdb_id text, tmdb_popularity float8, tmdb_votes int,
+                                       imdb_rating float8, imdb_votes int, quality float8,
+                                       rank_score float8)
+         WHERE e.slug = $1
+         ON CONFLICT (entity_id) DO UPDATE
+         SET imdb_id = EXCLUDED.imdb_id, tmdb_popularity = EXCLUDED.tmdb_popularity,
+             tmdb_votes = EXCLUDED.tmdb_votes, imdb_rating = EXCLUDED.imdb_rating,
+             imdb_votes = EXCLUDED.imdb_votes, quality = EXCLUDED.quality,
+             rank_score = EXCLUDED.rank_score",
+    )
+    .bind(slug)
+    .bind(stats)
+    .execute(&ctx.state.db)
+    .await
+    .unwrap();
+}
+
+/// Фильм из TMDB с датой выхода `сегодня + days` (`None` — без даты).
+async fn add_tmdb_movie(ctx: &Ctx, slug: &str, tmdb_id: i32, days: Option<i32>) {
+    sqlx::query(
+        "WITH e AS (
+             INSERT INTO entities (kind, slug, title, release_date)
+             VALUES ('movie', $1, $1, current_date + $3) RETURNING id
+         )
+         INSERT INTO entity_tmdb (entity_id, tmdb_id) SELECT id, $2 FROM e",
+    )
+    .bind(slug)
+    .bind(tmdb_id)
+    .bind(days)
+    .execute(&ctx.state.db)
+    .await
+    .unwrap();
+}
+
+/// Поиск: скрытая уходит из выдачи; `sort=recommended` / `trending` / `top_rated` — по
+/// `entity_stats`, без значения — в конце.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn search_skips_hidden_and_sorts_by_tmdb_numbers(pool: PgPool) {
-    let ctx = Ctx::new(pool).await;
-    for (slug, votes, popularity) in [
-        ("dune-2021", 9000, 10.5),
-        ("dune-part-two-2024", 7000, 99.25),
-    ] {
-        let id = ctx.entity_id(slug).await;
-        let (status, body) = ctx
-            .admin_send(
-                Method::PATCH,
-                &format!("/admin/entities/{id}"),
-                Some(json!({ "metadata": { "vote_count": votes, "popularity": popularity } })),
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-    }
-    // Без popularity — в конце (книга «Дюна»).
-    ctx.search_until("/search?q=dune&sort=votes", |p| {
-        slugs(p) == ["dune-2021", "dune-part-two-2024", "dune-novel"]
-    })
+async fn search_skips_hidden_and_sorts_by_stats(pool: PgPool) {
+    let ctx = Ctx::unindexed(pool);
+    set_stats(&ctx, "dune-2021", json!({ "rank_score": 0.9, "tmdb_popularity": 10.0, "quality": 8.0, "imdb_rating": 8.0, "imdb_votes": 900000 })).await;
+    set_stats(
+        &ctx,
+        "dune-part-two-2024",
+        json!({ "rank_score": 0.5, "tmdb_popularity": 99.0, "quality": 8.5 }),
+    )
     .await;
-    let page = ctx.get_ok("/search?q=dune&sort=popularity").await;
+    let (status, body) = ctx.reindex("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for (sort, expected) in [
+        (
+            "recommended",
+            ["dune-2021", "dune-part-two-2024", "dune-novel"],
+        ),
+        (
+            "trending",
+            ["dune-part-two-2024", "dune-2021", "dune-novel"],
+        ),
+        (
+            "top_rated",
+            ["dune-part-two-2024", "dune-2021", "dune-novel"],
+        ),
+    ] {
+        let page = ctx.get_ok(&format!("/search?q=dune&sort={sort}")).await;
+        assert_eq!(slugs(&page), expected, "{sort}: {page}");
+    }
+    let page = ctx.get_ok("/search?q=dune&sort=recommended").await;
+    assert_eq!(page["items"][0]["imdb_rating"], 8.0);
+    assert_eq!(page["items"][0]["release_status"], "released");
     assert_eq!(
-        slugs(&page),
-        ["dune-part-two-2024", "dune-2021", "dune-novel"]
-    );
-    assert_eq!(
-        ctx.get("/search?q=dune&sort=rating").await.status,
+        ctx.get("/search?q=dune&sort=votes").await.status,
         StatusCode::BAD_REQUEST
     );
 
     set_active(&ctx, "dune-2021", false).await;
     ctx.search_until("/search?q=dune", |p| !slugs(p).contains(&"dune-2021"))
         .await;
-    // Перестройка тоже не берёт скрытые.
     let (status, body) = ctx.reindex("").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["indexed"], 4);
 }
 
-/// `popularity` и `vote_count` — только у фильмов, с проверкой диапазона.
+/// Старые `metadata.popularity`/`vote_count` (теперь `entity_stats`) принимаются и отбрасываются.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn movie_metadata_tmdb_numbers_are_validated(pool: PgPool) {
+async fn legacy_metadata_tmdb_keys_are_dropped(pool: PgPool) {
     let ctx = Ctx::without_search(pool);
-    let movie = ctx.entity_id("dune-2021").await;
-    let book = ctx.entity_id("dune-novel").await;
-    for (id, metadata, status) in [
-        (
-            &movie,
-            json!({ "popularity": 12.34567, "vote_count": 5 }),
-            StatusCode::OK,
-        ),
-        (&movie, json!({ "popularity": -1 }), StatusCode::BAD_REQUEST),
-        (&movie, json!({ "vote_count": -1 }), StatusCode::BAD_REQUEST),
-        (
-            &book,
-            json!({ "pages": 896, "vote_count": 5 }),
-            StatusCode::BAD_REQUEST,
-        ),
-    ] {
-        let (got, body) = ctx
-            .admin_send(
-                Method::PATCH,
-                &format!("/admin/entities/{id}"),
-                Some(json!({ "metadata": metadata })),
-            )
-            .await;
-        assert_eq!(got, status, "{metadata}: {body}");
-    }
-    let card = ctx.get_ok("/entities/dune-2021").await;
-    assert_eq!(card["metadata"]["popularity"], 12.346);
+    let id = ctx.entity_id("dune-2021").await;
+    let (status, body) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}"),
+            Some(
+                json!({ "metadata": { "runtime_min": 155, "popularity": 12.3, "vote_count": 5 } }),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["metadata"], json!({ "runtime_min": 155 }));
 }
 
-// ---------------------------------------------------------------- операции TMDB в админке
+/// Фильмы из TMDB: невышедшие и без даты скрыты сами, «Скоро премьера» (≤ soon_days) видна со
+/// статусом `soon`, вручную включённый анонс виден; не из TMDB — видны с любой датой. `new` — без
+/// будущих, `soon` — только будущие. Окно меняется в настройках сортировки.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn unreleased_tmdb_films_are_hidden_until_soon(pool: PgPool) {
+    let ctx = Ctx::without_search(pool);
+    add_tmdb_movie(&ctx, "soon-film", 101, Some(10)).await;
+    add_tmdb_movie(&ctx, "later-film", 102, Some(200)).await;
+    add_tmdb_movie(&ctx, "no-date-film", 103, None).await;
+    add_tmdb_movie(&ctx, "far-film", 104, Some(300)).await;
+    sqlx::query(
+        "INSERT INTO entities (kind, slug, title, release_date)
+         VALUES ('movie', 'own-future', 'Своё', current_date + 200)",
+    )
+    .execute(&ctx.state.db)
+    .await
+    .unwrap();
 
-/// Фейковый каталог дампов TMDB: на любой `/{файл}` отдаёт gzip с `lines`.
-async fn fake_tmdb_exports(lines: &str) -> String {
+    let card = ctx.get_ok("/entities/soon-film").await;
+    assert_eq!(card["release_status"], "soon");
+    assert_eq!(card["visible"], true);
+    for slug in ["later-film", "no-date-film", "far-film"] {
+        assert_eq!(
+            ctx.get(&format!("/entities/{slug}")).await.status,
+            StatusCode::NOT_FOUND,
+            "{slug}"
+        );
+    }
+    assert_eq!(
+        ctx.get_ok("/entities/own-future").await["release_status"],
+        "announced"
+    );
+    let all = slugs(&ctx.get_ok("/entities?limit=100").await)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert!(all.contains(&"soon-film".to_string()) && !all.contains(&"later-film".to_string()));
+    let new = ctx.get_ok("/entities?sort=new&limit=100").await;
+    assert!(!slugs(&new).contains(&"soon-film") && !slugs(&new).contains(&"own-future"));
+    assert_eq!(
+        slugs(&ctx.get_ok("/entities?sort=soon").await),
+        ["soon-film", "own-future"]
+    );
+
+    // Админ видит скрытый анонс; включил вручную — виден всем.
+    let token = ctx.admin().await;
+    let card = ctx
+        .send(Method::GET, "/entities/later-film", None, Some(&token))
+        .await;
+    assert_eq!(card.status, StatusCode::OK);
+    assert_eq!(card.json()["visible"], false);
+    set_active(&ctx, "later-film", true).await;
+    ctx.get_ok("/entities/later-film").await;
+
+    // Окно «скоро» — 365 дней: видны и дальние анонсы с датой.
+    let (status, mut settings) = ctx.admin_send(Method::GET, "/admin/ranking", None).await;
+    assert_eq!(status, StatusCode::OK);
+    settings.as_object_mut().unwrap().remove("updated_at");
+    settings["soon_days"] = json!(365);
+    let response = ctx
+        .send(
+            Method::PUT,
+            "/admin/ranking/stream",
+            Some(settings),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(done_of(&sse_events(&response))["ok"], true);
+    ctx.get_ok("/entities/far-film").await;
+    assert_eq!(
+        ctx.get("/entities/no-date-film").await.status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// Балл: предпросмотр с весами из тела ничего не пишет; сохранение пересчитывает балл, и
+/// `recommended` (сортировка по умолчанию) идёт по нему; мало голосов — без балла.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn ranking_preview_and_save(pool: PgPool) {
+    let ctx = Ctx::without_search(pool);
+    // dune-2021 — рейтинг выше, part-two — свежее и популярнее, witcher — мало голосов.
+    set_stats(
+        &ctx,
+        "dune-2021",
+        json!({ "imdb_rating": 8.0, "imdb_votes": 900000, "tmdb_popularity": 20.0 }),
+    )
+    .await;
+    set_stats(
+        &ctx,
+        "dune-part-two-2024",
+        json!({ "imdb_rating": 7.5, "imdb_votes": 600000, "tmdb_popularity": 200.0 }),
+    )
+    .await;
+    set_stats(
+        &ctx,
+        "witcher-3",
+        json!({ "imdb_rating": 9.9, "imdb_votes": 10 }),
+    )
+    .await;
+    let (_, base) = ctx.admin_send(Method::GET, "/admin/ranking", None).await;
+    let mut settings = base.clone();
+    settings.as_object_mut().unwrap().remove("updated_at");
+
+    let preview = |weights: (f64, f64, f64)| {
+        let mut body = settings.clone();
+        body["weight_quality"] = json!(weights.0);
+        body["weight_popularity"] = json!(weights.1);
+        body["weight_recency"] = json!(weights.2);
+        body
+    };
+    let (status, rows) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/ranking/preview",
+            Some(preview((1.0, 0.0, 0.0))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rows}");
+    let order: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(order, ["dune-2021", "dune-part-two-2024"]); // witcher — меньше min_votes
+    let (_, rows) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/ranking/preview",
+            Some(preview((0.0, 1.0, 1.0))),
+        )
+        .await;
+    assert_eq!(rows[0]["slug"], "dune-part-two-2024");
+    assert!(rows[0]["score"].as_f64().unwrap() > rows[1]["score"].as_f64().unwrap());
+    let mut bad = preview((1.0, 0.0, 0.0));
+    bad["weight_quality"] = json!(-1);
+    let (status, _) = ctx
+        .admin_send(Method::POST, "/admin/ranking/preview", Some(bad))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Предпросмотр не пишет.
+    let ranked: i64 = sqlx::query_scalar("SELECT count(rank_score) FROM entity_stats")
+        .fetch_one(&ctx.state.db)
+        .await
+        .unwrap();
+    assert_eq!(ranked, 0);
+
+    // Сохранить «популярность и свежесть» → part-two первой в списке по умолчанию.
+    let token = ctx.admin().await;
+    let response = ctx
+        .send(
+            Method::PUT,
+            "/admin/ranking/stream",
+            Some(preview((0.0, 1.0, 1.0))),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let events = sse_events(&response);
+    assert_eq!(
+        steps(&events),
+        pairs(&[("rank", "running"), ("rank", "done")])
+    );
+    let page = ctx.get_ok("/entities").await;
+    assert_eq!(&slugs(&page)[..2], ["dune-part-two-2024", "dune-2021"]);
+    let card = ctx.get_ok("/entities/witcher-3").await;
+    assert!(card["rank_score"].is_null());
+    let (_, saved) = ctx.admin_send(Method::GET, "/admin/ranking", None).await;
+    assert_eq!(saved["weight_quality"], 0.0);
+    // top_rated — по байесовскому рейтингу.
+    assert_eq!(
+        slugs(&ctx.get_ok("/entities?sort=top_rated").await),
+        ["dune-2021", "dune-part-two-2024"]
+    );
+}
+
+// ---------------------------------------------------------------- данные TMDB и IMDb в админке
+
+/// Фейковый сервер файлов: на любой `/{файл}` отдаёт gzip с `text`.
+async fn fake_gz_files(text: &str) -> String {
     use std::io::Write;
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    gz.write_all(lines.as_bytes()).unwrap();
+    gz.write_all(text.as_bytes()).unwrap();
     let body = gz.finish().unwrap();
     let app = axum::Router::new().route(
         "/{file}",
@@ -2458,20 +2668,19 @@ async fn fake_tmdb_exports(lines: &str) -> String {
 }
 
 impl Ctx {
-    fn with_tmdb_exports(&mut self, url: &str) {
+    fn with_sources(&mut self, tmdb: &str, imdb: &str) {
         let mut config = (*self.state.config).clone();
-        config.tmdb_exports_url = url.to_string();
+        config.tmdb_exports_url = tmdb.to_string();
+        config.imdb_datasets_url = imdb.to_string();
         self.state.config = Arc::new(config);
     }
 
-    async fn link_tmdb(&self, slug: &str, tmdb_id: i32, metadata: Value) {
+    async fn link_tmdb(&self, slug: &str, tmdb_id: i32) {
         sqlx::query(
-            "WITH e AS (UPDATE entities SET metadata = metadata || $3 WHERE slug = $1 RETURNING id)
-             INSERT INTO entity_tmdb (entity_id, tmdb_id) SELECT id, $2 FROM e",
+            "INSERT INTO entity_tmdb (entity_id, tmdb_id) SELECT id, $2 FROM entities WHERE slug = $1",
         )
         .bind(slug)
         .bind(tmdb_id)
-        .bind(metadata)
         .execute(&self.state.db)
         .await
         .unwrap();
@@ -2485,13 +2694,15 @@ impl Ctx {
         sse_events(&response)
     }
 
-    async fn popularity_of(&self, slug: &str) -> Option<f64> {
-        let metadata: Value = sqlx::query_scalar("SELECT metadata FROM entities WHERE slug = $1")
-            .bind(slug)
-            .fetch_one(&self.state.db)
-            .await
-            .unwrap();
-        metadata["popularity"].as_f64()
+    async fn stats_of(&self, slug: &str) -> Value {
+        sqlx::query_scalar(
+            "SELECT to_jsonb(s) FROM entity_stats s JOIN entities e ON e.id = s.entity_id
+             WHERE e.slug = $1",
+        )
+        .bind(slug)
+        .fetch_one(&self.state.db)
+        .await
+        .unwrap()
     }
 }
 
@@ -2499,93 +2710,96 @@ fn done_of(events: &[(String, Value)]) -> &Value {
     &events.last().expect("events").1
 }
 
-/// «Обновить popularity»: дамп TMDB → `metadata.popularity` фильмов со связью TMDB; остальная
-/// metadata цела, книги, видео и фильмы без связи не трогаются; повтор — 0 изменений.
+/// «Обновить рейтинги»: дамп TMDB → popularity, IMDb → рейтинг и голоса (по `imdb_id`), затем
+/// балл; книги и видео не трогаются; повтор — 0 изменений.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn popularity_refresh_from_tmdb_export(pool: PgPool) {
+async fn stats_refresh_from_tmdb_and_imdb(pool: PgPool) {
     let mut ctx = Ctx::without_search(pool);
-    let exports = fake_tmdb_exports(concat!(
+    let tmdb = fake_gz_files(concat!(
         r#"{"adult":false,"id":438631,"original_title":"Dune","popularity":38.2468,"video":false}"#, "\n",
         r#"{"adult":false,"id":693134,"original_title":"Dune: Part Two","popularity":120,"video":false}"#, "\n",
-        r#"{"adult":false,"id":999,"original_title":"Dune","popularity":5.5,"video":false}"#, "\n",
-        r#"{"adult":false,"id":1,"original_title":"Unlinked","popularity":2.0,"video":false}"#, "\n",
         r#"{"adult":false,"id":2,"original_title":"Clip","popularity":9.0,"video":true}"#, "\n",
     ))
     .await;
-    ctx.with_tmdb_exports(&exports);
-    ctx.link_tmdb("dune-2021", 438631, json!({})).await;
-    ctx.link_tmdb("dune-part-two-2024", 693134, json!({ "popularity": 1.0 }))
-        .await;
-    ctx.link_tmdb("dune-novel", 999, json!({})).await; // книга: popularity — поле фильма
+    let imdb = fake_gz_files(
+        "tconst\taverageRating\tnumVotes\ntt1160419\t8.0\t950000\ntt15239678\t8.5\t650000\ntt0000001\t5.7\t2100\n",
+    )
+    .await;
+    ctx.with_sources(&tmdb, &imdb);
+    ctx.link_tmdb("dune-2021", 438631).await;
+    ctx.link_tmdb("dune-part-two-2024", 693134).await;
+    set_stats(&ctx, "dune-2021", json!({ "imdb_id": "tt1160419" })).await;
+    set_stats(
+        &ctx,
+        "dune-part-two-2024",
+        json!({ "imdb_id": "tt15239678" }),
+    )
+    .await;
 
-    let events = ctx.admin_stream("/admin/tmdb/popularity/stream").await;
+    let events = ctx.admin_stream("/admin/tmdb/stats/stream").await;
     assert_eq!(
         steps(&events),
         pairs(&[
             ("tmdb_export", "running"),
             ("tmdb_export", "done"),
-            ("popularity", "running"),
-            ("popularity", "done"),
+            ("imdb_ratings", "running"),
+            ("imdb_ratings", "done"),
+            ("stats", "running"),
+            ("stats", "done"),
+            ("rank", "running"),
+            ("rank", "done"),
         ])
     );
     let done = done_of(&events);
     assert_eq!(done["ok"], true, "{done}");
-    assert_eq!(done["popularity"]["films"], 4);
-    assert_eq!(done["popularity"]["updated"], 2);
-    assert_eq!(ctx.popularity_of("dune-2021").await, Some(38.247));
-    assert_eq!(ctx.popularity_of("dune-part-two-2024").await, Some(120.0));
-    assert_eq!(ctx.popularity_of("dune-novel").await, None);
-    let card = ctx.get_ok("/entities/dune-2021").await;
-    assert_eq!(card["metadata"]["runtime_min"], 155);
+    assert_eq!(done["stats"]["tmdb_updated"], 2);
+    assert_eq!(done["stats"]["imdb_updated"], 2);
+    assert_eq!(done["stats"]["ranked"], 2);
+    let stats = ctx.stats_of("dune-2021").await;
+    assert_eq!(stats["tmdb_popularity"], 38.247);
+    assert_eq!(stats["imdb_rating"], 8.0);
+    assert_eq!(stats["imdb_votes"], 950000);
+    assert!(stats["rank_score"].as_f64().unwrap() > 0.0);
+    let card = ctx.get_ok("/entities/dune-part-two-2024").await;
+    assert_eq!(card["imdb_rating"], 8.5);
+    assert_eq!(card["tmdb_popularity"], 120.0);
 
-    let events = ctx.admin_stream("/admin/tmdb/popularity/stream").await;
-    assert_eq!(done_of(&events)["popularity"]["updated"], 0);
+    let events = ctx.admin_stream("/admin/tmdb/stats/stream").await;
+    let done = done_of(&events);
+    assert_eq!(done["stats"]["tmdb_updated"], 0);
+    assert_eq!(done["stats"]["imdb_updated"], 0);
 }
 
-/// «Пересобрать активные»: топ по vote_count + по popularity среди связанных с TMDB; переключённые
-/// в админке не трогаются; счётчики тегов и людей сходятся; поиск перестраивается.
+/// «Пересобрать активные» одним числом: топ вышедших по баллу + все «скоро»; анонсы и без даты
+/// скрыты; переключённые вручную не трогаются; счётчики сходятся; поиск перестраивается.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn active_rebuild_picks_top_and_keeps_manual(pool: PgPool) {
+async fn active_rebuild_by_count_keeps_soon_and_manual(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
-    ctx.link_tmdb(
-        "dune-2021",
-        438631,
-        json!({ "vote_count": 9000, "popularity": 10.0 }),
-    )
-    .await;
-    ctx.link_tmdb(
-        "dune-part-two-2024",
-        693134,
-        json!({ "vote_count": 7000, "popularity": 99.0 }),
-    )
-    .await;
-    ctx.link_tmdb(
-        "witcher-3",
-        3,
-        json!({ "vote_count": 1, "popularity": 0.5 }),
-    )
-    .await;
+    ctx.link_tmdb("dune-2021", 438631).await;
+    ctx.link_tmdb("dune-part-two-2024", 693134).await;
+    ctx.link_tmdb("witcher-3", 3).await;
+    set_stats(&ctx, "dune-2021", json!({ "rank_score": 0.9 })).await;
+    set_stats(&ctx, "dune-part-two-2024", json!({ "rank_score": 0.5 })).await;
+    add_tmdb_movie(&ctx, "soon-film", 101, Some(10)).await;
+    add_tmdb_movie(&ctx, "later-film", 102, Some(200)).await;
     set_active(&ctx, "witcher-3", true).await; // вручную: «Пересобрать» не трогает
 
     let token = ctx.admin().await;
     let bad = ctx
         .send(
             Method::POST,
-            "/admin/tmdb/active/stream?by_votes=-1",
+            "/admin/tmdb/active/stream?count=-1",
             None,
             Some(&token),
         )
         .await;
     assert_eq!(bad.status, StatusCode::BAD_REQUEST);
 
-    let events = ctx
-        .admin_stream("/admin/tmdb/active/stream?by_votes=1&by_popularity=0")
-        .await;
+    let events = ctx.admin_stream("/admin/tmdb/active/stream?count=1").await;
     let done = done_of(&events);
     assert_eq!(done["ok"], true, "{done}");
-    assert_eq!(done["active"]["activated"], 0);
-    assert_eq!(done["active"]["deactivated"], 1);
-    assert_eq!(done["active"]["active"], 4);
+    assert_eq!(done["active"]["deactivated"], 2, "{done}"); // part-two и later-film
+    assert_eq!(done["active"]["soon"], 1);
     let names: Vec<String> = steps(&events).into_iter().map(|(step, _)| step).collect();
     assert!(names.contains(&"activate".to_string()) && names.contains(&"swap".to_string()));
 
@@ -2593,21 +2807,15 @@ async fn active_rebuild_picks_top_and_keeps_manual(pool: PgPool) {
         ctx.get("/entities/dune-part-two-2024").await.status,
         StatusCode::NOT_FOUND
     );
+    ctx.get_ok("/entities/soon-film").await;
     ctx.get_ok("/entities/witcher-3").await;
-    let (_, hidden) = ctx
-        .admin_send(Method::GET, "/admin/entities?active=false", None)
-        .await;
-    assert_eq!(slugs(&hidden), ["dune-part-two-2024"]);
-    assert_eq!(hidden["items"][0]["active_manual"], false);
     let (_, all) = ctx
         .admin_send(Method::GET, "/admin/entities?q=witcher", None)
         .await;
     assert_eq!(all["items"][0]["active_manual"], true);
-    // Поиск перестроен: скрытой нет.
     let page = ctx.get_ok("/search?q=dune").await;
     assert!(!slugs(&page).contains(&"dune-part-two-2024"), "{page}");
 
-    // Операторный триггер: счётчики совпадают с пересчётом с нуля.
     assert_eq!(tag_count(&ctx.get_ok("/tags").await, "sci-fi"), 2);
     let mismatched: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM person_credit_counts pc
@@ -2621,12 +2829,7 @@ async fn active_rebuild_picks_top_and_keeps_manual(pool: PgPool) {
     .unwrap();
     assert_eq!(mismatched, 0);
 
-    // Повтор с другим топом: включает по popularity.
-    let events = ctx
-        .admin_stream("/admin/tmdb/active/stream?by_votes=0&by_popularity=1")
-        .await;
-    let done = done_of(&events);
-    assert_eq!(done["active"]["activated"], 1, "{done}");
-    assert_eq!(done["active"]["deactivated"], 1);
+    let events = ctx.admin_stream("/admin/tmdb/active/stream?count=2").await;
+    assert_eq!(done_of(&events)["active"]["activated"], 1);
     ctx.get_ok("/entities/dune-part-two-2024").await;
 }

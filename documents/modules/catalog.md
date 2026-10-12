@@ -40,7 +40,8 @@
 (фильтры по полям типа); триграммный GIN по `title` (поиск по подстроке, `ILIKE '%дюн%'`).
 
 **Активные и скрытые.** Каталог из импорта TMDB + Wikidata — ~1,2 млн фильмов, на сайте —
-отобранная часть (~80 тыс.: топ по оценкам и популярности TMDB, см. импорт). Скрытая
+отобранная часть (~80 тыс.: топ по баллу «Рекомендуемые» и «Скоро премьера», см. «Сортировка и
+активные»; невышедшие фильмы из TMDB скрыты и без флага). Скрытая
 (`active = false`) хранится в БД, но на сайте её нет нигде: ни в `/entities`, ни в поиске (не
 индексируется), ни в похожих, связанных и фильмографиях, не считается в `entities_count` тегов;
 карточка `/entities/{slug}` — 404 для всех, кроме админа (админу — и скрытые связанные). Справочник
@@ -60,8 +61,7 @@
 | `movie` | `runtime_min` | целое 1–10000, минуты |
 | | `countries` | коды ISO 3166-1 alpha-2, приводятся к верхнему регистру: `["US", "CA"]` |
 | | `age_rating` | строка до 16 символов: `PG-13`, `16+` |
-| | `popularity` | популярность TMDB (активность за последние дни): число 0–1000000, округляется до тысячных. Сортировка поиска `popularity` |
-| | `vote_count` | число оценок на TMDB (известность за всё время): целое ≥ 0. Сортировка поиска `votes` |
+| | `popularity`, `vote_count` | устарели (теперь `entity_stats`): принимаются и отбрасываются |
 | | `trailers` | трейлер: до 5 источников по приоритету, `[{"provider": "youtube", "id": "n9xhJrPXop4"}, {"provider": "rutube", "id": "0ab1…"}]`. `provider` — `youtube` (id 11 символов) или `rutube` (32 hex). На входе можно дать и просто ссылку на видео (`youtube.com/watch?v=…`, `youtu.be/…`, `rutube.ru/video/…/`, `/embed/…`) — провайдер и id определятся сами; другие сайты — 400. Повторы убираются |
 | `series` | `seasons` | целое 1–10000 |
 | | `episodes` | целое 1–100000 |
@@ -161,6 +161,31 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 Миграция `20261017100000_entity_tmdb.sql` (перенос связей из `catalog_import.movies`, если импорт
 был). Пишет импорт (`merge.py`), читают операции админки «Обновить popularity» и «Пересобрать
 активные» ([`catalog::tmdb`](#данные-tmdb-в-админке-)).
+
+
+### `entity_stats` ✅ — статистика и балл
+
+| Колонка | Тип | Описание |
+|---|---|---|
+| `entity_id` | `uuid` PK, FK → `entities`, CASCADE | |
+| `imdb_id` | `text` (индекс) | `tt…`, из TMDB (`merge.py`) |
+| `tmdb_popularity` | `double precision` | «смотрят сейчас», ежедневный дамп TMDB |
+| `tmdb_votes` | `integer` | число оценок TMDB |
+| `imdb_rating`, `imdb_votes` | `double precision`, `integer` | IMDb `title.ratings` |
+| `quality` | `double precision` | байесовский рейтинг IMDb (сортировка `top_rated`) |
+| `rank_score` | `double precision` (индекс `DESC NULLS LAST`) | балл «Рекомендуемые»; `NULL` — не вышел или мало голосов |
+| `updated_at` | `timestamptz` | триггер |
+
+Миграция `20261018100000_entity_stats.sql` (перенос `metadata.popularity`/`vote_count`). Узкая
+таблица, а не `metadata`: обновление ~1 млн строк `metadata` перестраивает GIN-индексы (25 мин), а
+пересчёт балла после правки формулы должен идти минуты.
+
+### `catalog_ranking` ✅ — настройки сортировки
+
+Одна строка (`id = true`): `weight_quality` (0.5), `weight_popularity` (0.3), `weight_recency` (0.2),
+`trust_votes` (5000), `half_life_years` (4), `min_votes` (1000), `soon_days` (30), `updated_at`,
+`updated_by` (id админа). Правит `PUT /admin/ranking/stream`, см. [«Сортировка и
+активные»](#сортировка-и-активные-).
 
 ### `entity_credits` ✅ — участие людей в произведениях
 
@@ -409,14 +434,14 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 
 | Метод | Путь | Что делает |
 |---|---|---|
-| GET | `/entities` | Список активных. Фильтры: `kind`, `tag` (slug), `year`, `q` (подстрока в названии или оригинальном, без учёта регистра). `sort`: `new` (по умолчанию: новинки сверху, без даты — в конце), `popular` (больше оценок), `rating` (выше средняя; без оценок — в конце), `title` |
+| GET | `/entities` | Список видимых. Фильтры: `kind`, `tag` (slug), `year`, `q` (подстрока в названии или оригинальном, без учёта регистра). `sort`: `recommended` (по умолчанию, балл), `trending`, `top_rated`, `new` (только вышедшие), `soon`, `popular` (наши оценки), `rating`, `title` ([«Сортировка и активные»](#сортировка-и-активные-)). В элементах — `release_status`, `imdb_rating`, `imdb_votes` |
 | GET | `/entities/{slug}` | Карточка: все поля (с `active`), теги, участники в порядке титров (`position`), `related` (активные). Из PostgreSQL. Скрытая — 404; с токеном админа — 200 (и скрытые связанные); неверный токен — 401 |
 | GET | `/entities/{slug}/similar` | Похожие активные: `?limit=` 1–24 (по умолчанию 12) → `Page<EntitySummary>` ([«Похожие»](#похожие-)); у скрытой — 404 |
 | GET | `/people` | Список публичных людей по алфавиту (с активной работой или без работ), `q` — подстрока в имени |
 | GET | `/people/{slug}` | Человек и его работы в активных сущностях, новые сверху. Из PostgreSQL. Все работы скрыты — 404; админу — 200 со всеми работами |
 | GET | `/tags` | Все теги с `kind` и `entities_count` (активных сущностей), без пагинации (тегов немного); `?kind=genre\|tag` — только жанры или только теги |
 | GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `entities_count`; нет — 404 |
-| GET | `/search` | Поиск по активным через Meilisearch: `q`, фильтры `kind`, `tag`, `year`. По релевантности; `sort=popularity` / `sort=votes` — по `metadata.popularity` / `metadata.vote_count` (TMDB), без поля — в конце; другое значение — 400 |
+| GET | `/search` | Поиск по видимым через Meilisearch: `q`, фильтры `kind`, `tag`, `year`. По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb (без значения — в конце); другое значение — 400 |
 
 **`related`** в карточке — одна лента для карусели: `[{...EntitySummary, "relation": "prequel"|"sequel"|"remake"}, ...]`, хронологически по `release_date` (без даты — в конце, затем `position`, затем заголовок), пусто — `[]`. Сиквелы, ремейки и приквелы идут **в одной полосе**, тип связи — у каждой карточки. Связи — в самой карточке, а не отдельным запросом: карточка — статика фронтенда, они попадают в HTML.
 
@@ -463,8 +488,11 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | PATCH / DELETE | `/admin/tags/{id}` | Переименовать, сменить slug или `kind` / удалить (снимается со всех сущностей). Карточки с тегом пересобираются |
 | POST | `/admin/search/reindex` | Перестроить поисковый индекс без простоя (`?force=true` — без проверки размера, `SEARCH_REINDEX_MIN_PERCENT`: 80, в dev 0) → `ReindexResult`; `409` — уже идёт или новый индекс слишком мал |
 | POST | `/admin/search/reindex/stream` | То же потоком `text/event-stream` ([«Перестройка поиска»](#перестройка-поиска-)) |
-| POST | `/admin/tmdb/popularity/stream` | «Обновить popularity» из ежедневного дампа TMDB, потоком: шаги `tmdb_export`, `popularity` (с `progress`), перестройка поиска; `done.popularity` — `{export, films, updated}`. `409` — уже идёт перестройка или операция TMDB ([«Данные TMDB»](#данные-tmdb-в-админке-)) |
-| POST | `/admin/tmdb/active/stream` | «Пересобрать активные»: `?by_votes=` (40000) `&by_popularity=` (40000), 0–1000000, иначе 400; потоком: шаг `activate`, перестройка поиска без проверки размера, ISR `{"all": true}`; `done.active` — `{activated, deactivated, active}`. `409` — как выше |
+| POST | `/admin/tmdb/stats/stream` | «Обновить рейтинги»: дампы TMDB (popularity) и IMDb (рейтинг) → `entity_stats`, пересчёт балла, перестройка поиска; потоком; `done.stats`. `409` — уже идёт долгая операция ([«Сортировка и активные»](#сортировка-и-активные-)) |
+| POST | `/admin/tmdb/active/stream` | «Пересобрать активные»: `?count=` (80000, 0–1000000, иначе 400) вышедших по баллу + все «Скоро премьера»; потоком; `done.active`. `409` — как выше |
+| GET | `/admin/ranking` | Настройки балла и окна «Скоро премьера» |
+| POST | `/admin/ranking/preview` | Топ по формуле с настройками из тела (`?limit=` 1–200, 50), без записи → `[RankPreviewRow]`; неверные настройки — 400 |
+| PUT | `/admin/ranking/stream` | Сохранить настройки и применить потоком: `rank`, перестройка поиска. 400 / 409 |
 
 **Проверки:** `slug` — `a-z`, `0-9`, одиночные дефисы, до 100 символов; занятый slug — 409.
 Названия и имена обязательны, до 300 символов, пробелы по краям обрезаются. `cover_url` и
@@ -606,45 +634,72 @@ the TMDB API but is not endorsed or certified by TMDB» — задача фро�
 отдельная лицензия TMDB; права на постеры у правообладателей. Wikidata — CC0, тексты Википедии —
 CC BY-SA, Commons — по лицензии файла с атрибуцией.
 
-**Активные.** `merge.py` вставляет новые фильмы скрытыми и пишет связи в `entity_tmdb`; включает
-кнопка админки «Пересобрать активные» ([«Данные TMDB»](#данные-tmdb-в-админке-)). Первая раскладка
-на dev (2026-10-12) — ещё скриптом: активны 40 000 по `vote_count` + 40 000 по `popularity` = 80 000
-и 46 сидов, скрыто 1 116 032 (один `UPDATE` 1,1 млн строк — 24 мин, разово; дальше меняется только
-разница). Привязанные готовые строки (сиды) получают `active_manual = true`.
+**Активные.** `merge.py` вставляет новые фильмы скрытыми, пишет связи в `entity_tmdb` и
+`entity_stats` (`imdb_id`, `tmdb_votes`, `tmdb_popularity`, если её нет); включает кнопка админки
+«Пересобрать активные» ([«Сортировка и активные»](#сортировка-и-активные-)). Привязанные готовые
+строки (сиды) получают `active_manual = true`. Первая раскладка на dev (2026-10-12) — ещё
+скриптом (40 000 по `vote_count` + 40 000 по `popularity`); её место занимает пересборка по баллу.
 
-**Поля TMDB в `metadata`** (`popularity` до тысячных, `vote_count`) — не под защитой правок
-(`TMDB_KEYS` в `merge.py`): `merge.py` сравнивает `metadata` без них, `vote_count` берёт из кэша TMDB,
-`popularity` — оставляет текущую (свежую пишет админка из дампа), пишет из кэша только если её нет.
-`merge.py --numbers-only` — то же одним `UPDATE` (после свежего `fetch_tmdb.py`; полное слияние ради
-чисел шло бы часы, ~100 фильмов/с: каждая строка перестраивает GIN-индексы `metadata` и названия;
-`UPDATE` ~1 млн строк — 25 мин).
+**Статистика — `entity_stats`, не `metadata`** (миграция `20261018100000_entity_stats.sql`):
+`metadata.popularity`/`vote_count` устарели — `MovieMetadata` их принимает и отбрасывает (старые
+формы админки не получают 400), `merge.py` убирает их при записи, разом —
+`merge.py --cleanup-metadata` (~25 мин: GIN-индексы). `merge.py --numbers-only` — `entity_stats` из
+кэша TMDB пачками (2 мин на 1,2 млн).
 
-## Данные TMDB в админке ✅
+## Сортировка и активные ✅
 
-`catalog::tmdb` (`modules/catalog/src/tmdb.rs`) — две операции, запускаются вручную (расписания
-нет), ход — потоком `text/event-stream` ([`JobEvent`](#публикация-правок-): `plan`, `step`,
-`progress`, `done`), доводятся до конца, даже если клиент ушёл. Одна долгая операция каталога за
-раз — общая блокировка с перестройкой поиска (`ReindexLock`, процесс + Redis): занято — `409` до
-потока. Meilisearch выключен — только БД, без шагов поиска.
+**Статус выхода** — по сегодняшней дате, без заданий: `released` (`release_date ≤ сегодня`), `soon`
+(выход в ближайшие `catalog_ranking.soon_days`, 30 дней — «Скоро премьера»), `announced` (позже или
+без даты); поле `release_status` в `EntitySummary`, карточке и выдаче поиска. **Видимость**
+(`VISIBLE` в `models.rs`, поле `visible` карточки и админского списка): `active` и — для фильмов из
+TMDB (`entity_tmdb`) — `released` или `soon`, либо `active_manual`. Невышедшие и без даты из TMDB
+скрываются сами и сами появляются за `soon_days` дней до выхода (поиск — при ежедневной перестройке
+или кнопке); не из TMDB (сиды, админка) и включённые вручную — видны с любой датой. `VISIBLE`
+используют списки, карточка (404), похожие, связанные, фильмографии, справочник для `social`,
+индексация. Счётчики людей и тегов считают `active` (без окна дат).
 
-- **Обновить popularity** (`POST /admin/tmdb/popularity/stream`). Скачивает
-  `movie_ids_MM_DD_YYYY.json.gz` из `TMDB_EXPORTS_URL` (сегодняшнего нет — до 3 дней назад; ключ
-  API не нужен, ~28 МБ), берёт фильмы кроме `video`, popularity 0–1000000 до тысячных, во временную
-  таблицу; `UPDATE` пачками по 20 000 связей `entity_tmdb` (keyset по `entity_id`, ход в
-  `progress`): только ключ `metadata.popularity` и только у `kind = movie`, где значение другое.
-  Затем перестройка поиска (сортировка `popularity`). `vote_count` в дампе нет — его обновляет
-  `fetch_tmdb.py` + `merge.py --numbers-only` (API, ~8 ч).
-- **Пересобрать активные** (`POST /admin/tmdb/active/stream?by_votes=40000&by_popularity=40000`).
-  Кандидаты — сущности со связью `entity_tmdb` и `active_manual = false`; активны топ `by_votes` по
-  `metadata.vote_count` и ещё `by_popularity` по `metadata.popularity` из остальных (без повторов,
-  без значения — в конце), остальные кандидаты скрыты. Один `UPDATE` разницы; счётчики людей и тегов
-  сдвигает операторный триггер. Затем перестройка поиска с `force` (состав меняется намеренно, без
-  проверки размера) и ISR `{"all": true}` (скрытые страницы фронтенд удалит по 404). Включённые и
-  скрытые вручную, сиды и сущности без TMDB не трогаются.
+**Балл «Рекомендуемые»** (`catalog::ranking`, `modules/catalog/src/ranking.rs`) — сортировка по
+умолчанию, у вышедших фильмов с `imdb_votes ≥ min_votes`:
+`score = weight_quality·q + weight_popularity·p + weight_recency·r`, где `q` — байесовский рейтинг
+IMDb `(v·r + m·C)/(v + m)` (`m` = `trust_votes`, `C` — средний), шкала 5 → 0 … 9 → 1; `p` —
+`ln(1+popularity)/ln(1+p99)` (99-й перцентиль TMDB popularity); `r` — `0.5^(возраст/half_life_years)`.
+Настройки — `catalog_ranking` (одна строка): по умолчанию 0.5 / 0.3 / 0.2, `trust_votes` 5000,
+`half_life_years` 4, `min_votes` 1000, `soon_days` 30. Хранится в `entity_stats.rank_score` и
+`quality`; пересчёт — после «Обновить рейтинги» и сохранения настроек (один `UPDATE` узкой таблицы).
 
-Тесты — `popularity_refresh_from_tmdb_export` (фейковый каталог дампов, повтор — 0 изменений,
-книги и видео не трогаются), `active_rebuild_picks_top_and_keeps_manual` (ручное переключение
-сохраняется, счётчики сходятся с пересчётом, поиск перестроен), разбор дампа — модульный тест.
+**Сортировки** `/entities` (`sort`): `recommended` (по умолчанию, балл; без балла — в конце, новее
+выше), `trending` (TMDB popularity, вышедшие с баллом), `top_rated` (байесовский рейтинг), `new`
+(только вышедшие), `soon` (будущие в окне, ближайшие сверху), `popular`/`rating` (наши оценки),
+`title`. Поиск: `sort=recommended|trending|top_rated` (`rank_score`, `popularity`, `quality` —
+`sortableAttributes`).
+
+**Админка** (запуск вручную, расписания нет; ход — потоком `JobEvent`; одна долгая операция за раз
+— общая блокировка с перестройкой поиска, занято — `409` до потока; без Meilisearch — только БД):
+- **Обновить рейтинги** — `POST /admin/tmdb/stats/stream`: дамп TMDB `movie_ids_*.json.gz`
+  (`TMDB_EXPORTS_URL`, без ключа, ~28 МБ; кроме `video`) → `tmdb_popularity`; IMDb
+  `title.ratings.tsv.gz` (`IMDB_DATASETS_URL`, без ключа, ~9 МБ) → `imdb_rating`, `imdb_votes` по
+  `imdb_id`; шаги `tmdb_export`, `imdb_ratings`, `stats` (с `progress`), `rank`, затем перестройка
+  поиска; `done.stats` — `{tmdb_export, tmdb_updated, imdb_updated, ranked}`.
+- **Пересобрать активные** — `POST /admin/tmdb/active/stream?count=80000` (0–1000000; 250 000 —
+  `?count=250000`): из связанных с TMDB без `active_manual` активны топ `count` вышедших по баллу
+  (без балла — по `tmdb_votes`, `tmdb_popularity`) и все `soon`; остальные (в том числе анонсы и без
+  даты) скрыты. Один `UPDATE` разницы (операторный триггер сдвигает счётчики), затем перестройка
+  поиска с `force` и ISR `{"all": true}`; `done.active` — `{activated, deactivated, soon, active}`.
+  Сначала — «Обновить рейтинги»: топ по текущему баллу.
+- **Настройка сортировки** — `GET /admin/ranking`; `POST /admin/ranking/preview?limit=50` (тело —
+  настройки, топ вышедших по формуле с составляющими `q_part`, `p_part`, `r_part` и `active`, ничего
+  не пишет — подбирать веса на глаз); `PUT /admin/ranking/stream` (сохранить, `rank`, перестройка
+  поиска с `force`). Проверка: веса 0–10, `half_life_years` 0.1–100, голоса 0–10 000 000,
+  `soon_days` 0–365, иначе 400.
+- Редакционные подборки («Выбор редакции») — позже.
+
+Лицензии: IMDb datasets — только личное и некоммерческое использование (как бесплатный TMDB);
+коммерческий запуск — лицензия IMDb.
+
+Тесты: `unreleased_tmdb_films_are_hidden_until_soon`, `ranking_preview_and_save`,
+`search_skips_hidden_and_sorts_by_stats`, `legacy_metadata_tmdb_keys_are_dropped`,
+`stats_refresh_from_tmdb_and_imdb` (фейковые дампы TMDB и IMDb, повтор — 0 изменений),
+`active_rebuild_by_count_keeps_soon_and_manual`; разбор дампов — модульные тесты.
 
 ## Импорт фильмов из TMDB
 
@@ -782,7 +837,8 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `validate.rs` | Проверка slug, строк, URL, ролей; UNIQUE → 409 |
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
 | `search.rs` | Индекс `entities`, `update_index`, перестройка с версиями (в т.ч. по расписанию), `GET /search` |
-| `tmdb.rs` | Операции админки с TMDB: «Обновить popularity» (дамп), «Пересобрать активные» |
+| `tmdb.rs` | Операции админки: «Обновить рейтинги» (дампы TMDB и IMDb), «Пересобрать активные» |
+| `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
 | `publish.rs` | Публикация правки: `Touched`, поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |
 | `admin/` | Админские эндпоинты (`relations.rs` — связанные произведения) |

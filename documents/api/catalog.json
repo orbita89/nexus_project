@@ -21,7 +21,7 @@
           {
             "name": "sort",
             "in": "query",
-            "description": "По умолчанию `new`.",
+            "description": "По умолчанию `recommended`.",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/EntitySort"
@@ -1161,6 +1161,209 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/ranking": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Настройки балла «Рекомендуемые» и окна «Скоро премьера».",
+        "operationId": "get_ranking",
+        "responses": {
+          "200": {
+            "description": "Настройки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RankingSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/ranking/preview": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Предпросмотр: топ вышедших фильмов по формуле с настройками из тела — с составляющими балла и\nпризнаком `active`. Ничего не записывает: подбирать веса, глядя на список.",
+        "operationId": "preview_ranking",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–200, по умолчанию 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RankingSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Топ по формуле",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RankPreviewRow"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные настройки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/ranking/stream": {
+      "put": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Сохранить настройки и применить, потоком: шаг `rank` (пересчёт балла), затем перестройка\nпоиска без проверки размера (меняются сортировка и окно «Скоро премьера»), последним `done`.\nУже идёт перестройка или операция TMDB — `409` до потока.",
+        "operationId": "save_ranking",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RankingSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Сохранено; поток пересчёта",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobEvent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные настройки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже идёт перестройка поиска или операция TMDB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/search/reindex": {
       "post": {
         "tags": [
@@ -1555,29 +1758,20 @@
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Пересобрать активные: из сущностей со связью TMDB, кроме переключённых вручную\n(`active_manual`), активны топ `by_votes` по `metadata.vote_count` и ещё `by_popularity` самых\nпопулярных (`metadata.popularity`) из остальных, без повторов; остальные скрыты. Потоком: шаг\n`activate`, затем перестройка поиска (без проверки размера — состав меняется намеренно) и\nпересборка статики, последним `done` (`active` — итог).",
-        "description": "Включённые и скрытые в админке (`PATCH active`), сиды и сущности без TMDB не трогаются.",
+        "summary": "«Пересобрать активные»: из сущностей со связью TMDB, кроме переключённых вручную\n(`active_manual`), активны топ `count` **вышедших** по баллу «Рекомендуемые» (без балла — по\nчислу оценок TMDB и popularity) и все «Скоро премьера» (выход в ближайшие `soon_days` дней);\nостальные — скрыты, в том числе невышедшие позже и без даты. Потоком: шаг `activate`, затем\nперестройка поиска без проверки размера и ISR `{\"all\": true}`; последним `done` (`active`).",
+        "description": "Сперва «Обновить рейтинги»: топ берётся по текущему баллу. Включённые и скрытые в админке, сиды и\nсущности без TMDB не трогаются.",
         "operationId": "active_stream",
         "parameters": [
           {
-            "name": "by_votes",
+            "name": "count",
             "in": "query",
-            "description": "Топ по `metadata.vote_count`, 0–1000000, по умолчанию 40000.",
+            "description": "Топ по баллу «Рекомендуемые» (без балла — по числу оценок TMDB), 0–1000000, по умолчанию\n80000. Плюс все «Скоро премьера».",
             "required": false,
             "schema": {
               "type": "integer",
               "format": "int64"
-            }
-          },
-          {
-            "name": "by_popularity",
-            "in": "query",
-            "description": "Плюс самые популярные (`metadata.popularity`) из остальных, 0–1000000, по умолчанию 40000.",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            },
+            "example": 80000
           }
         ],
         "responses": {
@@ -1592,7 +1786,7 @@
             }
           },
           "400": {
-            "description": "Неверные числа",
+            "description": "Неверное число",
             "content": {
               "application/json": {
                 "schema": {
@@ -1622,7 +1816,7 @@
             }
           },
           "409": {
-            "description": "Уже идёт перестройка поиска или операция TMDB",
+            "description": "Уже идёт перестройка поиска или операция каталога",
             "content": {
               "application/json": {
                 "schema": {
@@ -1639,14 +1833,13 @@
         ]
       }
     },
-    "/api/v1/catalog/admin/tmdb/popularity/stream": {
+    "/api/v1/catalog/admin/tmdb/stats/stream": {
       "post": {
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Обновить `metadata.popularity` фильмов из ежедневного дампа TMDB (без ключа API), потоком\n`text/event-stream`: `plan`, `step` по шагам `tmdb_export`, `popularity` (с `progress`), затем\nшаги перестройки поиска, последним `done` (`popularity` — итог).",
-        "description": "Меняется только ключ `popularity` (остальная `metadata` — как есть), только у фильмов со\nсвязью в `entity_tmdb`. Уже идёт перестройка или другая такая операция — `409` до потока.\nДоводится до конца, даже если клиент закрыл соединение.",
-        "operationId": "popularity_stream",
+        "summary": "«Обновить рейтинги», потоком `text/event-stream`: шаги `tmdb_export` (ежедневный дамп TMDB,\nбез ключа), `imdb_ratings` (`title.ratings.tsv.gz`), `stats` (запись в `entity_stats`, с\n`progress`), `rank` (пересчёт балла «Рекомендуемые»), затем перестройка поиска; последним\n`done` (`stats` — итог). Уже идёт перестройка или другая операция каталога — `409` до потока.\nДоводится до конца, даже если клиент закрыл соединение.",
+        "operationId": "stats_stream",
         "responses": {
           "200": {
             "description": "Поток событий",
@@ -1679,7 +1872,7 @@
             }
           },
           "409": {
-            "description": "Уже идёт перестройка поиска или операция TMDB",
+            "description": "Уже идёт перестройка поиска или операция каталога",
             "content": {
               "application/json": {
                 "schema": {
@@ -1701,14 +1894,14 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Список сущностей. `sort`: `new` (по умолчанию: новинки сверху, без даты — в конце), `popular`\n(больше оценок), `rating` (выше средняя, без оценок — в конце), `title`.",
-        "description": "Оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в\nтаблицы рецензий не ходит. Только активные сущности.",
+        "summary": "Список видимых сущностей (активные; фильмы из TMDB — вышедшие или «Скоро премьера»). `sort`:\n`recommended` (по умолчанию: балл — рейтинг IMDb + популярность + свежесть), `trending`\n(смотрят сейчас), `top_rated` (рейтинг IMDb), `new` (вышедшие, новые сверху), `soon` (ближайшие\nпремьеры), `popular` (больше наших оценок), `rating` (выше наша средняя), `title`.",
+        "description": "Наши оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в\nтаблицы рецензий не ходит.",
         "operationId": "list_entities",
         "parameters": [
           {
             "name": "sort",
             "in": "query",
-            "description": "По умолчанию `new`.",
+            "description": "По умолчанию `recommended`.",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/EntitySort"
@@ -1805,7 +1998,7 @@
           "catalog"
         ],
         "summary": "Карточка сущности: поля, теги и участники в порядке титров.",
-        "description": "Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика\nфронтенда (SSG/ISR), сюда приходят её пересборка и админка.\n\nНеактивная сущность — 404 для всех, кроме админа (ему — с неактивными связанными).",
+        "description": "Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика\nфронтенда (SSG/ISR), сюда приходят её пересборка и админка.\n\nНевидимая (скрыта или фильм из TMDB ещё не в окне «Скоро премьера») — 404 для всех, кроме\nадмина (ему — и невидимые связанные).",
         "operationId": "get_entity",
         "parameters": [
           {
@@ -1864,7 +2057,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Похожие на сущность: тот же тип, больше общих тегов — выше (жанр весит вдвое), при равенстве —\nновее. Только активные; у неактивной — 404. Без самой\nсущности и её связанных (они и так на карточке). Нет тегов — пустая страница.",
+        "summary": "Похожие на сущность: тот же тип, больше общих тегов — выше (жанр весит вдвое), при равенстве —\nновее. Только видимые; у невидимой — 404. Без самой\nсущности и её связанных (они и так на карточке). Нет тегов — пустая страница.",
         "description": "Первая версия без ML: один запрос с подсчётом пересечения тегов по `entity_tags (tag_id)`.",
         "operationId": "list_similar_entities",
         "parameters": [
@@ -2041,7 +2234,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры.\nСортировка по релевантности; `sort=popularity` / `sort=votes` — по `metadata.popularity` /\n`metadata.vote_count` (TMDB), у кого поля нет — в конце.",
+        "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры.\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце).",
         "description": "Индекс обновляется после изменений в админке с задержкой в доли секунды.",
         "operationId": "search",
         "parameters": [
@@ -2247,6 +2440,7 @@
         "required": [
           "activated",
           "deactivated",
+          "soon",
           "active"
         ],
         "properties": {
@@ -2262,6 +2456,11 @@
           "deactivated": {
             "type": "integer",
             "format": "int64"
+          },
+          "soon": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Из них «Скоро премьера» (включаются всегда)."
           }
         }
       },
@@ -2308,7 +2507,8 @@
             "type": "object",
             "required": [
               "active",
-              "active_manual"
+              "active_manual",
+              "visible"
             ],
             "properties": {
               "active": {
@@ -2317,6 +2517,10 @@
               "active_manual": {
                 "type": "boolean",
                 "description": "`active` переключали в админке: «пересобрать активные» её не трогает."
+              },
+              "visible": {
+                "type": "boolean",
+                "description": "Видна на сайте (активна и вышла / «скоро» / вручную / не из TMDB)."
               }
             }
           }
@@ -2578,22 +2782,22 @@
             "type": "boolean",
             "description": "Ни один шаг не упал (пропущенные не считаются)."
           },
-          "popularity": {
+          "reindex": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/PopularityResult",
-                "description": "«Обновить popularity»: итог шага `popularity`."
+                "$ref": "#/components/schemas/ReindexResult",
+                "description": "Перестройка: что получилось (нет, если она прервалась)."
               },
               {
                 "type": "null"
               }
             ]
           },
-          "reindex": {
+          "stats": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/ReindexResult",
-                "description": "Перестройка: что получилось (нет, если она прервалась)."
+                "$ref": "#/components/schemas/StatsResult",
+                "description": "«Обновить рейтинги»: итог."
               },
               {
                 "type": "null"
@@ -2612,13 +2816,15 @@
           "title",
           "metadata",
           "active",
+          "visible",
+          "release_status",
           "created_at",
           "updated_at"
         ],
         "properties": {
           "active": {
             "type": "boolean",
-            "description": "Видна на сайте. Неактивная хранится в БД, но её нет в списках, поиске, похожих и\nфильмографиях, а карточка — 404 для всех, кроме админа."
+            "description": "Включена. Скрытая хранится в БД, но её нет в списках, поиске, похожих и фильмографиях, а\nкарточка — 404 для всех, кроме админа."
           },
           "cover_url": {
             "type": [
@@ -2640,6 +2846,21 @@
             "type": "string",
             "format": "uuid"
           },
+          "imdb_rating": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Статистика (`entity_stats`): IMDb, TMDB и балл «Рекомендуемые»; нет — `null`."
+          },
+          "imdb_votes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "kind": {
             "$ref": "#/components/schemas/EntityKind"
           },
@@ -2654,12 +2875,31 @@
             ],
             "example": "Dune"
           },
+          "quality": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Байесовский рейтинг IMDb (сортировка `top_rated`)."
+          },
+          "rank_score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Балл «Рекомендуемые» (сортировка по умолчанию); у невышедших и малоизвестных — `null`."
+          },
           "release_date": {
             "type": [
               "string",
               "null"
             ],
             "format": "date"
+          },
+          "release_status": {
+            "$ref": "#/components/schemas/ReleaseStatus"
           },
           "slug": {
             "type": "string",
@@ -2669,9 +2909,28 @@
             "type": "string",
             "example": "Дюна"
           },
+          "tmdb_popularity": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "TMDB popularity: «смотрят сейчас»."
+          },
+          "tmdb_votes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "visible": {
+            "type": "boolean",
+            "description": "Видна на сайте: `active` и (для фильмов из TMDB) уже вышла или «Скоро премьера», либо\nвключена вручную."
           }
         }
       },
@@ -2760,7 +3019,11 @@
         "type": "string",
         "description": "Порядок списка сущностей.",
         "enum": [
+          "recommended",
+          "trending",
+          "top_rated",
           "new",
+          "soon",
           "popular",
           "rating",
           "title"
@@ -2786,6 +3049,23 @@
             "type": "string",
             "format": "uuid"
           },
+          "imdb_rating": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Рейтинг IMDb (0–10) и число голосов; нет — `null`.",
+            "example": 8.0
+          },
+          "imdb_votes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 912000
+          },
           "kind": {
             "$ref": "#/components/schemas/EntityKind"
           },
@@ -2802,6 +3082,10 @@
               "null"
             ],
             "format": "date"
+          },
+          "release_status": {
+            "$ref": "#/components/schemas/ReleaseStatus",
+            "description": "По сегодняшней дате: `soon` — бейдж «Скоро премьера»."
           },
           "slug": {
             "type": "string",
@@ -3072,17 +3356,6 @@
               "CA"
             ]
           },
-          "popularity": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double",
-            "description": "Популярность TMDB: активность за последние дни, сортировка поиска `popularity`. 0–1000000.",
-            "example": 704.107,
-            "maximum": 1000000,
-            "minimum": 0
-          },
           "runtime_min": {
             "type": [
               "integer",
@@ -3140,16 +3413,6 @@
             "example": [
               "Пустыню снимали в Иордании и ОАЭ."
             ]
-          },
-          "vote_count": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Число оценок на TMDB: известность за всё время, сортировка поиска `votes`.",
-            "example": 867,
-            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -3175,7 +3438,8 @@
                   "type": "object",
                   "required": [
                     "active",
-                    "active_manual"
+                    "active_manual",
+                    "visible"
                   ],
                   "properties": {
                     "active": {
@@ -3184,6 +3448,10 @@
                     "active_manual": {
                       "type": "boolean",
                       "description": "`active` переключали в админке: «пересобрать активные» её не трогает."
+                    },
+                    "visible": {
+                      "type": "boolean",
+                      "description": "Видна на сайте (активна и вышла / «скоро» / вручную / не из TMDB)."
                     }
                   }
                 }
@@ -3241,6 +3509,23 @@
                   "type": "string",
                   "format": "uuid"
                 },
+                "imdb_rating": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "format": "double",
+                  "description": "Рейтинг IMDb (0–10) и число голосов; нет — `null`.",
+                  "example": 8.0
+                },
+                "imdb_votes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "example": 912000
+                },
                 "kind": {
                   "$ref": "#/components/schemas/EntityKind"
                 },
@@ -3257,6 +3542,10 @@
                     "null"
                   ],
                   "format": "date"
+                },
+                "release_status": {
+                  "$ref": "#/components/schemas/ReleaseStatus",
+                  "description": "По сегодняшней дате: `soon` — бейдж «Скоро премьера»."
                 },
                 "slug": {
                   "type": "string",
@@ -3538,36 +3827,6 @@
           }
         }
       },
-      "PopularityResult": {
-        "type": "object",
-        "description": "Итог «обновить popularity».",
-        "required": [
-          "export",
-          "films",
-          "updated"
-        ],
-        "properties": {
-          "export": {
-            "type": "string",
-            "description": "Файл дампа.",
-            "example": "movie_ids_10_11_2026.json.gz"
-          },
-          "films": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Фильмов с popularity в дампе.",
-            "example": 1192090,
-            "minimum": 0
-          },
-          "updated": {
-            "type": "integer",
-            "format": "int64",
-            "description": "У скольких сущностей popularity изменилась.",
-            "example": 950000,
-            "minimum": 0
-          }
-        }
-      },
       "ProgressEvent": {
         "type": "object",
         "description": "Счётчик длинного шага: «Проиндексировано 500/100000».",
@@ -3616,6 +3875,139 @@
           "to_id": {
             "type": "string",
             "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RankPreviewRow": {
+        "type": "object",
+        "description": "Строка предпросмотра: фильм и составляющие балла.",
+        "required": [
+          "slug",
+          "title",
+          "active",
+          "quality",
+          "q_part",
+          "p_part",
+          "r_part",
+          "score"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "imdb_rating": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "imdb_votes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "p_part": {
+            "type": "number",
+            "format": "double"
+          },
+          "q_part": {
+            "type": "number",
+            "format": "double",
+            "description": "Вклад рейтинга, популярности и свежести; `score` — их сумма."
+          },
+          "quality": {
+            "type": "number",
+            "format": "double",
+            "description": "Байесовский рейтинг."
+          },
+          "r_part": {
+            "type": "number",
+            "format": "double"
+          },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "score": {
+            "type": "number",
+            "format": "double"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "tmdb_popularity": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "RankingSettings": {
+        "type": "object",
+        "description": "Настройки балла «Рекомендуемые» и окна «Скоро премьера» (`catalog_ranking`).",
+        "required": [
+          "weight_quality",
+          "weight_popularity",
+          "weight_recency",
+          "trust_votes",
+          "half_life_years",
+          "min_votes",
+          "soon_days"
+        ],
+        "properties": {
+          "half_life_years": {
+            "type": "number",
+            "format": "double",
+            "description": "Через сколько лет свежесть падает вдвое, 0.1–100.",
+            "example": 4.0
+          },
+          "min_votes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Меньше голосов IMDb — без балла.",
+            "example": 1000
+          },
+          "soon_days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Окно «Скоро премьера», дней (0–365).",
+            "example": 30
+          },
+          "trust_votes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "«Доверительные» голоса байесовского рейтинга: меньше голосов — ближе к среднему.",
+            "example": 5000
+          },
+          "weight_popularity": {
+            "type": "number",
+            "format": "double",
+            "description": "Вес TMDB popularity, 0–10.",
+            "example": 0.3
+          },
+          "weight_quality": {
+            "type": "number",
+            "format": "double",
+            "description": "Вес рейтинга IMDb, 0–10.",
+            "example": 0.5
+          },
+          "weight_recency": {
+            "type": "number",
+            "format": "double",
+            "description": "Вес свежести, 0–10.",
+            "example": 0.2
           }
         },
         "additionalProperties": false
@@ -3687,12 +4079,22 @@
           "remake"
         ]
       },
+      "ReleaseStatus": {
+        "type": "string",
+        "description": "Статус выхода по сегодняшней дате.",
+        "enum": [
+          "released",
+          "soon",
+          "announced"
+        ]
+      },
       "SearchSort": {
         "type": "string",
-        "description": "Сортировка поиска (без неё — по релевантности). Значения — из `metadata` фильма (TMDB);\nу кого поля нет — в конце.",
+        "description": "Сортировка поиска (без неё — по релевантности); у кого значения нет — в конце.",
         "enum": [
-          "popularity",
-          "votes"
+          "recommended",
+          "trending",
+          "top_rated"
         ]
       },
       "SeriesMetadata": {
@@ -3830,6 +4232,40 @@
         },
         "additionalProperties": false
       },
+      "StatsResult": {
+        "type": "object",
+        "description": "Итог «обновить рейтинги».",
+        "required": [
+          "tmdb_export",
+          "tmdb_updated",
+          "imdb_updated",
+          "ranked"
+        ],
+        "properties": {
+          "imdb_updated": {
+            "type": "integer",
+            "format": "int64",
+            "description": "У скольких — рейтинг IMDb.",
+            "minimum": 0
+          },
+          "ranked": {
+            "type": "integer",
+            "format": "int64",
+            "description": "У скольких есть балл «Рекомендуемые»."
+          },
+          "tmdb_export": {
+            "type": "string",
+            "description": "Файл дампа TMDB.",
+            "example": "movie_ids_10_11_2026.json.gz"
+          },
+          "tmdb_updated": {
+            "type": "integer",
+            "format": "int64",
+            "description": "У скольких сущностей изменилась TMDB popularity.",
+            "minimum": 0
+          }
+        }
+      },
       "Step": {
         "type": "string",
         "description": "Шаг операции.",
@@ -3843,7 +4279,9 @@
           "rotate",
           "isr",
           "tmdb_export",
-          "popularity",
+          "imdb_ratings",
+          "stats",
+          "rank",
           "activate"
         ]
       },

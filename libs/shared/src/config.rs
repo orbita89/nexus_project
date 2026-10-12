@@ -29,6 +29,8 @@ pub struct Config {
     /// Каталог ежедневных дампов TMDB (`movie_ids_MM_DD_YYYY.json.gz`) для «обновить popularity»
     /// в админке, `TMDB_EXPORTS_URL`. Ключ API не нужен.
     pub tmdb_exports_url: String,
+    /// Наборы данных IMDb (`title.ratings.tsv.gz`) для «Обновить рейтинги», `IMDB_DATASETS_URL`.
+    pub imdb_datasets_url: String,
     /// Секрет подписи JWT (HS256). Не короче [`MIN_JWT_SECRET_LEN`] байт.
     pub jwt_secret: String,
     /// SMTP для писем, например `smtp://mailpit:1025` или `smtps://user:pass@smtp.example.com`.
@@ -167,6 +169,9 @@ impl Config {
             search_reindex_interval_secs: number_or("SEARCH_REINDEX_INTERVAL_SECS", 86_400),
             search_reindex_min_percent: percent_or("SEARCH_REINDEX_MIN_PERCENT", 80),
             tmdb_exports_url: var_or("TMDB_EXPORTS_URL", "https://files.tmdb.org/p/exports")
+                .trim_end_matches('/')
+                .to_string(),
+            imdb_datasets_url: var_or("IMDB_DATASETS_URL", "https://datasets.imdbws.com")
                 .trim_end_matches('/')
                 .to_string(),
             jwt_secret: jwt_secret_from_env(),

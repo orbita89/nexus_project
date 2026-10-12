@@ -51,8 +51,8 @@ CYRILLIC = re.compile("[а-яё]", re.IGNORECASE)
 TAG_NAMES = {**wd.GENRE_NAMES, "music": "Музыка", "tv-movie": "Телефильм"}
 MOVIE_FIELDS = ("title", "original_title", "description", "release_date", "cover_url", "metadata")
 PERSON_FIELDS = ("full_name", "birth_date", "photo_url", "bio")
-# Ключи metadata из TMDB: не под защитой правок (их обновляют импорт и админка «Обновить
-# popularity»), иначе свежая popularity выглядела бы ручной правкой metadata.
+# Устаревшие ключи metadata (теперь entity_stats): при сравнении не учитываются, при записи
+# убираются; разом — --cleanup-metadata.
 TMDB_KEYS = ("popularity", "vote_count")
 
 
@@ -108,11 +108,28 @@ class MFilm:
     metadata: dict
     tags: list[str]
     credits: list[MCredit] = field(default_factory=list)
+    # entity_stats: известность из TMDB и id IMDb (рейтинг IMDb пишет админка «Обновить рейтинги»).
+    imdb_id: str | None = None
+    tmdb_popularity: float | None = None
+    tmdb_votes: int | None = None
 
     def fields(self) -> dict:
         return {"title": self.title, "original_title": self.original_title,
                 "description": self.description, "release_date": self.release_date,
                 "cover_url": self.cover_url, "metadata": self.metadata}
+
+
+def tmdb_numbers(t: dict | None) -> dict:
+    """Известность и id IMDb из записи кэша TMDB — для entity_stats."""
+    if not t:
+        return {}
+    pop, votes, imdb = t.get("popularity"), t.get("vote_count"), t.get("imdb_id")
+    return {
+        "tmdb_popularity": round(float(pop), 3)
+        if isinstance(pop, (int, float)) and 0 <= pop <= 1_000_000 else None,
+        "tmdb_votes": votes if isinstance(votes, int) and votes >= 0 else None,
+        "imdb_id": imdb if isinstance(imdb, str) and imdb.startswith("tt") else None,
+    }
 
 
 def first(values, cyrillic: bool = False):
@@ -217,13 +234,6 @@ class Merger:
                 studios.append(s)
         if studios := studios[:MAX_STUDIOS]:
             metadata["studios"] = studios
-        # Известность по TMDB: сортировки поиска и «Пересобрать активные» в админке.
-        popularity = t.get("popularity") if t else None
-        if isinstance(popularity, (int, float)) and 0 <= popularity <= 1_000_000:
-            metadata["popularity"] = round(float(popularity), 3)
-        votes = t.get("vote_count") if t else None
-        if isinstance(votes, int) and votes >= 0:
-            metadata["vote_count"] = votes
 
         tags = [GENRE_SLUGS[g] for g in (t.get("genres") if t else None) or [] if g in GENRE_SLUGS]
         poster = f"{POSTER}{t['poster_path']}" if t and t.get("poster_path") else None
@@ -235,7 +245,8 @@ class Merger:
             title=title[:wd.MAX_TITLE], original_title=original[:wd.MAX_TITLE] if original else None,
             description=((clean(t.get("overview")) if t else None) or (w and w.description) or None),
             release_date=release, cover_url=poster or free_image(w and w.cover_url),
-            metadata=metadata, tags=unique(tags + (w.tags if w else [])))
+            metadata=metadata, tags=unique(tags + (w.tags if w else [])),
+            **tmdb_numbers(t))
         if film.description:
             film.description = film.description[:wd.MAX_LONG_TEXT]
 
@@ -377,42 +388,59 @@ async def ensure_tags(conn) -> dict[str, object]:
     return {r["slug"]: r["id"] for r in rows}
 
 
-NUMBERS = """
--- Поля TMDB (TMDB_KEYS) — не под защитой правок: vote_count — из кэша, popularity — только если
--- её нет (свежую пишет админка «Обновить popularity» из ежедневного дампа).
-WITH want AS (
-    SELECT e.id, e.metadata AS cur,
-           (e.metadata - 'vote_count')
-               || jsonb_strip_nulls(jsonb_build_object('vote_count', n.vote_count))
-               || CASE WHEN e.metadata ? 'popularity' THEN '{}'::jsonb
-                       ELSE jsonb_strip_nulls(jsonb_build_object('popularity', n.popularity)) END
-               AS md
-    FROM entity_tmdb t
-    JOIN tmdb_numbers n ON n.tmdb_id = t.tmdb_id
-    JOIN entities e ON e.id = t.entity_id
-    WHERE e.kind = 'movie'
-)
-UPDATE entities e SET metadata = w.md FROM want w WHERE e.id = w.id AND w.md <> w.cur;
+# entity_stats из записей TMDB: imdb_id и tmdb_votes — из кэша, tmdb_popularity — только если её
+# нет (свежую пишет админка «Обновить рейтинги» из ежедневного дампа).
+STATS_UPSERT = """
+INSERT INTO entity_stats AS s (entity_id, imdb_id, tmdb_popularity, tmdb_votes)
+SELECT * FROM unnest($1::uuid[], $2::text[], $3::float8[], $4::int[])
+ON CONFLICT (entity_id) DO UPDATE
+SET imdb_id = coalesce(EXCLUDED.imdb_id, s.imdb_id),
+    tmdb_votes = coalesce(EXCLUDED.tmdb_votes, s.tmdb_votes),
+    tmdb_popularity = coalesce(s.tmdb_popularity, EXCLUDED.tmdb_popularity)
+WHERE s.imdb_id IS DISTINCT FROM coalesce(EXCLUDED.imdb_id, s.imdb_id)
+   OR s.tmdb_votes IS DISTINCT FROM coalesce(EXCLUDED.tmdb_votes, s.tmdb_votes)
+   OR (s.tmdb_popularity IS NULL AND EXCLUDED.tmdb_popularity IS NOT NULL)
 """
 
 
 async def update_numbers(conn, movies: Path) -> int:
-    """--numbers-only: vote_count (и недостающая popularity) из кэша TMDB — одним UPDATE, а не
-    проходом по каждому фильму (полное слияние ради этого — часы)."""
-    rows = []
+    """--numbers-only: entity_stats (imdb_id, tmdb_votes, недостающая popularity) из кэша TMDB —
+    пачками по 50 000, а не полным слиянием (часы)."""
+    rows = {}
     for t in tmdb_records(movies, 0):
-        pop, votes = t.get("popularity"), t.get("vote_count")
-        pop = round(float(pop), 3) if isinstance(pop, (int, float)) and 0 <= pop <= 1_000_000 else None
-        votes = votes if isinstance(votes, int) and votes >= 0 else None
-        if pop is not None or votes is not None:
-            rows.append((t["id"], pop, votes))
-    log.info("numbers: %d films with TMDB popularity/vote_count", len(rows))
-    async with conn.transaction():
-        await conn.execute("""CREATE TEMP TABLE tmdb_numbers (
-                                  tmdb_id integer PRIMARY KEY, popularity float8, vote_count integer
-                              ) ON COMMIT DROP""")
-        await conn.copy_records_to_table("tmdb_numbers", records=rows)
-        return int((await conn.execute(NUMBERS)).split()[-1])
+        n = tmdb_numbers(t)
+        if any(v is not None for v in n.values()):
+            rows[t["id"]] = n
+    links = await conn.fetch("SELECT entity_id, tmdb_id FROM entity_tmdb")
+    batch = [(r["entity_id"], rows[r["tmdb_id"]]) for r in links if r["tmdb_id"] in rows]
+    log.info("numbers: %d linked films with TMDB numbers", len(batch))
+    changed = 0
+    for i in range(0, len(batch), 50_000):
+        part = batch[i:i + 50_000]
+        result = await conn.execute(
+            STATS_UPSERT, [x[0] for x in part], [x[1]["imdb_id"] for x in part],
+            [x[1]["tmdb_popularity"] for x in part], [x[1]["tmdb_votes"] for x in part])
+        changed += int(result.split()[-1])
+    return changed
+
+
+async def cleanup_metadata(conn) -> int:
+    """--cleanup-metadata: убрать устаревшие metadata.popularity/vote_count (теперь entity_stats)
+    пачками по 20 000 строк — у ~1 млн строк это ~25 мин (GIN-индексы)."""
+    cleaned, after = 0, None
+    while True:
+        ids = await conn.fetch(
+            """SELECT id FROM entities WHERE ($1::uuid IS NULL OR id > $1)
+               ORDER BY id LIMIT 20000""", after)
+        if not ids:
+            return cleaned
+        after = ids[-1]["id"]
+        result = await conn.execute(
+            """UPDATE entities SET metadata = metadata - 'popularity' - 'vote_count'
+               WHERE id = ANY($1::uuid[]) AND metadata ?| array['popularity', 'vote_count']""",
+            [r["id"] for r in ids])
+        cleaned += int(result.split()[-1])
+        log.info("cleanup: %d rows cleaned so far", cleaned)
 
 
 def suffix(tmdb_id, qid) -> str:
@@ -564,8 +592,8 @@ async def update_films(conn, pairs: list[tuple[MFilm, dict]], stats: Stats):
             old_written["metadata"] = split_tmdb(old_written["metadata"])[0]
         changes, written = plan_fields({**current, "metadata": own_cur}, old_written, l["created"],
                                        {**new, "metadata": own_new}, MOVIE_FIELDS, clear)
-        tmdb = {**tmdb_new, **({"popularity": tmdb_cur["popularity"]} if "popularity" in tmdb_cur else {})}
-        metadata = {**changes.get("metadata", own_cur), **tmdb}
+        # Устаревшие ключи TMDB (теперь entity_stats) из metadata уходят.
+        metadata = changes.get("metadata", own_cur)
         if metadata != current["metadata"]:
             changes["metadata"] = metadata
         else:
@@ -811,6 +839,11 @@ async def merge_batch(conn, films: list[MFilm], tags: dict, by_title: dict, done
                 """INSERT INTO entity_tmdb (entity_id, tmdb_id)
                    SELECT * FROM unnest($1::uuid[], $2::int[]) ON CONFLICT DO NOTHING""",
                 [x[0] for x in tmdb_links], [x[1] for x in tmdb_links])
+        stats_rows = [(l["entity_id"], f) for f, l in pairs if f.tmdb_id]
+        if stats_rows:
+            await conn.execute(
+                STATS_UPSERT, [x[0] for x in stats_rows], [x[1].imdb_id for x in stats_rows],
+                [x[1].tmdb_popularity for x in stats_rows], [x[1].tmdb_votes for x in stats_rows])
         adopted = [l["entity_id"] for _, l in pairs if not l["created"]]
         if adopted:
             await conn.execute(
@@ -849,13 +882,18 @@ async def run(args):
     dsn = env("DATABASE_URL")
     if not dsn:
         sys.exit("DATABASE_URL is required")
-    if args.numbers_only:
+    if args.numbers_only or args.cleanup_metadata:
         conn = await asyncpg.connect(dsn)
         try:
             started = time.monotonic()
-            updated = await update_numbers(conn, Path(args.tmdb_cache) / "movies.jsonl")
-            log.info("numbers: metadata of %d films updated (%.0fs)", updated,
-                     time.monotonic() - started)
+            if args.numbers_only:
+                updated = await update_numbers(conn, Path(args.tmdb_cache) / "movies.jsonl")
+                log.info("numbers: entity_stats of %d films updated (%.0fs)", updated,
+                         time.monotonic() - started)
+            if args.cleanup_metadata:
+                cleaned = await cleanup_metadata(conn)
+                log.info("cleanup: metadata of %d films cleaned (%.0fs)", cleaned,
+                         time.monotonic() - started)
         finally:
             await conn.close()
         log.info(NEXT)
@@ -942,8 +980,9 @@ async def run(args):
     log.info(NEXT)
 
 
-NEXT = ("next: admin → «Пересобрать активные» (POST /api/v1/catalog/admin/tmdb/active/stream): "
-        "new films are hidden until then; it also rebuilds search")
+NEXT = ("next: admin → «Обновить рейтинги» (POST /api/v1/catalog/admin/tmdb/stats/stream), then "
+        "«Пересобрать активные» (.../tmdb/active/stream?count=80000): new films are hidden until "
+        "then; both rebuild search")
 
 
 def main():
@@ -956,8 +995,10 @@ def main():
     p.add_argument("--tmdb-limit", type=int, default=0, help="only the first N cached TMDB films")
     p.add_argument("--batch-size", type=int, default=500, help="films per DB transaction")
     p.add_argument("--numbers-only", action="store_true",
-                   help="only refresh vote_count (and missing popularity) from the TMDB cache, "
-                        "one UPDATE (e.g. after a fresh fetch_tmdb.py)")
+                   help="only refresh entity_stats (imdb_id, tmdb_votes, missing popularity) from "
+                        "the TMDB cache (e.g. after a fresh fetch_tmdb.py)")
+    p.add_argument("--cleanup-metadata", action="store_true",
+                   help="remove legacy metadata.popularity/vote_count (now entity_stats), ~25 min")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,

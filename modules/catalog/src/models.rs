@@ -6,6 +6,56 @@ use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+/// Видна на сайте (SQL, алиас `e`): активна и — если пришла из TMDB (`entity_tmdb`) — уже вышла
+/// или выходит в ближайшие `catalog_ranking.soon_days` дней («Скоро премьера»); включённая вручную
+/// (`active_manual`) — видна всегда. Невышедшие и без даты скрываются сами, без заданий: статус
+/// считается по сегодняшней дате.
+macro_rules! visible_sql {
+    () => {
+        "(e.active AND (e.active_manual \
+         OR NOT EXISTS (SELECT 1 FROM entity_tmdb vt WHERE vt.entity_id = e.id) \
+         OR coalesce(e.release_date <= current_date + (SELECT vr.soon_days FROM catalog_ranking vr), \
+                     false)))"
+    };
+}
+
+/// Статус выхода (SQL, алиас `e`): `released`, `soon` (в окне «Скоро премьера»), `announced`.
+macro_rules! release_status_sql {
+    () => {
+        "(CASE WHEN e.release_date <= current_date THEN 'released' \
+         WHEN e.release_date <= current_date + (SELECT sr.soon_days FROM catalog_ranking sr) \
+         THEN 'soon' ELSE 'announced' END)"
+    };
+}
+
+pub const VISIBLE: &str = visible_sql!();
+
+/// Статус выхода по сегодняшней дате.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseStatus {
+    /// Уже вышла (или не фильм из TMDB без даты — см. `visible`).
+    #[default]
+    Released,
+    /// Выходит в ближайшие `soon_days` дней: «Скоро премьера».
+    Soon,
+    /// Позже или без даты.
+    Announced,
+}
+
+impl TryFrom<String> for ReleaseStatus {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "released" => Ok(Self::Released),
+            "soon" => Ok(Self::Soon),
+            "announced" => Ok(Self::Announced),
+            other => Err(format!("unknown release status {other:?}")),
+        }
+    }
+}
+
 /// Тип сущности (Postgres enum `entity_kind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "entity_kind", rename_all = "lowercase")]
@@ -56,10 +106,26 @@ pub struct EntitySummary {
     pub original_title: Option<String>,
     pub release_date: Option<NaiveDate>,
     pub cover_url: Option<String>,
+    /// По сегодняшней дате: `soon` — бейдж «Скоро премьера».
+    #[serde(default)]
+    #[sqlx(try_from = "String")]
+    pub release_status: ReleaseStatus,
+    /// Рейтинг IMDb (0–10) и число голосов; нет — `null`.
+    #[serde(default)]
+    #[schema(example = 8.0)]
+    pub imdb_rating: Option<f64>,
+    #[serde(default)]
+    #[schema(example = 912_000)]
+    pub imdb_votes: Option<i32>,
 }
 
-pub const ENTITY_SUMMARY_COLUMNS: &str =
-    "e.id, e.kind, e.slug, e.title, e.original_title, e.release_date, e.cover_url";
+pub const ENTITY_SUMMARY_COLUMNS: &str = concat!(
+    "e.id, e.kind, e.slug, e.title, e.original_title, e.release_date, e.cover_url, ",
+    release_status_sql!(),
+    " AS release_status, \
+     (SELECT es.imdb_rating FROM entity_stats es WHERE es.entity_id = e.id) AS imdb_rating, \
+     (SELECT es.imdb_votes FROM entity_stats es WHERE es.entity_id = e.id) AS imdb_votes"
+);
 
 /// Сущность целиком (строка `entities`).
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
@@ -78,15 +144,40 @@ pub struct Entity {
     /// Поля, специфичные для `kind`.
     #[schema(value_type = crate::metadata::Metadata)]
     pub metadata: Value,
-    /// Видна на сайте. Неактивная хранится в БД, но её нет в списках, поиске, похожих и
-    /// фильмографиях, а карточка — 404 для всех, кроме админа.
+    /// Включена. Скрытая хранится в БД, но её нет в списках, поиске, похожих и фильмографиях, а
+    /// карточка — 404 для всех, кроме админа.
     pub active: bool,
+    /// Видна на сайте: `active` и (для фильмов из TMDB) уже вышла или «Скоро премьера», либо
+    /// включена вручную.
+    pub visible: bool,
+    #[sqlx(try_from = "String")]
+    pub release_status: ReleaseStatus,
+    /// Статистика (`entity_stats`): IMDb, TMDB и балл «Рекомендуемые»; нет — `null`.
+    pub imdb_rating: Option<f64>,
+    pub imdb_votes: Option<i32>,
+    /// TMDB popularity: «смотрят сейчас».
+    pub tmdb_popularity: Option<f64>,
+    pub tmdb_votes: Option<i32>,
+    /// Байесовский рейтинг IMDb (сортировка `top_rated`).
+    pub quality: Option<f64>,
+    /// Балл «Рекомендуемые» (сортировка по умолчанию); у невышедших и малоизвестных — `null`.
+    pub rank_score: Option<f64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-pub const ENTITY_COLUMNS: &str = "e.id, e.kind, e.slug, e.title, e.original_title, e.description, \
-     e.release_date, e.cover_url, e.metadata, e.active, e.created_at, e.updated_at";
+pub const ENTITY_COLUMNS: &str = concat!(
+    "e.id, e.kind, e.slug, e.title, e.original_title, e.description, \
+     e.release_date, e.cover_url, e.metadata, e.active, ",
+    visible_sql!(),
+    " AS visible, ",
+    release_status_sql!(),
+    " AS release_status, es.imdb_rating, es.imdb_votes, es.tmdb_popularity, es.tmdb_votes, \
+     es.quality, es.rank_score, e.created_at, e.updated_at"
+);
+
+/// К `ENTITY_COLUMNS`: `FROM entities e {ENTITY_STATS_JOIN}`.
+pub const ENTITY_STATS_JOIN: &str = "LEFT JOIN entity_stats es ON es.entity_id = e.id";
 
 /// Карточка: сущность, теги, участники в порядке титров и связанные произведения.
 #[derive(Debug, Serialize, ToSchema)]
@@ -298,15 +389,16 @@ impl From<PersonCreditRow> for PersonCredit {
     }
 }
 
-/// Сортировка поиска (без неё — по релевантности). Значения — из `metadata` фильма (TMDB);
-/// у кого поля нет — в конце.
+/// Сортировка поиска (без неё — по релевантности); у кого значения нет — в конце.
 #[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchSort {
-    /// `metadata.popularity`: то, что смотрят сейчас.
-    Popularity,
-    /// `metadata.vote_count`: известность за всё время.
-    Votes,
+    /// Балл «Рекомендуемые» (`rank_score`).
+    Recommended,
+    /// TMDB popularity: смотрят сейчас.
+    Trending,
+    /// Байесовский рейтинг IMDb (`quality`).
+    TopRated,
 }
 
 /// Сущность в админском списке: как в публичном, плюс флаг активности.
@@ -318,20 +410,22 @@ pub struct AdminEntitySummary {
     pub active: bool,
     /// `active` переключали в админке: «пересобрать активные» её не трогает.
     pub active_manual: bool,
+    /// Видна на сайте (активна и вышла / «скоро» / вручную / не из TMDB).
+    pub visible: bool,
 }
 
-/// Итог «обновить popularity».
+/// Итог «обновить рейтинги».
 #[derive(Debug, Serialize, ToSchema)]
-pub struct PopularityResult {
-    /// Файл дампа.
+pub struct StatsResult {
+    /// Файл дампа TMDB.
     #[schema(example = "movie_ids_10_11_2026.json.gz")]
-    pub export: String,
-    /// Фильмов с popularity в дампе.
-    #[schema(example = 1_192_090)]
-    pub films: u64,
-    /// У скольких сущностей popularity изменилась.
-    #[schema(example = 950_000)]
-    pub updated: u64,
+    pub tmdb_export: String,
+    /// У скольких сущностей изменилась TMDB popularity.
+    pub tmdb_updated: u64,
+    /// У скольких — рейтинг IMDb.
+    pub imdb_updated: u64,
+    /// У скольких есть балл «Рекомендуемые».
+    pub ranked: i64,
 }
 
 /// Итог «пересобрать активные».
@@ -339,27 +433,94 @@ pub struct PopularityResult {
 pub struct ActiveResult {
     pub activated: i64,
     pub deactivated: i64,
+    /// Из них «Скоро премьера» (включаются всегда).
+    pub soon: i64,
     /// Активных сущностей после (всех, не только из TMDB).
     pub active: i64,
 }
 
-/// Сколько активных: топ по оценкам и ещё самые популярные из остальных.
+/// Сколько вышедших фильмов из TMDB держать активными.
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ActiveQuery {
-    /// Топ по `metadata.vote_count`, 0–1000000, по умолчанию 40000.
-    pub by_votes: Option<i64>,
-    /// Плюс самые популярные (`metadata.popularity`) из остальных, 0–1000000, по умолчанию 40000.
-    pub by_popularity: Option<i64>,
+    /// Топ по баллу «Рекомендуемые» (без балла — по числу оценок TMDB), 0–1000000, по умолчанию
+    /// 80000. Плюс все «Скоро премьера».
+    #[param(example = 80_000)]
+    pub count: Option<i64>,
+}
+
+/// Настройки балла «Рекомендуемые» и окна «Скоро премьера» (`catalog_ranking`).
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RankingSettings {
+    /// Вес рейтинга IMDb, 0–10.
+    #[schema(example = 0.5)]
+    pub weight_quality: f64,
+    /// Вес TMDB popularity, 0–10.
+    #[schema(example = 0.3)]
+    pub weight_popularity: f64,
+    /// Вес свежести, 0–10.
+    #[schema(example = 0.2)]
+    pub weight_recency: f64,
+    /// «Доверительные» голоса байесовского рейтинга: меньше голосов — ближе к среднему.
+    #[schema(example = 5000)]
+    pub trust_votes: i32,
+    /// Через сколько лет свежесть падает вдвое, 0.1–100.
+    #[schema(example = 4.0)]
+    pub half_life_years: f64,
+    /// Меньше голосов IMDb — без балла.
+    #[schema(example = 1000)]
+    pub min_votes: i32,
+    /// Окно «Скоро премьера», дней (0–365).
+    #[schema(example = 30)]
+    pub soon_days: i32,
+    /// Когда сохранены; в запросе не передаётся.
+    #[serde(default, skip_deserializing)]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RankPreviewQuery {
+    /// 1–200, по умолчанию 50.
+    pub limit: Option<i64>,
+}
+
+/// Строка предпросмотра: фильм и составляющие балла.
+#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+pub struct RankPreviewRow {
+    pub slug: String,
+    pub title: String,
+    pub release_date: Option<NaiveDate>,
+    pub active: bool,
+    pub imdb_rating: Option<f64>,
+    pub imdb_votes: Option<i32>,
+    pub tmdb_popularity: Option<f64>,
+    /// Байесовский рейтинг.
+    pub quality: f64,
+    /// Вклад рейтинга, популярности и свежести; `score` — их сумма.
+    pub q_part: f64,
+    pub p_part: f64,
+    pub r_part: f64,
+    pub score: f64,
 }
 
 /// Порядок списка сущностей.
 #[derive(Debug, Clone, Copy, Default, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EntitySort {
-    /// Новинки сверху, без даты — в конце.
+    /// По умолчанию: балл «Рекомендуемые» (рейтинг IMDb + популярность + свежесть, настраивается
+    /// в админке); без балла — в конце, новее выше.
     #[default]
+    Recommended,
+    /// Смотрят сейчас: TMDB popularity, только вышедшие с баллом.
+    Trending,
+    /// Высокий рейтинг: байесовский рейтинг IMDb.
+    TopRated,
+    /// Новинки: только вышедшие, новые сверху.
     New,
+    /// «Скоро премьера»: ещё не вышедшие (в окне `soon_days`), ближайшие сверху.
+    Soon,
     /// Больше оценок сверху.
     Popular,
     /// Выше средняя оценка сверху; без оценок — в конце.
@@ -371,7 +532,7 @@ pub enum EntitySort {
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListEntitiesQuery {
-    /// По умолчанию `new`.
+    /// По умолчанию `recommended`.
     pub sort: Option<EntitySort>,
     /// Тип сущности.
     pub kind: Option<EntityKind>,
@@ -394,7 +555,7 @@ pub struct ListEntitiesQuery {
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct AdminListEntitiesQuery {
-    /// По умолчанию `new`.
+    /// По умолчанию `recommended`.
     pub sort: Option<EntitySort>,
     pub kind: Option<EntityKind>,
     /// Slug тега.
