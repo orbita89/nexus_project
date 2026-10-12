@@ -2505,7 +2505,8 @@ async fn unreleased_tmdb_films_are_hidden_until_soon(pool: PgPool) {
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
-    assert!(all.contains(&"soon-film".to_string()) && !all.contains(&"later-film".to_string()));
+    // Будущие — только в «Скоро премьера», не в общих списках.
+    assert!(!all.contains(&"soon-film".to_string()) && !all.contains(&"later-film".to_string()));
     let new = ctx.get_ok("/entities?sort=new&limit=100").await;
     assert!(!slugs(&new).contains(&"soon-film") && !slugs(&new).contains(&"own-future"));
     assert_eq!(

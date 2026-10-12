@@ -36,7 +36,8 @@ pub(crate) fn is_admin(viewer: Option<&AuthUser>) -> bool {
 /// Список видимых сущностей (активные; фильмы из TMDB — вышедшие или «Скоро премьера»). `sort`:
 /// `recommended` (по умолчанию: балл — рейтинг IMDb + популярность + свежесть), `trending`
 /// (смотрят сейчас), `top_rated` (рейтинг IMDb), `new` (вышедшие, новые сверху), `soon` (ближайшие
-/// премьеры), `popular` (больше наших оценок), `rating` (выше наша средняя), `title`.
+/// премьеры), `popular` (больше наших оценок), `rating` (выше наша средняя), `title`. Фильмы с датой
+/// в будущем — только в `soon`.
 ///
 /// Наши оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в
 /// таблицы рецензий не ходит.
@@ -81,9 +82,15 @@ pub(crate) async fn list_page(
         EntitySort::TopRated => " AND st.quality IS NOT NULL",
         _ => "",
     };
+    // Будущие премьеры на сайте — только в `soon` («Скоро премьера»), не в общих списках.
+    let released = if active == Some(true) && !matches!(sort, EntitySort::Soon) {
+        " AND NOT coalesce(e.release_date > current_date, false)"
+    } else {
+        ""
+    };
     // VISIBLE начинается с `e.active`: планировщик берёт частичный индекс `WHERE active`.
     let filter = if active == Some(true) {
-        format!("{LIST_FILTER} AND {VISIBLE}{by_sort}")
+        format!("{LIST_FILTER} AND {VISIBLE}{released}{by_sort}")
     } else {
         format!("{LIST_FILTER}{by_sort}")
     };
@@ -98,7 +105,9 @@ pub(crate) async fn list_page(
         .await?;
     let order = match sort {
         EntitySort::Recommended => {
-            "st.rank_score DESC NULLS LAST, e.release_date DESC NULLS LAST, e.title, e.id"
+            // Без балла (нет IMDb или мало голосов) — по известности на TMDB, а не по дате.
+            "st.rank_score DESC NULLS LAST, st.tmdb_votes DESC NULLS LAST,
+             st.tmdb_popularity DESC NULLS LAST, e.release_date DESC NULLS LAST, e.title, e.id"
         }
         EntitySort::Trending => "st.tmdb_popularity DESC NULLS LAST, e.id",
         EntitySort::TopRated => "st.quality DESC, st.imdb_votes DESC NULLS LAST, e.id",

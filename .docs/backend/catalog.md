@@ -711,10 +711,11 @@ IMDb `(v·r + m·C)/(v + m)` (`m` = `trust_votes`, `C` — средний), шк
 `half_life_years` 4, `min_votes` 1000, `soon_days` 30. Хранится в `entity_stats.rank_score` и
 `quality`; пересчёт — после «Обновить рейтинги» и сохранения настроек (один `UPDATE` узкой таблицы).
 
-**Сортировки** `/entities` (`sort`): `recommended` (по умолчанию, балл; без балла — в конце, новее
-выше), `trending` (TMDB popularity, вышедшие с баллом), `top_rated` (байесовский рейтинг), `new`
+**Сортировки** `/entities` (`sort`): `recommended` (по умолчанию, балл; без балла — в конце, по
+`tmdb_votes`, затем `tmdb_popularity`), `trending` (TMDB popularity, вышедшие с баллом), `top_rated` (байесовский рейтинг), `new`
 (только вышедшие), `soon` (будущие в окне, ближайшие сверху), `popular`/`rating` (наши оценки),
-`title`. Поиск: `sort=recommended|trending|top_rated` (`rank_score`, `popularity`, `quality` —
+`title`. Фильмы с датой в будущем в публичных списках — только в `soon` («Скоро премьера»), в
+остальных сортировках их нет. Поиск: `sort=recommended|trending|top_rated` (`rank_score`, `popularity`, `quality` —
 `sortableAttributes`).
 
 **Админка** (запуск вручную, расписания нет; ход — потоком `JobEvent`; одна долгая операция за раз
