@@ -22,6 +22,8 @@
 год» — привязка без изменений. Люди — так же по slug имени.
 
 После загрузки: scripts/reindex-search.sh (Meilisearch о новых строках не знает).
+Вместе с TMDB: этот скрипт — только этапы download и wiki, в БД пишет merge.py (этап load
+отказывается работать, если есть схема catalog_import).
 Запуск: WIKIMEDIA_CONTACT=<почта или URL> DATABASE_URL=postgres://... \
         python3 import_wikidata.py --wiki-concurrency 4 --wiki-rate 4 [--help]
 """
@@ -136,7 +138,7 @@ def queries(min_links: int) -> dict[str, str]:
      OPTIONAL {{ ?st pq:P1545 ?ord }} OPTIONAL {{ ?st pq:P4633 ?charName }}
      OPTIONAL {{ ?st pq:P453 ?char }} }}
 }}""",
-        "people": f"""SELECT DISTINCT ?p ?ru ?en ?mul ?links ?desc ?birth ?bprec ?img WHERE {{
+        "people": f"""SELECT DISTINCT ?p ?ru ?en ?mul ?links ?desc ?birth ?bprec ?img ?tmdb WHERE {{
   {films}
   {{ ?f wdt:P57 ?p }} UNION {{ ?f wdt:P161 ?p }} UNION {{ ?f wdt:P725 ?p }}
   OPTIONAL {{ ?p wikibase:sitelinks ?links }}
@@ -145,6 +147,7 @@ def queries(min_links: int) -> dict[str, str]:
   OPTIONAL {{ ?p p:P569 ?bs . ?bs psv:P569 ?bv . ?bv wikibase:timeValue ?birth .
              ?bv wikibase:timePrecision ?bprec }}
   OPTIONAL {{ ?p wdt:P18 ?img }}
+  OPTIONAL {{ ?p wdt:P4985 ?tmdb }}
 }}""",
         "characters": f"""SELECT DISTINCT ?c ?ru ?en WHERE {{
   {films}
@@ -449,7 +452,9 @@ class Dataset:
             if not q:
                 continue
             p = self.people.setdefault(q, {"ru": "", "en": "", "links": 0, "desc": "",
-                                           "birth": None, "bprec": -1, "img": ""})
+                                           "birth": None, "bprec": -1, "img": "", "tmdb": None})
+            if p["tmdb"] is None and row.get("tmdb", "").isdigit():
+                p["tmdb"] = int(row["tmdb"])  # P4985 — склейка людей с TMDB в merge.py
             for k in ("ru", "en", "desc", "img"):
                 p[k] = p[k] or row[k]
             # С 2024 года имена людей часто только в «mul» (общая подпись на латинице), без «en».
@@ -777,6 +782,9 @@ async def load_batch(conn, films: list[Film], tags: dict, stats: Stats):
 async def load(args, dsn: str, data: Dataset, top: list[str]):
     conn = await asyncpg.connect(dsn)
     try:
+        if await conn.fetchval("SELECT to_regclass('catalog_import.movies') IS NOT NULL"):
+            sys.exit("catalog_import exists: films are loaded by merge.py (TMDB + Wikidata); "
+                     "run this script with --stage download/wiki only")
         await conn.execute(STATE_SCHEMA)
         tags = await ensure_genres(conn)
         done = {r["qid"] for r in await conn.fetch("SELECT qid FROM wikidata_import.movies")}
