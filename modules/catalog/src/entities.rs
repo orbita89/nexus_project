@@ -1,20 +1,20 @@
 //! Сущности: список с фильтрами и карточка. Чтение без авторизации.
 
 use crate::models::{
-    page_bounds, Entity, EntityCredit, EntityCreditRow, EntityDetail, EntitySort, EntitySummary,
-    ListEntitiesQuery, Page, RelatedWork, RelationKind, SimilarQuery, Tag, ENTITY_COLUMNS,
-    ENTITY_SUMMARY_COLUMNS, TAG_COLUMNS, TAG_ORDER,
+    page_bounds, AdminEntitySummary, Entity, EntityCredit, EntityCreditRow, EntityDetail,
+    EntitySort, EntitySummary, ListEntitiesQuery, Page, RelatedWork, RelationKind, SimilarQuery,
+    Tag, ENTITY_COLUMNS, ENTITY_SUMMARY_COLUMNS, TAG_COLUMNS, TAG_ORDER,
 };
 use axum::extract::State;
 use axum::Json;
 use shared::error::ErrorBody;
 use shared::extract::{Path, Query};
-use shared::{AppError, AppResult, AppState};
-use sqlx::PgExecutor;
+use shared::{AppError, AppResult, AppState, AuthUser, Role};
+use sqlx::{PgExecutor, PgPool};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// Общий WHERE списка: $1 kind, $2 slug тега, $3 год, $4 шаблон ILIKE.
+/// Общий WHERE списка: $1 kind, $2 slug тега, $3 год, $4 шаблон ILIKE, $5 `active` (NULL — все).
 const LIST_FILTER: &str = "
     FROM entities e
     WHERE ($1::entity_kind IS NULL OR e.kind = $1)
@@ -23,13 +23,19 @@ const LIST_FILTER: &str = "
             WHERE et.entity_id = e.id AND t.slug = $2))
       AND ($3::int IS NULL OR (e.release_date >= make_date($3, 1, 1)
                                AND e.release_date < make_date($3 + 1, 1, 1)))
-      AND ($4::text IS NULL OR e.title ILIKE $4 OR e.original_title ILIKE $4)";
+      AND ($4::text IS NULL OR e.title ILIKE $4 OR e.original_title ILIKE $4)
+      AND ($5::boolean IS NULL OR e.active = $5)";
+
+/// Админ — видит неактивные сущности (карточки, связанные, фильмографии).
+pub(crate) fn is_admin(viewer: Option<&AuthUser>) -> bool {
+    viewer.is_some_and(|user| user.role == Role::Admin)
+}
 
 /// Список сущностей. `sort`: `new` (по умолчанию: новинки сверху, без даты — в конце), `popular`
 /// (больше оценок), `rating` (выше средняя, без оценок — в конце), `title`.
 ///
 /// Оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в
-/// таблицы рецензий не ходит.
+/// таблицы рецензий не ходит. Только активные сущности.
 #[utoipa::path(
     get, operation_id = "list_entities", path = "/entities", tag = "catalog",
     params(ListEntitiesQuery),
@@ -42,18 +48,40 @@ pub async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListEntitiesQuery>,
 ) -> AppResult<Json<Page<EntitySummary>>> {
+    let page = list_page(&state.db, query, Some(true)).await?;
+    Ok(Json(Page {
+        items: page.items.into_iter().map(|row| row.entity).collect(),
+        total: page.total,
+        limit: page.limit,
+        offset: page.offset,
+    }))
+}
+
+/// Страница списка: публичный (`active = Some(true)`) и админский (`active` из запроса).
+pub(crate) async fn list_page(
+    db: &PgPool,
+    query: ListEntitiesQuery,
+    active: Option<bool>,
+) -> AppResult<Page<AdminEntitySummary>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
     if let Some(year) = query.year {
         check_year(year)?;
     }
     let pattern = query.q.as_deref().and_then(like_pattern);
+    // Литерал рядом с параметром: планировщик берёт частичный индекс `WHERE active`.
+    let filter = if active == Some(true) {
+        format!("{LIST_FILTER} AND e.active")
+    } else {
+        LIST_FILTER.to_string()
+    };
 
-    let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) {LIST_FILTER}"))
+    let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) {filter}"))
         .bind(query.kind)
         .bind(&query.tag)
         .bind(query.year)
         .bind(&pattern)
-        .fetch_one(&state.db)
+        .bind(active)
+        .fetch_one(db)
         .await?;
     let order = match query.sort.unwrap_or_default() {
         EntitySort::New => "e.release_date DESC NULLS LAST, e.title, e.id",
@@ -69,56 +97,64 @@ pub async fn list(
         EntitySort::Title => "e.title, e.release_date DESC NULLS LAST, e.id",
     };
     let items = sqlx::query_as(&format!(
-        "SELECT {ENTITY_SUMMARY_COLUMNS} {LIST_FILTER}
+        "SELECT {ENTITY_SUMMARY_COLUMNS}, e.active {filter}
          ORDER BY {order}
-         LIMIT $5 OFFSET $6"
+         LIMIT $6 OFFSET $7"
     ))
     .bind(query.kind)
     .bind(&query.tag)
     .bind(query.year)
     .bind(&pattern)
+    .bind(active)
     .bind(limit)
     .bind(offset)
-    .fetch_all(&state.db)
+    .fetch_all(db)
     .await?;
 
-    Ok(Json(Page {
+    Ok(Page {
         items,
         total,
         limit,
         offset,
-    }))
+    })
 }
 
 /// Карточка сущности: поля, теги и участники в порядке титров.
 ///
 /// Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика
 /// фронтенда (SSG/ISR), сюда приходят её пересборка и админка.
+///
+/// Неактивная сущность — 404 для всех, кроме админа (ему — с неактивными связанными).
 #[utoipa::path(
     get, operation_id = "get_entity", path = "/entities/{slug}", tag = "catalog",
+    security((), ("bearer" = [])),
     params(("slug" = String, Path, description = "slug сущности", example = "dune-2021")),
     responses(
         (status = 200, description = "Карточка", body = EntityDetail),
-        (status = 404, description = "Не найдена", body = ErrorBody),
+        (status = 401, description = "Неверный токен", body = ErrorBody),
+        (status = 404, description = "Не найдена или скрыта", body = ErrorBody),
     )
 )]
 pub async fn get(
     State(state): State<AppState>,
+    viewer: Option<AuthUser>,
     Path(slug): Path<String>,
 ) -> AppResult<Json<EntityDetail>> {
+    let admin = is_admin(viewer.as_ref());
     let entity: Option<Entity> = sqlx::query_as(&format!(
         "SELECT {ENTITY_COLUMNS} FROM entities e WHERE e.slug = $1"
     ))
     .bind(&slug)
     .fetch_optional(&state.db)
     .await?;
-    Ok(Json(
-        detail(&state.db, entity.ok_or(AppError::NotFound)?).await?,
-    ))
+    let entity = entity
+        .filter(|entity| entity.active || admin)
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(detail(&state.db, entity, admin).await?))
 }
 
 /// Похожие на сущность: тот же тип, больше общих тегов — выше (жанр весит вдвое), при равенстве —
-/// новее. Без самой
+/// новее. Только активные; у неактивной — 404. Без самой
 /// сущности и её связанных (они и так на карточке). Нет тегов — пустая страница.
 ///
 /// Первая версия без ML: один запрос с подсчётом пересечения тегов по `entity_tags (tag_id)`.
@@ -147,7 +183,7 @@ pub async fn similar(
     }
 
     let limit = query.limit.unwrap_or(12).clamp(1, 24);
-    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM entities WHERE slug = $1")
+    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM entities WHERE slug = $1 AND active")
         .bind(&slug)
         .fetch_optional(&state.db)
         .await?;
@@ -164,6 +200,7 @@ pub async fn similar(
          SELECT count(*) OVER () AS total, {ENTITY_SUMMARY_COLUMNS}
          FROM scored s JOIN entities e ON e.id = s.entity_id
          WHERE e.kind = (SELECT kind FROM entities WHERE id = $1)
+           AND e.active
            AND NOT EXISTS (SELECT 1 FROM entity_relations r
                            WHERE (r.from_id = $1 AND r.to_id = e.id)
                               OR (r.to_id = $1 AND r.from_id = e.id))
@@ -183,7 +220,7 @@ pub async fn similar(
     }))
 }
 
-/// Карточка по id из БД: для админских ответов, событий публикации и документа поискового индекса.
+/// Карточка по id из БД: для админских ответов и событий публикации (с неактивными связанными).
 pub(crate) async fn detail_by_id(
     db: impl PgExecutor<'_> + Copy,
     id: Uuid,
@@ -194,19 +231,24 @@ pub(crate) async fn detail_by_id(
     .bind(id)
     .fetch_optional(db)
     .await?;
-    detail(db, entity.ok_or(AppError::NotFound)?).await
+    detail(db, entity.ok_or(AppError::NotFound)?, true).await
 }
 
-async fn detail(db: impl PgExecutor<'_> + Copy, entity: Entity) -> AppResult<EntityDetail> {
-    let mut cards = details(db, vec![entity]).await?;
+async fn detail(
+    db: impl PgExecutor<'_> + Copy,
+    entity: Entity,
+    with_inactive: bool,
+) -> AppResult<EntityDetail> {
+    let mut cards = details(db, vec![entity], with_inactive).await?;
     Ok(cards.pop().expect("one card per entity"))
 }
 
 /// Карточки пачкой: три запроса на любое число сущностей (перестройка индекса). Порядок — как у
-/// `entities`.
+/// `entities`. `with_inactive` — показывать неактивные связанные (админу).
 pub(crate) async fn details(
     db: impl PgExecutor<'_> + Copy,
     entities: Vec<Entity>,
+    with_inactive: bool,
 ) -> AppResult<Vec<EntityDetail>> {
     #[derive(sqlx::FromRow)]
     struct TagOf {
@@ -245,7 +287,7 @@ pub(crate) async fn details(
     for CreditOf { entity_id, row } in credits {
         credits_by.entry(entity_id).or_default().push(row.into());
     }
-    let mut related_by = related(db, &ids).await?;
+    let mut related_by = related(db, &ids, with_inactive).await?;
     Ok(entities
         .into_iter()
         .map(|entity| EntityDetail {
@@ -263,6 +305,7 @@ pub(crate) async fn details(
 async fn related(
     db: impl PgExecutor<'_>,
     ids: &[Uuid],
+    with_inactive: bool,
 ) -> AppResult<HashMap<Uuid, Vec<RelatedWork>>> {
     #[derive(sqlx::FromRow)]
     struct RelatedOf {
@@ -286,9 +329,11 @@ async fn related(
              SELECT to_id, from_id, 'remake', position
              FROM entity_relations WHERE kind = 'remake' AND to_id = ANY($1)
          ) v JOIN entities e ON e.id = v.other
+         WHERE $2 OR e.active
          ORDER BY e.release_date NULLS LAST, v.position, e.title, e.id"
     ))
     .bind(ids)
+    .bind(with_inactive)
     .fetch_all(db)
     .await?;
 

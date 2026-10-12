@@ -27,7 +27,7 @@ use crate::entities::{check_year, details};
 use crate::jobs::{self, DoneEvent, JobEvent, Reporter, Step, StepStatus};
 use crate::models::{
     page_bounds, Entity, EntityDetail, EntityKind, EntitySummary, Page, ReindexQuery,
-    ReindexResult, SearchQuery, ENTITY_COLUMNS,
+    ReindexResult, SearchQuery, SearchSort, ENTITY_COLUMNS,
 };
 use crate::publish::Touched;
 use crate::validate;
@@ -81,6 +81,9 @@ struct SearchDoc {
     tag_names: Vec<String>,
     /// Имена участников: поиск («вильнёв» находит его фильмы).
     people: Vec<String>,
+    /// `metadata.popularity` и `metadata.vote_count` (TMDB): сортировки `popularity`, `votes`.
+    popularity: Option<f64>,
+    vote_count: Option<u64>,
     /// Карточка целиком. Никем не читается (карточка — из БД и статики), пока остаётся в
     /// документе. Не ищется и не отдаётся поиском.
     card: EntityDetail,
@@ -112,6 +115,8 @@ impl From<EntityDetail> for SearchDoc {
             release_date: entity.release_date,
             cover_url: entity.cover_url.clone(),
             year: entity.release_date.map(|date| date.year()),
+            popularity: entity.metadata.get("popularity").and_then(Value::as_f64),
+            vote_count: entity.metadata.get("vote_count").and_then(Value::as_u64),
             tag_names: tags.iter().map(|(_, name)| name.clone()).collect(),
             tags: tags.into_iter().map(|(slug, _)| slug).collect(),
             people,
@@ -125,25 +130,27 @@ fn entity_settings() -> Value {
         // Порядок задаёт вес: совпадение в названии важнее, чем в описании.
         "searchableAttributes": ["title", "original_title", "people", "tag_names", "description"],
         "filterableAttributes": ["kind", "tags", "year", "slug"],
+        "sortableAttributes": ["popularity", "vote_count"],
     })
 }
 
 /// Документы пачки сущностей: два запроса на карточки, без запроса на каждую.
 async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchDoc>, BoxError> {
-    let cards = details(db, entities)
+    let cards = details(db, entities, false)
         .await
         .map_err(|error| error.to_string())?;
     Ok(cards.into_iter().map(SearchDoc::from).collect())
 }
 
 /// Переотправляет затронутое в индекс (и в теневой, если идёт перестройка) и ждёт применения;
-/// удалённое из БД удаляет из индекса. Вызывается из [`crate::publish::run`] после коммита.
+/// удалённое из БД и неактивное удаляет из индекса. Вызывается из [`crate::publish::run`] после
+/// коммита.
 pub(crate) async fn update_index(state: &AppState, touched: &Touched) -> Result<(), BoxError> {
     if touched.entities.is_empty() {
         return Ok(());
     }
     let entities: Vec<Entity> = sqlx::query_as(&format!(
-        "SELECT {ENTITY_COLUMNS} FROM entities e WHERE e.id = ANY($1) ORDER BY e.id"
+        "SELECT {ENTITY_COLUMNS} FROM entities e WHERE e.id = ANY($1) AND e.active ORDER BY e.id"
     ))
     .bind(&touched.entities)
     .fetch_all(&state.db)
@@ -556,10 +563,10 @@ async fn create_version(search: &Search, main: &str, version: &str) -> Result<()
     )
 }
 
-/// Все сущности из БД пачками по [`BATCH`] (keyset по id) в индекс `version`. Пока Meilisearch
+/// Все активные сущности из БД пачками по [`BATCH`] (keyset по id) в индекс `version`. Пока Meilisearch
 /// применяет пачку, читается следующая. Возвращает число отправленных документов.
 async fn fill(state: &AppState, version: &str, report: &Reporter) -> Result<usize, BoxError> {
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM entities")
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM entities WHERE active")
         .fetch_one(&state.db)
         .await?;
     let total = u64::try_from(total).unwrap_or(0);
@@ -571,7 +578,7 @@ async fn fill(state: &AppState, version: &str, report: &Reporter) -> Result<usiz
     loop {
         let entities: Vec<Entity> = sqlx::query_as(&format!(
             "SELECT {ENTITY_COLUMNS} FROM entities e
-             WHERE $1::uuid IS NULL OR e.id > $1 ORDER BY e.id LIMIT $2"
+             WHERE e.active AND ($1::uuid IS NULL OR e.id > $1) ORDER BY e.id LIMIT $2"
         ))
         .bind(after)
         .bind(BATCH as i64)
@@ -698,7 +705,9 @@ pub(crate) fn unavailable() -> AppError {
     AppError::Unavailable("search is temporarily unavailable".into())
 }
 
-/// Полнотекстовый поиск по каталогу: опечатки, ранжирование, фильтры. Сортировка по релевантности.
+/// Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры.
+/// Сортировка по релевантности; `sort=popularity` / `sort=votes` — по `metadata.popularity` /
+/// `metadata.vote_count` (TMDB), у кого поля нет — в конце.
 ///
 /// Индекс обновляется после изменений в админке с задержкой в доли секунды.
 #[utoipa::path(
@@ -736,6 +745,12 @@ pub async fn search(
         "attributesToRetrieve":
             ["id", "kind", "slug", "title", "original_title", "release_date", "cover_url"],
     });
+    let mut body = body;
+    match query.sort {
+        Some(SearchSort::Popularity) => body["sort"] = json!(["popularity:desc"]),
+        Some(SearchSort::Votes) => body["sort"] = json!(["vote_count:desc"]),
+        None => {}
+    }
 
     let path = format!("/indexes/{}/search", state.search.index(INDEX));
     let response = match state.search.call(Method::POST, &path, Some(&body)).await {

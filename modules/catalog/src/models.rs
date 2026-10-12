@@ -78,12 +78,15 @@ pub struct Entity {
     /// Поля, специфичные для `kind`.
     #[schema(value_type = crate::metadata::Metadata)]
     pub metadata: Value,
+    /// Видна на сайте. Неактивная хранится в БД, но её нет в списках, поиске, похожих и
+    /// фильмографиях, а карточка — 404 для всех, кроме админа.
+    pub active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 pub const ENTITY_COLUMNS: &str = "e.id, e.kind, e.slug, e.title, e.original_title, e.description, \
-     e.release_date, e.cover_url, e.metadata, e.created_at, e.updated_at";
+     e.release_date, e.cover_url, e.metadata, e.active, e.created_at, e.updated_at";
 
 /// Карточка: сущность, теги, участники в порядке титров и связанные произведения.
 #[derive(Debug, Serialize, ToSchema)]
@@ -169,7 +172,7 @@ pub struct TagWithCount {
     #[schema(example = "Научная фантастика")]
     pub name: String,
     pub kind: TagKind,
-    /// Сколько сущностей с этим тегом.
+    /// Сколько активных сущностей с этим тегом.
     #[schema(example = 12)]
     pub entities_count: i64,
 }
@@ -295,6 +298,26 @@ impl From<PersonCreditRow> for PersonCredit {
     }
 }
 
+/// Сортировка поиска (без неё — по релевантности). Значения — из `metadata` фильма (TMDB);
+/// у кого поля нет — в конце.
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchSort {
+    /// `metadata.popularity`: то, что смотрят сейчас.
+    Popularity,
+    /// `metadata.vote_count`: известность за всё время.
+    Votes,
+}
+
+/// Сущность в админском списке: как в публичном, плюс флаг активности.
+#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+pub struct AdminEntitySummary {
+    #[serde(flatten)]
+    #[sqlx(flatten)]
+    pub entity: EntitySummary,
+    pub active: bool,
+}
+
 /// Порядок списка сущностей.
 #[derive(Debug, Clone, Copy, Default, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -332,6 +355,26 @@ pub struct ListEntitiesQuery {
     pub offset: Option<i64>,
 }
 
+/// Админский список: фильтры публичного плюс `active`.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct AdminListEntitiesQuery {
+    /// По умолчанию `new`.
+    pub sort: Option<EntitySort>,
+    pub kind: Option<EntityKind>,
+    /// Slug тега.
+    pub tag: Option<String>,
+    pub year: Option<i32>,
+    /// Подстрока в названии или оригинальном названии, без учёта регистра.
+    pub q: Option<String>,
+    /// `true` — только активные, `false` — только скрытые; не передан — все.
+    pub active: Option<bool>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct SimilarQuery {
@@ -357,6 +400,8 @@ pub struct SearchQuery {
     /// Поисковый запрос: название, оригинальное название, люди, теги, описание. Опечатки допустимы.
     #[param(example = "дюан")]
     pub q: Option<String>,
+    /// Не передан — по релевантности.
+    pub sort: Option<SearchSort>,
     pub kind: Option<EntityKind>,
     /// Slug тега.
     pub tag: Option<String>,
@@ -391,6 +436,8 @@ pub struct CreateEntity {
     #[serde(default)]
     #[schema(example = json!(["sci-fi"]))]
     pub tags: Vec<String>,
+    /// Видна на сайте. По умолчанию `true`.
+    pub active: Option<bool>,
 }
 
 /// Изменение сущности: переданные поля заменяются, `null` очищает необязательное поле.
@@ -414,6 +461,8 @@ pub struct UpdateEntity {
     pub cover_url: Option<Option<String>>,
     #[schema(value_type = Option<crate::metadata::Metadata>)]
     pub metadata: Option<Value>,
+    /// Включить (`true`) или скрыть с сайта (`false`).
+    pub active: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

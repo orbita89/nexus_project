@@ -7,7 +7,8 @@ use shared::error::ErrorBody;
 use shared::extract::{Path, Query};
 use shared::{AppError, AppResult, AppState};
 
-/// Все теги по алфавиту с числом сущностей; `?kind=genre` — только жанры. Тегов немного, поэтому
+/// Все теги по алфавиту с числом активных сущностей (счётчик держат триггеры); `?kind=genre` —
+/// только жанры. Тегов немного, поэтому
 /// без пагинации.
 #[utoipa::path(
     get, operation_id = "list_tags", path = "/tags", tag = "catalog",
@@ -22,10 +23,10 @@ pub async fn list(
     Query(query): Query<ListTagsQuery>,
 ) -> AppResult<Json<Vec<TagWithCount>>> {
     let tags = sqlx::query_as(
-        "SELECT t.id, t.slug, t.name, t.kind, count(et.entity_id) AS entities_count
-         FROM tags t LEFT JOIN entity_tags et ON et.tag_id = t.id
+        "SELECT t.id, t.slug, t.name, t.kind, t.entities_count::int8 AS entities_count
+         FROM tags t
          WHERE $1::text IS NULL OR t.kind = $1
-         GROUP BY t.id ORDER BY t.name",
+         ORDER BY t.name",
     )
     .bind(query.kind)
     .fetch_all(&state.db)
@@ -47,8 +48,7 @@ pub async fn get(
     Path(slug): Path<String>,
 ) -> AppResult<Json<TagWithCount>> {
     let tag: Option<TagWithCount> = sqlx::query_as(
-        "SELECT t.id, t.slug, t.name, t.kind,
-                (SELECT count(*) FROM entity_tags et WHERE et.tag_id = t.id) AS entities_count
+        "SELECT t.id, t.slug, t.name, t.kind, t.entities_count::int8 AS entities_count
          FROM tags t WHERE t.slug = $1",
     )
     .bind(&slug)

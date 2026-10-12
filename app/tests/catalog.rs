@@ -2191,3 +2191,247 @@ async fn seed_catalog_is_valid(pool: PgPool) {
     let card = ctx.get_ok("/people/arkady-strugatsky").await;
     assert_eq!(card["credits"].as_array().unwrap().len(), 2);
 }
+
+// ---------------------------------------------------------------- активные и скрытые
+
+async fn set_active(ctx: &Ctx, slug: &str, active: bool) {
+    let id = admin_entity_id(ctx, slug).await;
+    let (status, body) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}"),
+            Some(json!({ "active": active })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["active"], active);
+}
+
+/// id через админский список: скрытой сущности в публичном API нет.
+async fn admin_entity_id(ctx: &Ctx, slug: &str) -> String {
+    let (status, page) = ctx
+        .admin_send(Method::GET, "/admin/entities?limit=100", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["slug"] == slug)
+        .unwrap_or_else(|| panic!("no {slug}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn tag_count(tags: &Value, slug: &str) -> i64 {
+    tags.as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["slug"] == slug)
+        .unwrap()["entities_count"]
+        .as_i64()
+        .unwrap()
+}
+
+/// Скрытая сущность: нет в списке, похожих, фильмографии и счётчиках тегов, карточка — 404 гостю
+/// и 200 админу; включили — всё вернулось.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn inactive_entity_is_hidden_from_public_reads(pool: PgPool) {
+    let ctx = Ctx::without_search(pool);
+    assert_eq!(tag_count(&ctx.get_ok("/tags").await, "sci-fi"), 3);
+    set_active(&ctx, "dune-part-two-2024", false).await;
+
+    let page = ctx.get_ok("/entities").await;
+    assert_eq!(page["total"], 4, "{page}");
+    assert!(!slugs(&page).contains(&"dune-part-two-2024"));
+    assert_eq!(
+        ctx.get("/entities/dune-part-two-2024").await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        ctx.get("/entities/dune-part-two-2024/similar").await.status,
+        StatusCode::NOT_FOUND
+    );
+    let similar = ctx.get_ok("/entities/dune-2021/similar").await;
+    assert!(
+        !slugs(&similar).contains(&"dune-part-two-2024"),
+        "{similar}"
+    );
+    let person = ctx.get_ok("/people/denis-villeneuve").await;
+    let works: Vec<&str> = person["credits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["entity"]["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(works, ["dune-2021"]);
+    assert_eq!(tag_count(&ctx.get_ok("/tags").await, "sci-fi"), 2);
+    assert_eq!(ctx.get_ok("/tags/sci-fi").await["entities_count"], 2);
+
+    // Админ видит карточку и находит её в своём списке.
+    let token = ctx.admin().await;
+    let card = ctx
+        .send(
+            Method::GET,
+            "/entities/dune-part-two-2024",
+            None,
+            Some(&token),
+        )
+        .await;
+    assert_eq!(card.status, StatusCode::OK);
+    assert_eq!(card.json()["active"], false);
+    let (_, hidden) = ctx
+        .admin_send(Method::GET, "/admin/entities?active=false", None)
+        .await;
+    assert_eq!(slugs(&hidden), ["dune-part-two-2024"]);
+    assert_eq!(hidden["items"][0]["active"], false);
+    let (_, all) = ctx.admin_send(Method::GET, "/admin/entities", None).await;
+    assert_eq!(all["total"], 5);
+
+    set_active(&ctx, "dune-part-two-2024", true).await;
+    assert_eq!(ctx.get_ok("/entities").await["total"], 5);
+    ctx.get_ok("/entities/dune-part-two-2024").await;
+    assert_eq!(tag_count(&ctx.get_ok("/tags").await, "sci-fi"), 3);
+}
+
+/// Все работы человека скрыты — его нет в списке и карточка 404 (админу — 200); человек без
+/// работ виден.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn person_with_only_hidden_works_is_hidden(pool: PgPool) {
+    let ctx = Ctx::without_search(pool);
+    set_active(&ctx, "dune-novel", false).await;
+
+    assert_eq!(
+        ctx.get("/people/frank-herbert").await.status,
+        StatusCode::NOT_FOUND
+    );
+    let names: Vec<String> = ctx.get_ok("/people").await["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["slug"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!names.contains(&"frank-herbert".to_string()), "{names:?}");
+    assert!(names.contains(&"nobody".to_string()), "{names:?}");
+    ctx.get_ok("/people/nobody").await;
+
+    let token = ctx.admin().await;
+    let card = ctx
+        .send(Method::GET, "/people/frank-herbert", None, Some(&token))
+        .await;
+    assert_eq!(card.status, StatusCode::OK);
+    assert_eq!(card.json()["credits"].as_array().unwrap().len(), 1);
+
+    // Удалили скрытую сущность — у человека не осталось работ, он снова виден.
+    let id = admin_entity_id(&ctx, "dune-novel").await;
+    ctx.admin_send(Method::DELETE, &format!("/admin/entities/{id}"), None)
+        .await;
+    ctx.get_ok("/people/frank-herbert").await;
+}
+
+/// Создать сразу скрытой; справочник для других модулей по slug её не видит, по id — видит.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn create_hidden_entity_and_directory(pool: PgPool) {
+    use shared::directory::EntityDirectory;
+
+    let ctx = Ctx::without_search(pool.clone());
+    let (status, card) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/entities",
+            Some(json!({ "kind": "movie", "slug": "draft", "title": "Черновик", "active": false })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{card}");
+    assert_eq!(card["active"], false);
+    assert_eq!(
+        ctx.get("/entities/draft").await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    let directory = catalog::directory::PgEntityDirectory::new(pool);
+    assert!(directory.by_slug("draft").await.unwrap().is_none());
+    assert!(directory
+        .by_slugs(&["draft".to_string(), "dune-2021".to_string()])
+        .await
+        .unwrap()
+        .contains_key("dune-2021"));
+    let id: Uuid = card["id"].as_str().unwrap().parse().unwrap();
+    assert!(directory.by_ids(&[id]).await.unwrap().contains_key(&id));
+}
+
+/// Поиск: скрытая уходит из выдачи; `sort=votes` / `sort=popularity` — по `metadata` (TMDB).
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn search_skips_hidden_and_sorts_by_tmdb_numbers(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    for (slug, votes, popularity) in [
+        ("dune-2021", 9000, 10.5),
+        ("dune-part-two-2024", 7000, 99.25),
+    ] {
+        let id = ctx.entity_id(slug).await;
+        let (status, body) = ctx
+            .admin_send(
+                Method::PATCH,
+                &format!("/admin/entities/{id}"),
+                Some(json!({ "metadata": { "vote_count": votes, "popularity": popularity } })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    // Без popularity — в конце (книга «Дюна»).
+    ctx.search_until("/search?q=dune&sort=votes", |p| {
+        slugs(p) == ["dune-2021", "dune-part-two-2024", "dune-novel"]
+    })
+    .await;
+    let page = ctx.get_ok("/search?q=dune&sort=popularity").await;
+    assert_eq!(
+        slugs(&page),
+        ["dune-part-two-2024", "dune-2021", "dune-novel"]
+    );
+    assert_eq!(
+        ctx.get("/search?q=dune&sort=rating").await.status,
+        StatusCode::BAD_REQUEST
+    );
+
+    set_active(&ctx, "dune-2021", false).await;
+    ctx.search_until("/search?q=dune", |p| !slugs(p).contains(&"dune-2021"))
+        .await;
+    // Перестройка тоже не берёт скрытые.
+    let (status, body) = ctx.reindex("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["indexed"], 4);
+}
+
+/// `popularity` и `vote_count` — только у фильмов, с проверкой диапазона.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn movie_metadata_tmdb_numbers_are_validated(pool: PgPool) {
+    let ctx = Ctx::without_search(pool);
+    let movie = ctx.entity_id("dune-2021").await;
+    let book = ctx.entity_id("dune-novel").await;
+    for (id, metadata, status) in [
+        (
+            &movie,
+            json!({ "popularity": 12.34567, "vote_count": 5 }),
+            StatusCode::OK,
+        ),
+        (&movie, json!({ "popularity": -1 }), StatusCode::BAD_REQUEST),
+        (&movie, json!({ "vote_count": -1 }), StatusCode::BAD_REQUEST),
+        (
+            &book,
+            json!({ "pages": 896, "vote_count": 5 }),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (got, body) = ctx
+            .admin_send(
+                Method::PATCH,
+                &format!("/admin/entities/{id}"),
+                Some(json!({ "metadata": metadata })),
+            )
+            .await;
+        assert_eq!(got, status, "{metadata}: {body}");
+    }
+    let card = ctx.get_ok("/entities/dune-2021").await;
+    assert_eq!(card["metadata"]["popularity"], 12.346);
+}

@@ -1,12 +1,12 @@
 //! Админка сущностей: создание, изменение, удаление, теги и участники.
 
 use super::nullable_param;
-use crate::entities::{detail_by_id, tags_of, CREDIT_COLUMNS};
+use crate::entities::{detail_by_id, list_page, tags_of, CREDIT_COLUMNS};
 use crate::jobs::{JobEvent, Reporter};
 use crate::metadata;
 use crate::models::{
-    AddCredit, CreateEntity, EntityCredit, EntityCreditRow, EntityDetail, EntityKind, SetTags, Tag,
-    UpdateEntity,
+    AddCredit, AdminEntitySummary, AdminListEntitiesQuery, CreateEntity, EntityCredit,
+    EntityCreditRow, EntityDetail, EntityKind, ListEntitiesQuery, Page, SetTags, Tag, UpdateEntity,
 };
 use crate::publish::{self, Touched};
 use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
@@ -16,13 +16,43 @@ use axum::response::Response;
 use axum::Json;
 use serde_json::json;
 use shared::error::ErrorBody;
-use shared::extract::{JsonBody, Path};
+use shared::extract::{JsonBody, Path, Query};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use sqlx::PgConnection;
 use std::time::Instant;
 use uuid::Uuid;
 
-/// Создать сущность. `metadata` проверяется по схеме своего `kind`.
+/// Все сущности, включая скрытые с сайта (`active` в каждой): найти и включить. Фильтры и
+/// сортировки — как у `GET /entities`, плюс `active`.
+#[utoipa::path(
+    get, operation_id = "admin_list_entities", path = "/admin/entities", tag = "catalog-admin",
+    security(("bearer" = [])),
+    params(AdminListEntitiesQuery),
+    responses(
+        (status = 200, description = "Страница сущностей", body = Page<AdminEntitySummary>),
+        (status = 400, description = "Неверный фильтр", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+    )
+)]
+pub async fn list(
+    State(state): State<AppState>,
+    AdminUser(_admin): AdminUser,
+    Query(query): Query<AdminListEntitiesQuery>,
+) -> AppResult<Json<Page<AdminEntitySummary>>> {
+    let list = ListEntitiesQuery {
+        sort: query.sort,
+        kind: query.kind,
+        tag: query.tag,
+        year: query.year,
+        q: query.q,
+        limit: query.limit,
+        offset: query.offset,
+    };
+    Ok(Json(list_page(&state.db, list, query.active).await?))
+}
+
+/// Создать сущность. `metadata` проверяется по схеме своего `kind`. `active` — по умолчанию `true`.
 #[utoipa::path(
     post, operation_id = "create_entity", path = "/admin/entities", tag = "catalog-admin",
     security(("bearer" = [])),
@@ -50,8 +80,9 @@ pub async fn create(
     let mut tx = state.db.begin().await?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO entities
-             (kind, slug, title, original_title, description, release_date, cover_url, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+             (kind, slug, title, original_title, description, release_date, cover_url, metadata,
+              active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
     )
     .bind(req.kind)
     .bind(&req.slug)
@@ -61,6 +92,7 @@ pub async fn create(
     .bind(req.release_date)
     .bind(cover_url)
     .bind(metadata)
+    .bind(req.active.unwrap_or(true))
     .fetch_one(&mut *tx)
     .await
     .map_err(validate::conflict("slug is already taken"))?;
@@ -76,7 +108,8 @@ pub async fn create(
 }
 
 /// Изменить сущность. Переданные поля заменяются, `null` очищает необязательное поле;
-/// `metadata` заменяется целиком. `kind` не меняется.
+/// `metadata` заменяется целиком. `kind` не меняется. `active: false` скрывает с сайта: поиск
+/// удаляет документ, фронтенд по ISR получает 404 и удаляет статику.
 #[utoipa::path(
     patch, operation_id = "update_entity", path = "/admin/entities/{id}", tag = "catalog-admin",
     security(("bearer" = [])),
@@ -187,7 +220,8 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
              description = CASE WHEN $6 THEN $7 ELSE description END,
              release_date = CASE WHEN $8 THEN $9 ELSE release_date END,
              cover_url = CASE WHEN $10 THEN $11 ELSE cover_url END,
-             metadata = COALESCE($12, metadata)
+             metadata = COALESCE($12, metadata),
+             active = COALESCE($13, active)
          WHERE id = $1",
     )
     .bind(id)
@@ -202,6 +236,7 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
     .bind(cover_url.0)
     .bind(cover_url.1)
     .bind(metadata)
+    .bind(req.active)
     .execute(&state.db)
     .await
     .map_err(validate::conflict("slug is already taken"))?;

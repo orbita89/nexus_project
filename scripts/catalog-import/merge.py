@@ -208,6 +208,13 @@ class Merger:
                 studios.append(s)
         if studios := studios[:MAX_STUDIOS]:
             metadata["studios"] = studios
+        # Известность по TMDB: сортировки поиска и выбор активных (activate_top).
+        popularity = t.get("popularity") if t else None
+        if isinstance(popularity, (int, float)) and 0 <= popularity <= 1_000_000:
+            metadata["popularity"] = round(float(popularity), 3)
+        votes = t.get("vote_count") if t else None
+        if isinstance(votes, int) and votes >= 0:
+            metadata["vote_count"] = votes
 
         tags = [GENRE_SLUGS[g] for g in (t.get("genres") if t else None) or [] if g in GENRE_SLUGS]
         poster = f"{POSTER}{t['poster_path']}" if t and t.get("poster_path") else None
@@ -361,6 +368,78 @@ async def ensure_tags(conn) -> dict[str, object]:
     return {r["slug"]: r["id"] for r in rows}
 
 
+ACTIVATE = """
+-- Кандидаты — созданные импортом; сиды и админские строки (created = false) не трогаем.
+CREATE TEMP TABLE want_active ON COMMIT DROP AS
+WITH cand AS (
+    SELECT e.id, (e.metadata->>'vote_count')::int AS votes,
+           (e.metadata->>'popularity')::float8 AS pop
+    FROM entities e JOIN catalog_import.movies m ON m.entity_id = e.id
+    WHERE m.created
+),
+by_votes AS (
+    SELECT id FROM cand ORDER BY votes DESC NULLS LAST, pop DESC NULLS LAST, id LIMIT {by_votes}
+),
+by_pop AS (
+    SELECT id FROM cand WHERE id NOT IN (SELECT id FROM by_votes)
+    ORDER BY pop DESC NULLS LAST, votes DESC NULLS LAST, id LIMIT {by_popularity}
+)
+SELECT id FROM by_votes UNION ALL SELECT id FROM by_pop;
+"""
+
+ACTIVATE_APPLY = """
+-- Флаг — только «свой»: в written его нет (первая раскладка) или он не менялся после неё.
+-- Переключение в админке (active <> written.active) не трогаем.
+WITH ours AS (
+    SELECT e.id, (w.id IS NOT NULL) AS want
+    FROM entities e
+    JOIN catalog_import.movies m ON m.entity_id = e.id AND m.created
+    LEFT JOIN want_active w ON w.id = e.id
+    WHERE NOT (m.written ? 'active') OR (m.written->>'active')::boolean = e.active
+),
+changed AS (
+    UPDATE entities e SET active = o.want FROM ours o
+    WHERE e.id = o.id AND e.active <> o.want
+    RETURNING e.id
+),
+marked AS (
+    UPDATE catalog_import.movies m SET written = m.written || jsonb_build_object('active', o.want)
+    FROM ours o WHERE m.entity_id = o.id
+    RETURNING 1
+)
+SELECT (SELECT count(*) FROM changed) AS changed, (SELECT count(*) FROM marked) AS marked;
+"""
+
+# Счётчики целиком, когда триггер переключения выключен на время массового UPDATE.
+RECOUNT = """
+UPDATE person_credit_counts pc SET active_credits = s.active
+FROM (SELECT c.person_id, count(*) FILTER (WHERE e.active) AS active
+      FROM entity_credits c JOIN entities e ON e.id = c.entity_id GROUP BY c.person_id) s
+WHERE pc.person_id = s.person_id AND pc.active_credits <> s.active;
+UPDATE tags t SET entities_count = coalesce(s.n, 0)
+FROM tags t2 LEFT JOIN (SELECT et.tag_id, count(*) AS n FROM entity_tags et
+                        JOIN entities e ON e.id = et.entity_id WHERE e.active GROUP BY et.tag_id) s
+     ON s.tag_id = t2.id
+WHERE t.id = t2.id AND t.entities_count <> coalesce(s.n, 0);
+"""
+
+
+async def activate_top(conn, by_votes: int, by_popularity: int) -> tuple[int, int]:
+    """Активны топ by_votes по vote_count и ещё by_popularity по popularity (без повторов), остальные
+    созданные импортом — скрыты. Одним UPDATE с выключенным триггером entities_active_changed и
+    пересчётом счётчиков: построчный триггер на миллион строк переписывал бы одни и те же строки
+    тегов миллионы раз в одной транзакции. ALTER TABLE держит entities эксклюзивно до коммита."""
+    async with conn.transaction():
+        # Числа — целые из аргументов: CREATE TABLE AS не принимает параметры.
+        await conn.execute(ACTIVATE.format(by_votes=int(by_votes), by_popularity=int(by_popularity)))
+        await conn.execute("ALTER TABLE entities DISABLE TRIGGER entities_active_changed")
+        row = await conn.fetchrow(ACTIVATE_APPLY)
+        await conn.execute("ALTER TABLE entities ENABLE TRIGGER entities_active_changed")
+        await conn.execute(RECOUNT)
+        active = await conn.fetchval("SELECT count(*) FROM entities WHERE active")
+    return row["changed"], active
+
+
 def suffix(tmdb_id, qid) -> str:
     return f"t{tmdb_id}" if tmdb_id else qid.lower()
 
@@ -448,8 +527,8 @@ async def resolve_films(conn, films: list[MFilm], by_title: dict,
 
     inserted = {r["slug"]: r["id"] for r in await conn.fetch(
         """INSERT INTO entities (kind, slug, title, original_title, description, release_date,
-                                 cover_url, metadata)
-           SELECT 'movie', s, t, o, d, r, c, m::jsonb
+                                 cover_url, metadata, active)
+           SELECT 'movie', s, t, o, d, r, c, m::jsonb, false  -- включает activate_top
            FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::date[], $6::text[],
                        $7::text[]) AS u(s, t, o, d, r, c, m)
            ON CONFLICT (slug) DO NOTHING
@@ -841,6 +920,12 @@ async def run(args):
                 batch = []
         if batch:
             await flush(batch)
+        if args.active_by_votes or args.active_by_popularity:
+            started_active = time.monotonic()
+            changed, active = await activate_top(conn, args.active_by_votes,
+                                                 args.active_by_popularity)
+            log.info("active: %d switched, %d active entities now (%.0fs)", changed, active,
+                     time.monotonic() - started_active)
     finally:
         await conn.close()
     log.info("done: %d films (no title: %d) | created %d, updated %d, unchanged %d, adopted %d, "
@@ -859,6 +944,10 @@ def main():
                    help="must match the limit the Wikidata cache was downloaded with")
     p.add_argument("--tmdb-limit", type=int, default=0, help="only the first N cached TMDB films")
     p.add_argument("--batch-size", type=int, default=500, help="films per DB transaction")
+    p.add_argument("--active-by-votes", type=int, default=40_000,
+                   help="active: the N films with most TMDB votes")
+    p.add_argument("--active-by-popularity", type=int, default=40_000,
+                   help="plus N most popular (TMDB popularity) of the rest; 0 and 0 = keep flags")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,

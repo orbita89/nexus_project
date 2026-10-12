@@ -11,11 +11,140 @@
   },
   "paths": {
     "/api/v1/catalog/admin/entities": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Все сущности, включая скрытые с сайта (`active` в каждой): найти и включить. Фильтры и\nсортировки — как у `GET /entities`, плюс `active`.",
+        "operationId": "admin_list_entities",
+        "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "По умолчанию `new`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntitySort"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Slug тега.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Подстрока в названии или оригинальном названии, без учёта регистра.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "active",
+            "in": "query",
+            "description": "`true` — только активные, `false` — только скрытые; не передан — все.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница сущностей",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AdminEntitySummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный фильтр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
       "post": {
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Создать сущность. `metadata` проверяется по схеме своего `kind`.",
+        "summary": "Создать сущность. `metadata` проверяется по схеме своего `kind`. `active` — по умолчанию `true`.",
         "operationId": "create_entity",
         "requestBody": {
           "content": {
@@ -150,7 +279,7 @@
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Изменить сущность. Переданные поля заменяются, `null` очищает необязательное поле;\n`metadata` заменяется целиком. `kind` не меняется.",
+        "summary": "Изменить сущность. Переданные поля заменяются, `null` очищает необязательное поле;\n`metadata` заменяется целиком. `kind` не меняется. `active: false` скрывает с сайта: поиск\nудаляет документ, фронтенд по ISR получает 404 и удаляет статику.",
         "operationId": "update_entity",
         "parameters": [
           {
@@ -1427,7 +1556,7 @@
           "catalog"
         ],
         "summary": "Список сущностей. `sort`: `new` (по умолчанию: новинки сверху, без даты — в конце), `popular`\n(больше оценок), `rating` (выше средняя, без оценок — в конце), `title`.",
-        "description": "Оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в\nтаблицы рецензий не ходит.",
+        "description": "Оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в\nтаблицы рецензий не ходит. Только активные сущности.",
         "operationId": "list_entities",
         "parameters": [
           {
@@ -1530,7 +1659,7 @@
           "catalog"
         ],
         "summary": "Карточка сущности: поля, теги и участники в порядке титров.",
-        "description": "Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика\nфронтенда (SSG/ISR), сюда приходят её пересборка и админка.",
+        "description": "Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика\nфронтенда (SSG/ISR), сюда приходят её пересборка и админка.\n\nНеактивная сущность — 404 для всех, кроме админа (ему — с неактивными связанными).",
         "operationId": "get_entity",
         "parameters": [
           {
@@ -1555,8 +1684,18 @@
               }
             }
           },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "Не найдена",
+            "description": "Не найдена или скрыта",
             "content": {
               "application/json": {
                 "schema": {
@@ -1565,7 +1704,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/catalog/entities/{slug}/similar": {
@@ -1573,7 +1718,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Похожие на сущность: тот же тип, больше общих тегов — выше (жанр весит вдвое), при равенстве —\nновее. Без самой\nсущности и её связанных (они и так на карточке). Нет тегов — пустая страница.",
+        "summary": "Похожие на сущность: тот же тип, больше общих тегов — выше (жанр весит вдвое), при равенстве —\nновее. Только активные; у неактивной — 404. Без самой\nсущности и её связанных (они и так на карточке). Нет тегов — пустая страница.",
         "description": "Первая версия без ML: один запрос с подсчётом пересечения тегов по `entity_tags (tag_id)`.",
         "operationId": "list_similar_entities",
         "parameters": [
@@ -1637,7 +1782,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Список людей по алфавиту.",
+        "summary": "Список людей по алфавиту. Только с работами в активных сущностях (или вовсе без работ).",
         "operationId": "list_people",
         "parameters": [
           {
@@ -1716,8 +1861,18 @@
               }
             }
           },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "Не найден",
+            "description": "Не найден или все работы скрыты",
             "content": {
               "application/json": {
                 "schema": {
@@ -1726,7 +1881,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/catalog/search": {
@@ -1734,7 +1895,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Полнотекстовый поиск по каталогу: опечатки, ранжирование, фильтры. Сортировка по релевантности.",
+        "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры.\nСортировка по релевантности; `sort=popularity` / `sort=votes` — по `metadata.popularity` /\n`metadata.vote_count` (TMDB), у кого поля нет — в конце.",
         "description": "Индекс обновляется после изменений в админке с задержкой в доли секунды.",
         "operationId": "search",
         "parameters": [
@@ -1747,6 +1908,15 @@
               "type": "string"
             },
             "example": "дюан"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Не передан — по релевантности.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SearchSort"
+            }
           },
           {
             "name": "kind",
@@ -1834,7 +2004,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Все теги по алфавиту с числом сущностей; `?kind=genre` — только жанры. Тегов немного, поэтому\nбез пагинации.",
+        "summary": "Все теги по алфавиту с числом активных сущностей (счётчик держат триггеры); `?kind=genre` —\nтолько жанры. Тегов немного, поэтому\nбез пагинации.",
         "operationId": "list_tags",
         "parameters": [
           {
@@ -1959,6 +2129,25 @@
         },
         "additionalProperties": false
       },
+      "AdminEntitySummary": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EntitySummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "active"
+            ],
+            "properties": {
+              "active": {
+                "type": "boolean"
+              }
+            }
+          }
+        ],
+        "description": "Сущность в админском списке: как в публичном, плюс флаг активности."
+      },
       "Award": {
         "type": "object",
         "description": "Награда или номинация.",
@@ -2052,6 +2241,13 @@
           "title"
         ],
         "properties": {
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Видна на сайте. По умолчанию `true`."
+          },
           "cover_url": {
             "type": [
               "string",
@@ -2218,10 +2414,15 @@
           "slug",
           "title",
           "metadata",
+          "active",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Видна на сайте. Неактивная хранится в БД, но её нет в списках, поиске, похожих и\nфильмографиях, а карточка — 404 для всех, кроме админа."
+          },
           "cover_url": {
             "type": [
               "string",
@@ -2674,6 +2875,17 @@
               "CA"
             ]
           },
+          "popularity": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Популярность TMDB: активность за последние дни, сортировка поиска `popularity`. 0–1000000.",
+            "example": 704.107,
+            "maximum": 1000000,
+            "minimum": 0
+          },
           "runtime_min": {
             "type": [
               "integer",
@@ -2731,9 +2943,69 @@
             "example": [
               "Пустыню снимали в Иордании и ОАЭ."
             ]
+          },
+          "vote_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Число оценок на TMDB: известность за всё время, сортировка поиска `votes`.",
+            "example": 867,
+            "minimum": 0
           }
         },
         "additionalProperties": false
+      },
+      "Page_AdminEntitySummary": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/EntitySummary"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "active"
+                  ],
+                  "properties": {
+                    "active": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              ],
+              "description": "Сущность в админском списке: как в публичном, плюс флаг активности."
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
       },
       "Page_EntitySummary": {
         "type": "object",
@@ -3183,6 +3455,14 @@
           "remake"
         ]
       },
+      "SearchSort": {
+        "type": "string",
+        "description": "Сортировка поиска (без неё — по релевантности). Значения — из `metadata` фильма (TMDB);\nу кого поля нет — в конце.",
+        "enum": [
+          "popularity",
+          "votes"
+        ]
+      },
       "SeriesMetadata": {
         "type": "object",
         "description": "Поля сериала.",
@@ -3419,7 +3699,7 @@
           "entities_count": {
             "type": "integer",
             "format": "int64",
-            "description": "Сколько сущностей с этим тегом.",
+            "description": "Сколько активных сущностей с этим тегом.",
             "example": 12
           },
           "id": {
@@ -3468,6 +3748,13 @@
         "type": "object",
         "description": "Изменение сущности: переданные поля заменяются, `null` очищает необязательное поле.\n`kind` не меняется. `metadata` заменяется целиком.",
         "properties": {
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Включить (`true`) или скрыть с сайта (`false`)."
+          },
           "cover_url": {
             "type": [
               "string",
