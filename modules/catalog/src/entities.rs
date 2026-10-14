@@ -41,19 +41,28 @@ pub(crate) fn is_admin(viewer: Option<&AuthUser>) -> bool {
 ///
 /// Наши оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в
 /// таблицы рецензий не ходит.
+///
+/// Поиска по названию здесь нет: весь поиск на сайте — `GET /search` (Meilisearch); `q` — 400
+/// `use_search`.
 #[utoipa::path(
     get, operation_id = "list_entities", path = "/entities", tag = "catalog",
     params(ListEntitiesQuery),
     responses(
         (status = 200, description = "Страница сущностей", body = Page<EntitySummary>),
-        (status = 400, description = "Неверный фильтр", body = ErrorBody),
+        (status = 400, description = "Неверный фильтр; `q` — `use_search`", body = ErrorBody),
     )
 )]
 pub async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListEntitiesQuery>,
 ) -> AppResult<Json<Page<EntitySummary>>> {
-    let page = list_page(&state.db, query, Some(true)).await?;
+    if query.q.is_some() {
+        return Err(
+            AppError::BadRequest("text search is served by GET /search only".into())
+                .with_code("use_search"),
+        );
+    }
+    let page = list_page(&state.db, query, None, Some(true)).await?;
     Ok(Json(Page {
         items: page.items.into_iter().map(|row| row.entity).collect(),
         total: page.total,
@@ -63,16 +72,18 @@ pub async fn list(
 }
 
 /// Страница списка: публичный (`active = Some(true)`: видимые) и админский (`active` из запроса).
+/// `q` — подстрока в названии, только для админки (скрытых сущностей нет в Meilisearch).
 pub(crate) async fn list_page(
     db: &PgPool,
     query: ListEntitiesQuery,
+    q: Option<&str>,
     active: Option<bool>,
 ) -> AppResult<Page<AdminEntitySummary>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
     if let Some(year) = query.year {
         check_year(year)?;
     }
-    let pattern = query.q.as_deref().and_then(like_pattern);
+    let pattern = q.and_then(like_pattern);
     let sort = query.sort.unwrap_or_default();
     // Сортировки по статусу выхода — со своим фильтром.
     let by_sort = match sort {

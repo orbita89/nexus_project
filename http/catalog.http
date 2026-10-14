@@ -69,14 +69,13 @@ GET {{host}}/api/v1/catalog/entities?kind=book&tag=sci-fi&limit=100
     });
 %}
 
-### Фильтр по году и подстроке
+### Подстрока в списке → 400 use_search (поиск — только GET /search)
 GET {{host}}/api/v1/catalog/entities?year=2021&q=дюна
 
 > {%
-    client.test("Дюна 2021", () => {
-        client.assert(response.status === 200, `got ${response.status}`);
-        client.assert(response.body.total === 1, JSON.stringify(response.body));
-        client.assert(response.body.items[0].slug === "dune-2021");
+    client.test("q не принимается", () => {
+        client.assert(response.status === 400, `got ${response.status}`);
+        client.assert(response.body.code === "use_search", JSON.stringify(response.body));
     });
 %}
 
@@ -189,15 +188,36 @@ GET {{host}}/api/v1/catalog/search?q=нейромнат
     });
 %}
 
-### Поиск по участнику с фильтром по типу
-GET {{host}}/api/v1/catalog/search?q=Вильнёв&kind=movie
+### Поиск: диапазон лет и сортировка «новые»
+GET {{host}}/api/v1/catalog/search?kind=movie&year_from=2000&year_to=2010&sort=new
 
 > {%
-    client.test("фильмы Вильнёва", () => {
+    client.test("фильмы 2000–2010, новые сверху", () => {
         client.assert(response.status === 200, `got ${response.status}`);
-        const slugs = response.body.items.map(e => e.slug);
-        client.assert(slugs.includes("blade-runner-2049") && slugs.includes("arrival-2016"), slugs.join());
-        client.assert(response.body.items.every(e => e.kind === "movie"));
+        const years = response.body.items.map(e => Number(e.release_date.slice(0, 4)));
+        client.assert(years.every(y => y >= 2000 && y <= 2010), years.join());
+        client.assert(years.every((y, i) => i === 0 || years[i - 1] >= y), years.join());
+    });
+%}
+
+### Подсказки студий
+GET {{host}}/api/v1/catalog/search/studios?q=warn&limit=5
+
+> {%
+    client.test("студии с числом сущностей", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.length <= 5, JSON.stringify(response.body));
+        client.assert(response.body.every(s => typeof s.name === "string" && s.count > 0));
+    });
+%}
+
+### Фильтр по людям — пока заглушка (503)
+GET {{host}}/api/v1/catalog/search?person=christopher-nolan&role=director
+
+> {%
+    client.test("person_filter_unavailable", () => {
+        client.assert(response.status === 503, `got ${response.status}`);
+        client.assert(response.body.code === "person_filter_unavailable", JSON.stringify(response.body));
     });
 %}
 

@@ -127,6 +127,7 @@ TMDB с русским названием (121 371) и 500 самых попул
 | `id` | `uuid` | PK | |
 | `slug` | `text` | NOT NULL, UNIQUE | Для URL: `denis-villeneuve` |
 | `full_name` | `text` | NOT NULL | Имя |
+| `original_name` | `text` | | Имя латиницей (английский перевод TMDB), если отличается от `full_name`: поиск людей по «brad pitt». Миграция `20261021100000_person_stats.sql` заполнила из `person_tmdb_data` (dev: 189 840 из 886 993; у остальных `full_name` уже латиницей или перевода нет); дальше — `tmdb_full.py --people` и админка |
 | `birth_date` | `date` | | Дата рождения |
 | `photo_url` | `text` | | Фото |
 | `bio` | `text` | | Биография |
@@ -138,6 +139,27 @@ TMDB с русским названием (121 371) и 500 самых попул
 **Публичный человек** — с работой в активной сущности или вовсе без работ (заведён в админке):
 `/people` и `/people/{slug}` показывают только таких (админу карточка открыта всегда),
 фильмография — только активные сущности.
+
+### `person_stats` ✅ — известность людей
+
+Миграция `20261021100000_person_stats.sql`. Для ранжирования поиска людей ([«Поиск людей»](#поиск-людей-)).
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `person_id` | `uuid` | PK, FK → `people`, CASCADE | |
+| `fame` | `double precision` | NOT NULL, default 0 | Известность: Σ по работам в активных сущностях «вес роли × `entity_stats.tmdb_votes`» |
+| `known_for` | `text` | | Основная роль: с наибольшим вкладом в `fame` (при равенстве — больше работ, затем по алфавиту); работ нет — NULL |
+| `updated_at` | `timestamptz` | NOT NULL | триггер `set_updated_at` |
+
+Индекс `(fame DESC, person_id)`. Вес роли: режиссёр и первые 3 актёра по титрам — 1, актёры 4–10 —
+0.4, остальные актёры — 0.1, `writer` и `composer` — 0.3, прочие — 0.15; за фильм берётся
+наибольший вес человека (режиссёр-сценарист считается один раз). Номер актёра — `row_number()` по
+`position` среди `actor` сущности. Пишет `people_search::refresh_fame`: всех — в начале шага
+`fill_people` перестройки (dev: 71 с при первом заполнении 886 993 строк; дальше переписываются только
+изменившиеся), выбранных людей — при публикации правок. TMDB popularity человека не годится: это
+«тренд недели» (наверху случайные люди, Брэд Питт — 49-й), а число оценок фильмов копится годами
+(dev: Сэмюэл Л. Джексон, Роберт Дауни-младший, Том Хэнкс, Брэд Питт, Леонардо Ди Каприо — топ-5).
+Ограничение: российские фильмы набирают мало оценок TMDB — русские актёры ниже зарубежных.
 
 ### `person_credit_counts` ✅ — счётчики работ людей
 
@@ -271,16 +293,50 @@ Tantivy, [«Холодный архив»](#холодный-архив-)); зд
 |---|---|---|---|
 | `tmdb_id` | `integer` | PK | Id фильма в TMDB |
 | `archived_at` | `timestamptz` | NOT NULL, default `now()` | |
+| `manual` | `boolean` | NOT NULL, default `false` | Перенесён вручную из админки (`POST /admin/archive/demote`): сборка горячего слоя его не возвращает. Миграция `20261022100000_archived_tmdb_manual.sql` |
 
-Пишет `nexus archive build` (строка ушла в архив); удаляют промоушен и сборка (фильм вернулся в
-горячий слой). `merge.py` пропускает фильмы с этими id (в логе — `archived`).
+Пишут `nexus archive build` (строка ушла в архив) и ручной перенос (`manual = true`, в том числе
+поверх строки сборки); удаляют промоушен и сборка (фильм вернулся в горячий слой; `manual` сборка не
+возвращает). `merge.py` пропускает фильмы с этими id (в логе — `archived`).
 
 ## Поиск
 
 Активные сущности индексируются в Meilisearch (индекс `entities`; скрытые — нет: правка `active`
 добавляет или удаляет документ, перестройка берёт только `active`): опечатки, ранжирование, фильтры
-по `kind`, тегу и году, сортировки по `popularity` и `vote_count`. Ищется по названию, оригинальному названию, именам участников, названиям тегов и
-описанию, в таком порядке важности. Клиент — тонкая обёртка над HTTP API в `shared::search`, без SDK.
+по `kind`, тегу, году (точно или диапазоном), студии; сортировки — см. ниже. Ищется по названию,
+оригинальному названию и студиям, в таком порядке важности. Клиент — тонкая обёртка над HTTP API в
+`shared::search`, без SDK.
+
+**Весь поиск на сайте — только через Meilisearch** (решение пользователя 2026-10-14): `GET /search`
+и подсказки `GET /search/studios`. Публичный `GET /entities` поиска по названию не делает (`q` →
+400 `use_search`); подстрока по БД (`ILIKE`) осталась только в админке `GET /admin/entities?q=`
+(скрытых сущностей нет в индексе) и в `GET /people?q=` (список по алфавиту). Люди ищутся через
+`GET /search/people` ([«Поиск людей»](#поиск-людей-)).
+
+**Фильтры `GET /search`** (все через AND, `filters_of` в `search.rs`):
+
+| Параметр | Фильтр Meilisearch | Проверка |
+|---|---|---|
+| `kind` | `kind = movie` | enum |
+| `tag` | `tags = "<slug>"` | slug, иначе 400 |
+| `year` | `year = 2001` | 1–9998; вместе с `year_from`/`year_to` — 400 |
+| `year_from`, `year_to` | `year 2000 TO 2010` (включительно), одна граница — `year >= …` / `year <= …` | 1–9998; `from > to` — 400 |
+| `studio` | `studios = "<название>"` — точное, без учёта регистра (так сравнивает Meilisearch), любая из студий | 1–200 символов после trim; `\` и `"` экранируются |
+| `person`, `role` | **заглушка**: людей в индексе нет → 503 `person_filter_unavailable` | `person` — slug, `role` — `a-z`/`_`; `role` без `person` — 400 |
+
+Сортировки поиска: без `sort` — релевантность; `recommended` / `trending` / `top_rated` —
+`rank_score` / `popularity` / `quality` по убыванию; `new` — `release_ts:desc` + фильтр
+`release_ts <= сегодня` (только вышедшие); `soon` — `release_ts:asc` + `release_ts > сегодня`;
+`title` — `title:asc`. Без значения поля — в конце.
+
+**Подсказки студий** `GET /search/studios?q=&kind=&limit=` — facet search Meilisearch
+(`POST /indexes/entities/facet-search`, `facetName: studios`): по части названия с опечатками, без
+`q` — самые частые (`faceting.sortFacetValuesBy.studios = count`). Ответ `[{name, count}]`, `name` —
+значение для `studio`.
+
+**Фильтр по людям (план):** добавить в документ участников (например `credits: ["director:<slug>",
+"actor:<slug>"]`, filterable) и заменить заглушку в `filters_of` на `credits = "<role>:<slug>"`
+(без роли — поле `people`). Перестройка станет дольше (2,75 млн титров) — нужен замер.
 
 Источник правды — PostgreSQL, индекс производный:
 
@@ -299,16 +355,39 @@ Tantivy, [«Холодный архив»](#холодный-архив-)); зд
 ### Что лежит в индексе
 
 Документ индекса `entities` — компактный (2026-10-14, `SearchDoc` в `search.rs`): `id`, `kind`,
-`slug`, `title`, `original_title`, `release_date`, `cover_url`, `year`, `studio` (первая из
-`metadata.studios`), `tags` (slug'и тегов, фильтр), `rank_score`, `popularity`, `quality`
-(сортировки), `imdb_rating`, `imdb_votes`, `release_status` (выдача). Ищется по `title`,
-`original_title`, `studio`; фильтры — `kind`, `tags`, `year`, `slug`. Карточки (`card`), описания,
+`slug`, `title`, `original_title`, `release_date`, `cover_url`, `year`, `release_ts`
+(`release_date` в unix-секундах полуночи UTC: сортировки `new`/`soon`, Meilisearch сравнивает только
+числа), `studios` (все из `metadata.studios`), `tags` (slug'и тегов, фильтр), `rank_score`,
+`popularity`, `quality` (сортировки), `imdb_rating`, `imdb_votes`, `release_status` (выдача).
+Настройки (`entity_settings`): `searchableAttributes` — `title`, `original_title`, `studios`;
+`filterableAttributes` — `kind`, `tags`, `year`, `slug`, `studios`, `release_ts`;
+`sortableAttributes` — `rank_score`, `popularity`, `quality`, `release_ts`, `title`;
+`faceting.sortFacetValuesBy` — `studios: count`. Настройки ставятся на теневой индекс при
+перестройке: после выкладки фильтры `studio`/диапазон/`new` работают, когда пройдёт перестройка
+(при старте — в фоне). Карточки (`card`), описания,
 имён участников и названий тегов в индексе больше нет: поиск по имени актёра или названию тега не
 работает (по решению пользователя), а перестройка при 2,75 млн титров шла ~45 мин вместо минут.
 Документы пачки строятся из уже прочитанных строк и одного запроса тегов, без карточек.
 
-Индекса людей нет: он хранил только карточки, теперь они из БД. Оставшийся от прежних версий
-индекс `people` ни на что не влияет, его можно удалить: `curl -X DELETE localhost:7700/indexes/people -H "$KEY"`.
+### Поиск людей ✅
+
+Индекс `people` (2026-10-14, `people_search.rs`) — публичные люди (с работой в активной сущности
+или без работ). Документ `PersonDoc`: `id`, `slug`, `full_name`, `original_name`, `birth_date`,
+`photo_url`, `known_for`, `fame` (из `person_stats`). Настройки: `searchableAttributes` —
+`full_name`, `original_name`; `filterableAttributes` — `known_for`; `sortableAttributes` — `fame`,
+`full_name`; `rankingRules` — `words, typo, proximity, attribute, sort, exactness, fame:desc`:
+известность решает среди одинаково подходящих совпадений («Брэд» → Брэд Питт, затем Брэдли Купер,
+Брэд Бёрд …), точное совпадение имени важнее славы; без `q` — по известности.
+
+`GET /search/people?q=&known_for=&limit=&offset=` → `Page<PersonHit>` (`id`, `slug`, `full_name`,
+`original_name`, `birth_date`, `photo_url`, `known_for`; `fame` не отдаётся). `known_for` —
+`a-z`/`_` (иначе 400), фильтр `known_for = <role>`.
+
+Индекс строится и переключается вместе с `entities` ([«Перестройка поиска»](#перестройка-поиска-),
+шаг `fill_people`, пачки по 2000). Публикация правок (`publish::run` → `search::update_index`)
+пересчитывает `fame` затронутых людей (`Touched.people`: изменённый человек и состав изменённых
+сущностей) и переотправляет их документы, скрытых удаляет. Фильтр `person` в `GET /search` —
+по-прежнему заглушка (участников в документе `entities` нет).
 
 Ключ в dev — `nexus_dev_master_key` (`MEILI_MASTER_KEY` в `infra/docker-compose.yml`).
 
@@ -409,24 +488,29 @@ data: {"type":"done","ok":true,"entity":{ ...карточка как в GET /ent
 ## Перестройка поиска ✅
 
 Код — `search.rs` (`reindex`), события — `jobs.rs`. Прямая очистка живого индекса не используется
-никогда. Поиск всегда читает индекс `entities` — он играет роль алиаса (в Meilisearch 1.15 алиасов
-нет), а версии подменяют его атомарным `swap-indexes`:
+никогда. Поиск всегда читает индексы `entities` и `people` — они играют роль алиасов (в Meilisearch
+1.15 алиасов нет), а версии подменяют их атомарным `swap-indexes`. Оба индекса перестраиваются одной
+перестройкой с общей меткой версии:
 
-1. **create_index** — теневой `entities_v<unix ms>` с настройками; `entities` создаётся, если его нет.
+1. **create_index** — теневые `entities_v<unix ms>` и `people_v<unix ms>` с настройками; `entities`
+   и `people` создаются, если их нет.
 2. **fill** — все сущности из PostgreSQL пачками по 500 (keyset по `id`, карточки пачки — двумя
    запросами) в теневой индекс. Пока Meilisearch применяет пачку, читается следующая. Событие
    `progress` после каждой пачки: `{"done": 1000, "total": 100000}`.
-3. **check** — новый индекс должен быть **не меньше `SEARCH_REINDEX_MIN_PERCENT`%** текущего
+2б. **fill_people** — `refresh_fame` всех людей, затем все публичные люди пачками по 2000 в
+   `people_v<ms>` (`progress` со `step: fill_people`). Dev: 886 993 человека.
+3. **check** — **каждый** новый индекс должен быть **не меньше `SEARCH_REINDEX_MIN_PERCENT`%** текущего
    (`numberOfDocuments`; по умолчанию и в проде — 80, 0–100, иначе приложение не стартует). Меньше —
-   значит, выборка сломана или неполная: поиск не переключается, теневой индекс удаляется, ответ `409`
+   значит, выборка сломана или неполная: поиск не переключается, теневые индексы удаляются, ответ `409`
    (в потоке — `check: failed`). Если сущности удалены намеренно — `?force=true`. Текущий пуст —
    проверка проходит. **В dev** (`infra/docker-compose.yml`) — `0`, проверки нет: каталог часто
    перезаливается целиком (импорт из TMDB/Wikidata, откат), и перестройка при старте не должна
    упираться в старый большой индекс.
-4. **swap** — `entities ⇄ entities_v<ms>`: поиск на всех инстансах сразу видит новые документы, а в
-   `entities_v<ms>` остаётся предыдущая версия («на всякий случай»; откат — swap обратно).
-5. **rotate** — хранятся строго две версии: текущая (`entities`) и предыдущая (`entities_v<ms>` только
-   что). Все `entities_v*` старше удаляются: «Удалены устаревшие индексы: …».
+4. **swap** — `entities ⇄ entities_v<ms>` и `people ⇄ people_v<ms>` одной задачей: поиск на всех
+   инстансах сразу видит новые документы, а в `*_v<ms>` остаётся предыдущая версия («на всякий
+   случай»; откат — swap обратно).
+5. **rotate** — хранятся строго две версии каждого: текущая и предыдущая (`*_v<ms>` только что). Все
+   `entities_v*` и `people_v*` старше удаляются: «Удалены устаревшие индексы: …».
 6. **isr** — `POST {ISR_URL}/_isr/revalidate` с `{"all": true}`: фронтенд отвечает `202` и
    пересобирает всю статику в фоне, поэтому шаг значит «запущено», а не «готово» (ход — в логе фронтенда). Только при
    ручном запуске; при старте и по расписанию — нет.
@@ -444,20 +528,25 @@ data: {"type":"done","ok":true,"entity":{ ...карточка как в GET /ent
 **Поток для админки:** `POST /admin/search/reindex/stream[?force=true]` → `text/event-stream`:
 
 ```
-event: plan      data: {"type":"plan","steps":[{"step":"create_index",...},{"step":"fill",...},{"step":"check",...},{"step":"swap",...},{"step":"rotate",...},{"step":"isr",...}]}
-event: step      data: {"type":"step","step":"create_index","status":"done","message":"Создан теневой индекс entities_v1759912345123","duration_ms":35}
+event: plan      data: {"type":"plan","steps":[{"step":"create_index",...},{"step":"fill",...},{"step":"fill_people",...},{"step":"check",...},{"step":"swap",...},{"step":"rotate",...},{"step":"isr",...}]}
+event: step      data: {"type":"step","step":"create_index","status":"done","message":"Созданы теневые индексы entities_v1759912345123, people_v1759912345123","duration_ms":35}
 event: progress  data: {"type":"progress","step":"fill","done":500,"total":100000}
-event: step      data: {"type":"step","step":"check","status":"done","message":"Новый индекс: 100000 документов, текущий: 99870 (100%)"}
-event: step      data: {"type":"step","step":"rotate","status":"done","message":"Удалены устаревшие индексы: entities_v1759800000000"}
-event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"previous_count":99870,"previous_version":"entities_v1759912345123","deleted":["entities_v1759800000000"]}}
+event: progress  data: {"type":"progress","step":"fill_people","done":2000,"total":880000}
+event: step      data: {"type":"step","step":"check","status":"done","message":"Новые индексы — entities: 100000 документов, текущий: 99870 (100%); people: 880000 документов, текущий: 879000 (100%)"}
+event: step      data: {"type":"step","step":"rotate","status":"done","message":"Удалены устаревшие индексы: entities_v1759800000000, people_v1759800000000"}
+event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"people_indexed":880000,"previous_count":99870,"previous_version":"entities_v1759912345123","deleted":["entities_v1759800000000","people_v1759800000000"]}}
 ```
 
-Без потока — `POST /admin/search/reindex[?force=true]`, ответ — тот же `reindex` (`ReindexResult`).
+Без потока — `POST /admin/search/reindex[?force=true]`, ответ — тот же `reindex` (`ReindexResult`:
+`indexed`, `people_indexed`, `previous_count` и `previous_version` — индекса `entities`, `deleted` —
+устаревшие версии обоих).
 
 **Тесты** — `app/tests/catalog.rs`: хранятся ровно две версии, отказ переключаться при 20% и
 `force=true`, ровно 80% — переключение, `SEARCH_REINDEX_MIN_PERCENT=0` — переключение без `force`
 (тесты задают 80 явно, независимо от окружения), поток (шаги, `progress`, ротация, `{"all": true}` во
-фронтенд), отказ в потоке (`check: failed`, поиск прежний), `409` при идущей перестройке.
+фронтенд), отказ в потоке (`check: failed`, поиск прежний), `409` при идущей перестройке; поиск
+людей — `people_search_ranks_by_fame` (`fame`/`known_for` в `person_stats`, ранжирование тёзок,
+пустой запрос, латиница с опечаткой, фильтр `known_for`, правка `original_name` в админке).
 
 ## Полные данные TMDB ✅
 
@@ -484,7 +573,8 @@ event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"pre
   (`belongs_to_collection`) связываются `sequel`, если связи (в любую сторону) ещё нет.
 - **`--people`** — люди из титров горячего слоя: `GET /3/person/{id}?language=ru-RU&
   append_to_response=external_ids,translations,images` → `person_tmdb_data`; `bio` (русская
-  биография, иначе прежняя), `birth_date`, `photo_url`. Фильмография (`combined_credits`, ~200 КБ)
+  биография, иначе прежняя), `birth_date`, `photo_url`, `original_name` (английский перевод, если
+  отличается от `full_name`). Фильмография (`combined_credits`, ~200 КБ)
   не берётся — дублирует титры.
 - Только в сырье (в API пока нет): ключевые слова, переводы и альтернативные названия, картинки
   (постеры, фоны, логотипы), все видео, внешние id, где смотреть, рекомендации и похожие TMDB,
@@ -559,7 +649,8 @@ event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"pre
      (номера полей прежние); между пересозданием и первым коммитом (100 000) поиск по архиву пуст;
    - в конце — перестройка Meilisearch с `force` и ISR `{"all": true}`.
    Отчёт: `rows`, `invalid`, `hot` (`inserted`, `activated`), `archived`, `deleted`,
-   `kept_in_use`, `kept_manual`, `people_deleted`, `archive_size`.
+   `kept_in_use`, `kept_manual`, `people_deleted`, `archive_size`, `manual_archived` (строк, не
+   допущенных в Top-K: TMDB id с `archived_tmdb.manual`, их проход 1 пропускает).
 3. Место на диске PostgreSQL возвращает только `VACUUM FULL` (блокирует таблицы — окно
    обслуживания): `entities`, `entity_credits`, `people`, `person_credit_counts`, `entity_stats`,
    `entity_tmdb`, `entity_tags`, `catalog_import.movies`, `catalog_import.people`.
@@ -573,6 +664,19 @@ set-based удаление детей, `entities`, людей без работ,
 `tags.entities_count` как в миграции `entity_active`, проверка всех FK на `entities`/`people` —
 висячие → ROLLBACK; повторный запуск ничего не находит) → `VACUUM FULL` → перестройка поиска
 (`POST /admin/search/reindex?force=true` или перезапуск). Тест — `deferred_delete_and_purge_script`.
+
+**Ручной перенос в архив** (2026-10-14, `archive::demote`): `POST /admin/archive/demote`
+`{"slugs": [...]}` (1–100, без повторов). Пропускаются с причиной (`skipped[].reason`): `not_found`
+(нет на сайте), `no_tmdb` (без `entity_tmdb`: пометку `manual` держит TMDB id), `in_use` (данные
+пользователей — `InterestDirectory::entities_in_use`, как в сборке; решение пользователя: не
+удалять их). Остальные: `Touched::collect` (адреса страниц, участники) → писатель архива (занят —
+409, ничего не меняется) → `upsert` документов (название, оригинальное название, дата, постер, TMDB
+id, popularity) и `commit` → одна транзакция: `archived_tmdb` с `manual = true`,
+`pipeline::delete_entities` (`entities` вместе с `active_manual` — каскадом титры, теги,
+статистика, сырьё TMDB; люди без других работ) → упала БД — документы удаляются из архива обратно →
+`publish::run` (удаление из Meilisearch, `fame` участников, ISR). Ответ `{archived, skipped}`.
+Возврат — промоушен «скелетом» (описание, титры, жанры теряются). Тест —
+`demote_moves_films_to_archive_and_build_keeps_them_cold`.
 
 **Повторная сборка** (новые popularity после «Обновить рейтинги»): `dump` + `build` без `--fresh` —
 фильмы архива участвуют в Top-K наравне, поднявшиеся возвращаются в PostgreSQL «скелетом».
@@ -633,7 +737,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 
 | Метод | Путь | Что делает |
 |---|---|---|
-| GET | `/entities` | Список видимых. Фильтры: `kind`, `tag` (slug), `year`, `q` (подстрока в названии или оригинальном, без учёта регистра). `sort`: `recommended` (по умолчанию, балл), `trending`, `top_rated`, `new` (только вышедшие), `soon`, `popular` (наши оценки), `rating`, `title` ([«Сортировка и активные»](#сортировка-и-активные-)). В элементах — `release_status`, `imdb_rating`, `imdb_votes` |
+| GET | `/entities` | Список видимых (без поиска по названию: `q` → 400 `use_search`, искать — `GET /search`). Фильтры: `kind`, `tag` (slug), `year`. `sort`: `recommended` (по умолчанию, балл), `trending`, `top_rated`, `new` (только вышедшие), `soon`, `popular` (наши оценки), `rating`, `title` ([«Сортировка и активные»](#сортировка-и-активные-)). В элементах — `release_status`, `imdb_rating`, `imdb_votes` |
 | GET | `/entities/{slug}` | Карточка: все поля (с `active`), теги, участники в порядке титров (`position`), `related` (активные). Из PostgreSQL. Скрытая — 404; с токеном админа — 200 (и скрытые связанные); неверный токен — 401 |
 | GET | `/entities/{slug}/similar` | Похожие активные: `?limit=` 1–24 (по умолчанию 12) → `Page<EntitySummary>` ([«Похожие»](#похожие-)); у скрытой — 404 |
 | GET | `/people` | Список публичных людей по алфавиту (с активной работой или без работ), `q` — подстрока в имени |
@@ -642,7 +746,9 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `entities_count`; нет — 404 |
 | GET | `/archive/search` | Поиск по холодному архиву (Tantivy): `q` (1–200 символов, все слова в `title` или `orig_title`; синтаксис Tantivy разбирается снисходительно), `limit` 1–20 (20), `offset` 0–1000 (0) → `Page<ArchiveDoc>` `{items, total, limit, offset}` (`total` — всего найдено, `Count`); `ArchiveDoc`: `slug`, `title`, `original_title`, `kind`, `tmdb_id`, `release_date`, `popularity`, `cover_url` (`null` — нет постера). Публичный. На сайте — второй блок выдачи после `GET /search` (чекбокс «Архив», по умолчанию включён). 400 — пустой/длинный `q`, `limit`/`offset` вне диапазона; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/entities/{slug}` | Фильм из архива для его страницы (только чтение): `ArchiveDoc` (название, оригинальное название, дата, постер). Публичный. 404 — нет в архиве или неверный slug (фильм мог вернуться на сайт — `GET /entities/{slug}`); 503 — архив недоступен |
-| GET | `/search` | Поиск по видимым через Meilisearch: `q`, фильтры `kind`, `tag`, `year`. По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb (без значения — в конце); другое значение — 400 |
+| GET | `/search` | Весь поиск сайта, Meilisearch, по видимым: `q` (название, оригинальное, студии; пустой — все), фильтры `kind`, `tag`, `year` (ровно) или `year_from`/`year_to` (диапазон включительно), `studio` (точное название, без учёта регистра), `person`+`role` — заглушка, 503 `person_filter_unavailable` ([«Поиск»](#поиск)). По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb; `new` (вышедшие, новые сверху), `soon` (будущие, ближайшие сверху), `title` (без значения — в конце); другое значение — 400. 400 — `year` вместе с диапазоном, `year_from > year_to`, год вне 1–9998, пустая/длинная (>200) студия, `role` без `person`, неверный slug тега/человека |
+| GET | `/search/people` | Поиск людей, Meilisearch, индекс `people` ([«Поиск людей»](#поиск-людей-)): `q` (имя по-русски или латиницей, опечатки, начало слова; до 300 символов; пустой — самые известные), `known_for` (основная роль: `actor`, `director`, …), `limit` 1–100 (20), `offset` → `Page<PersonHit>`: `id`, `slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `known_for`. Ранжирование — качество совпадения, затем известность (`person_stats.fame`). 400 — длинный `q`, `known_for` не `a-z`/`_`; 503 — Meilisearch недоступен; индекса нет — пустая страница |
+| GET | `/search/studios` | Подсказки для фильтра `studio` (facet search Meilisearch): `q` — часть названия, опечатки допустимы (пустой — самые частые), `kind`, `limit` 1–50 (10) → `[{"name", "count"}]`. 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` |
 
 **`related`** в карточке — одна лента для карусели: `[{...EntitySummary, "relation": "prequel"|"sequel"|"remake"}, ...]`, хронологически по `release_date` (без даты — в конце, затем `position`, затем заголовок), пусто — `[]`. Сиквелы, ремейки и приквелы идут **в одной полосе**, тип связи — у каждой карточки. Связи — в самой карточке, а не отдельным запросом: карточка — статика фронтенда, они попадают в HTML.
 
@@ -673,7 +779,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 
 | Метод | Путь | Что делает |
 |---|---|---|
-| GET | `/admin/entities` | Все сущности, включая скрытые: фильтры и `sort` как у `/entities` плюс `active=true\|false` → `Page<AdminEntitySummary>` (`EntitySummary` + `active`) |
+| GET | `/admin/entities` | Все сущности, включая скрытые: фильтры и `sort` как у `/entities` плюс `q` (подстрока в названии или оригинальном, без учёта регистра, по БД) и `active=true\|false` → `Page<AdminEntitySummary>` (`EntitySummary` + `active`) |
 | POST | `/admin/entities` | Создать сущность (можно сразу с `tags`: slug'и; `active`, по умолчанию `true`) → 201, карточка |
 | PATCH | `/admin/entities/{id}` | Изменить: переданные поля заменяются, `null` очищает необязательное, `metadata` заменяется целиком, `active` включает или скрывает (и ставит `active_manual`). `kind` не меняется |
 | PATCH | `/admin/entities/{id}/stream` | То же, ход публикации потоком `text/event-stream` ([«Публикация»](#публикация-правок-)) |
@@ -683,14 +789,15 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | DELETE | `/admin/entities/{id}/credits/{credit_id}` | Удалить участника (`credits[].id` из карточки) → 204 |
 | PUT | `/admin/entities/{id}/relations` | Связать: `{"kind": "sequel" \| "prequel" \| "remake", "to_id": "...", "position"?: 0}` — `to_id` сиквел, приквел или ремейк сущности → 200, `related` сущности. С собой — 409 `self_relation`; такая связь уже есть (в любую сторону) — 409; нет `to_id` — 400 |
 | DELETE | `/admin/entities/{id}/relations/{to_id}?kind=...` | Убрать связь того же вида (`prequel` — со стороны сиквела, ремейк — с любой) → 204, нет — 404 |
-| POST | `/admin/people` | Добавить человека → 201 |
-| PATCH / DELETE | `/admin/people/{id}` | Изменить (`null` очищает) / удалить вместе с участием |
+| POST | `/admin/people` | Добавить человека (`slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `bio`) → 201; в индексе `people` сразу |
+| PATCH / DELETE | `/admin/people/{id}` | Изменить (`null` очищает; `original_name` — до 300 символов) / удалить вместе с участием; `fame` и документ в индексе `people` пересчитываются |
 | POST | `/admin/tags` | Создать тег: `slug`, `name`, `kind` (`genre` / `tag`, по умолчанию `tag`) → 201 |
 | PATCH / DELETE | `/admin/tags/{id}` | Переименовать, сменить slug или `kind` / удалить (снимается со всех сущностей). Карточки с тегом пересобираются |
 | POST | `/admin/search/reindex` | Перестроить поисковый индекс без простоя (`?force=true` — без проверки размера, `SEARCH_REINDEX_MIN_PERCENT`: 80, в dev 0) → `ReindexResult`; `409` — уже идёт или новый индекс слишком мал |
 | POST | `/admin/search/reindex/stream` | То же потоком `text/event-stream` ([«Перестройка поиска»](#перестройка-поиска-)) |
 | POST | `/admin/tmdb/stats/stream` | «Обновить рейтинги»: дампы TMDB (popularity) и IMDb (рейтинг) → `entity_stats`, пересчёт балла, перестройка поиска; потоком; `done.stats`. `409` — уже идёт долгая операция ([«Сортировка и активные»](#сортировка-и-активные-)) |
 | POST | `/admin/tmdb/active/stream` | «Пересобрать активные»: `?count=` (80000, 0–1000000, иначе 400) вышедших по баллу + все «Скоро премьера»; потоком; `done.active`. `409` — как выше |
+| POST | `/admin/archive/demote` | Перенести фильмы с сайта в архив: `{"slugs": [...]}` 1–100 → 200 `{"archived": [slug], "skipped": [{"slug", "reason": "not_found" \| "no_tmdb" \| "in_use"}]}`; документы в Tantivy, строки удалены из БД (с людьми без работ), `archived_tmdb.manual` — сборка не вернёт; поиск и статика обновляются. 400 — пусто, >100, повтор, неверный slug; 409 — писатель архива занят (ничего не перенесено); 503 — архив недоступен |
 | POST | `/admin/archive/promote/{slug}` | Вернуть фильм из архива: вставка в `entities` (`title`, `original_title`, `release_date`, `cover_url`, `active`, `active_manual`), `entity_tmdb`, `entity_stats.tmdb_popularity`, удаление из `archived_tmdb`; затем `delete_term` + `commit` в Tantivy, публикация (Meilisearch, ISR) → 201, карточка. 404 — нет в архиве (и неверный slug); 409 — slug или TMDB id уже в каталоге, писатель архива занят сборкой (в БД ничего не пишется); 503 — архив недоступен |
 | GET | `/admin/ranking` | Настройки балла и окна «Скоро премьера» |
 | POST | `/admin/ranking/preview` | Топ по формуле с настройками из тела (`?limit=` 1–200, 50), без записи → `[RankPreviewRow]`; неверные настройки — 400 |
@@ -853,8 +960,9 @@ IMDb `(v·r + m·C)/(v + m)` (`m` = `trust_votes`, `C` — средний), шк
 `tmdb_votes`, затем `tmdb_popularity`), `trending` (TMDB popularity, вышедшие с баллом), `top_rated` (байесовский рейтинг), `new`
 (только вышедшие), `soon` (будущие в окне, ближайшие сверху), `popular`/`rating` (наши оценки),
 `title`. Фильмы с датой в будущем в публичных списках — только в `soon` («Скоро премьера»), в
-остальных сортировках их нет. Поиск: `sort=recommended|trending|top_rated` (`rank_score`, `popularity`, `quality` —
-`sortableAttributes`).
+остальных сортировках их нет. Поиск: `sort=recommended|trending|top_rated|new|soon|title`
+(`rank_score`, `popularity`, `quality`, `release_ts`, `title` — `sortableAttributes`); в поиске
+будущие фильмы не скрываются вне `soon`.
 
 **Админка** (запуск вручную, расписания нет; ход — потоком `JobEvent`; одна долгая операция за раз
 — общая блокировка с перестройкой поиска, занято — `409` до потока; без Meilisearch — только БД):
@@ -1022,11 +1130,12 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `metadata.rs` | Схемы `metadata` по типам и их проверка |
 | `validate.rs` | Проверка slug, строк, URL, ролей; UNIQUE → 409 |
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
-| `search.rs` | Индекс `entities`, `update_index`, перестройка с версиями (в т.ч. по расписанию), `GET /search` |
+| `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), `GET /search` (фильтры — `filters_of`), `GET /search/studios` |
+| `people_search.rs` | Индекс `people` (`PersonDoc`, `settings`, `fill`, `update_index`), известность `refresh_fame` → `person_stats`, `GET /search/people` |
 | `tmdb.rs` | Операции админки: «Обновить рейтинги» (дампы TMDB и IMDb), «Пересобрать активные» |
 | `archive/index.rs` | Индекс Tantivy архива: схема (с `cover_url`), открытие по каталогу (и старой схемы), `recreate`, поиск с `offset` и `Count`, `get`, `upsert`/`delete`, писатель 50 МБ |
-| `archive/pipeline.rs` | `dump` (TSV из БД и архива, с `cover_url`), `build` (Top-K, маршрутизация, удаление из PostgreSQL; `--fresh` — `recreate`) |
-| `archive/mod.rs` | `GET /archive/search`, `GET /archive/entities/{slug}`, `POST /admin/archive/promote/{slug}`, `archive::open` |
+| `archive/pipeline.rs` | `dump` (TSV из БД и архива, с `cover_url`), `build` (Top-K без `archived_tmdb.manual`, маршрутизация, удаление из PostgreSQL; `--fresh` — `recreate`), `delete_entities` (и для ручного переноса) |
+| `archive/mod.rs` | `GET /archive/search`, `GET /archive/entities/{slug}`, `POST /admin/archive/promote/{slug}`, `POST /admin/archive/demote`, `archive::open` |
 | `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
 | `publish.rs` | Публикация правки: `Touched`, поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |

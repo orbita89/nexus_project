@@ -13,7 +13,7 @@ use shared::{AppError, AppResult, AppState, AuthUser};
 
 /// Публичный человек: есть работа в активной сущности или работ нет вовсе (заведён в админке).
 /// Счётчики — `person_credit_counts`, их держат триггеры.
-const PUBLIC_PERSON: &str = "NOT EXISTS (SELECT 1 FROM person_credit_counts pc
+pub(crate) const PUBLIC_PERSON: &str = "NOT EXISTS (SELECT 1 FROM person_credit_counts pc
                                     WHERE pc.person_id = p.id AND pc.active_credits = 0
                                       AND pc.credits > 0)";
 

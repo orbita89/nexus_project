@@ -2,8 +2,8 @@
 //!
 //! Горячий слой — `entities` в PostgreSQL (полные карточки, сайт, Meilisearch): все фильмы с
 //! русским названием и 500 самых популярных иностранных. Остальные ~1 млн хранятся только
-//! «скелетом» в архиве (название, дата, постер): поиск по названию, страница фильма ([`get`]) и
-//! возврат в каталог ([`promote`]). Раскладку делает
+//! «скелетом» в архиве (название, дата, постер): поиск по названию, страница фильма ([`get`]),
+//! возврат в каталог ([`promote`]) и ручной перенос ненужных фильмов в архив ([`demote`]). Раскладку делает
 //! [`pipeline`] (`nexus archive dump|build`).
 
 pub mod index;
@@ -14,18 +14,20 @@ pub use index::{Archive, ArchiveDoc, ArchiveError};
 use crate::entities::detail_by_id;
 use crate::jobs::Reporter;
 use crate::models::EntityDetail;
+use crate::models::EntityKind;
 use crate::publish::{self, Touched};
 use crate::validate;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Deserialize;
+use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
 use shared::error::ErrorBody;
-use shared::extract::{Path, Query};
+use shared::extract::{JsonBody, Path, Query};
 use shared::pagination::Page;
 use shared::{AdminUser, AppError, AppResult, AppState};
 use std::sync::Arc;
-use utoipa::IntoParams;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 /// Результатов поиска по умолчанию и максимум.
@@ -250,4 +252,218 @@ pub async fn promote(
         StatusCode::CREATED,
         Json(detail_by_id(&state.db, id).await?),
     ))
+}
+
+/// Сколько фильмов переносить за запрос.
+pub const MAX_DEMOTE: usize = 100;
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DemoteRequest {
+    /// slug'и фильмов на сайте, 1–100, без повторов.
+    #[schema(example = json!(["the-night-visitor-1971"]))]
+    pub slugs: Vec<String>,
+}
+
+/// Почему фильм не перенесён.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DemoteSkipReason {
+    /// Нет на сайте (неверный slug или уже в архиве).
+    NotFound,
+    /// Не связан с TMDB: архив хранит фильмы TMDB (по TMDB id сборка и импорт его не вернут).
+    NoTmdb,
+    /// Нужен пользователям (интересы, рецензии, коллекции, отметки, реакции, темы форума):
+    /// удаление строки стёрло бы их данные.
+    InUse,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DemoteSkip {
+    pub slug: String,
+    pub reason: DemoteSkipReason,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DemoteResult {
+    /// Перенесены в архив: удалены из каталога, поиска и статики.
+    pub archived: Vec<String>,
+    pub skipped: Vec<DemoteSkip>,
+}
+
+#[derive(sqlx::FromRow)]
+struct DemoteRow {
+    id: Uuid,
+    slug: String,
+    kind: EntityKind,
+    title: String,
+    original_title: Option<String>,
+    release_date: Option<NaiveDate>,
+    cover_url: Option<String>,
+    tmdb_id: Option<i32>,
+    popularity: Option<f64>,
+}
+
+/// Перенести ненужные фильмы с сайта в холодный архив: документ в Tantivy (название,
+/// оригинальное название, дата, постер, TMDB id, popularity), затем строка удаляется из
+/// PostgreSQL (каскадом титры, теги, статистика, полные данные TMDB; люди без других работ — тоже),
+/// TMDB id — в `archived_tmdb` с `manual`: сборка горячего слоя такой фильм не вернёт, импорт
+/// пропустит. Поиск сайта и статика обновляются. Вернуть — `POST /admin/archive/promote/{slug}`
+/// («скелетом»: без описания, титров и жанров).
+///
+/// Не переносятся (`skipped`): нет на сайте, без TMDB, с данными пользователей.
+#[utoipa::path(
+    post, operation_id = "archive_demote", path = "/admin/archive/demote", tag = "catalog-admin",
+    security(("bearer" = [])),
+    request_body = DemoteRequest,
+    responses(
+        (status = 200, description = "Перенесённые и пропущенные с причиной", body = DemoteResult),
+        (status = 400, description = "Пусто, больше 100, повтор или неверный slug", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 409, description = "Архив занят сборкой (ничего не перенесено)", body = ErrorBody),
+        (status = 503, description = "Архив не настроен или недоступен", body = ErrorBody),
+    )
+)]
+pub async fn demote(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    JsonBody(req): JsonBody<DemoteRequest>,
+) -> AppResult<Json<DemoteResult>> {
+    if req.slugs.is_empty() || req.slugs.len() > MAX_DEMOTE {
+        return Err(AppError::BadRequest(format!(
+            "slugs must contain 1-{MAX_DEMOTE} items"
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for slug in &req.slugs {
+        validate::slug("slugs", slug)?;
+        if !seen.insert(slug.as_str()) {
+            return Err(AppError::BadRequest(format!("duplicate slug {slug:?}")));
+        }
+    }
+    let archive = open(&state)?;
+
+    let rows: Vec<DemoteRow> = sqlx::query_as(
+        "SELECT e.id, e.slug, e.kind, e.title, e.original_title, e.release_date, e.cover_url,
+                t.tmdb_id, s.tmdb_popularity AS popularity
+         FROM entities e
+         LEFT JOIN entity_tmdb t ON t.entity_id = e.id
+         LEFT JOIN entity_stats s ON s.entity_id = e.id
+         WHERE e.slug = ANY($1)",
+    )
+    .bind(&req.slugs)
+    .fetch_all(&state.db)
+    .await?;
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let in_use = state.interests.entities_in_use(&ids).await?;
+
+    let mut skipped = Vec::new();
+    let mut by_slug: std::collections::HashMap<&str, &DemoteRow> =
+        rows.iter().map(|r| (r.slug.as_str(), r)).collect();
+    let mut chosen: Vec<&DemoteRow> = Vec::new();
+    for slug in &req.slugs {
+        let reason = match by_slug.remove(slug.as_str()) {
+            None => DemoteSkipReason::NotFound,
+            Some(row) if row.tmdb_id.is_none() => DemoteSkipReason::NoTmdb,
+            Some(row) if in_use.contains(&row.id) => DemoteSkipReason::InUse,
+            Some(row) => {
+                chosen.push(row);
+                continue;
+            }
+        };
+        skipped.push(DemoteSkip {
+            slug: slug.clone(),
+            reason,
+        });
+    }
+    if chosen.is_empty() {
+        return Ok(Json(DemoteResult {
+            archived: Vec::new(),
+            skipped,
+        }));
+    }
+
+    // До удаления: адреса страниц и участники (их фильмографии и известность меняются).
+    let chosen_ids: Vec<Uuid> = chosen.iter().map(|r| r.id).collect();
+    let touched = Touched::collect(&state.db, &chosen_ids, &[]).await?;
+    let docs: Vec<ArchiveDoc> = chosen
+        .iter()
+        .map(|row| ArchiveDoc {
+            slug: row.slug.clone(),
+            title: row.title.clone(),
+            original_title: row.original_title.clone(),
+            kind: row.kind,
+            tmdb_id: row.tmdb_id,
+            release_date: row.release_date,
+            popularity: row.popularity.unwrap_or(0.0),
+            cover_url: row.cover_url.clone(),
+        })
+        .collect();
+
+    // Сначала архив (коммит), потом удаление из БД: упадёт БД — документы убираются обратно.
+    // Писатель держится до конца: промоушен и сборка в это время получают 409.
+    let slugs: Vec<String> = docs.iter().map(|d| d.slug.clone()).collect();
+    let writer = {
+        let archive = archive.clone();
+        blocking(move || {
+            let mut writer = archive.writer()?;
+            for doc in &docs {
+                archive.upsert(&writer, doc)?;
+            }
+            writer.commit()?;
+            Ok(writer)
+        })
+        .await?
+    };
+
+    let tmdb_ids: Vec<i32> = chosen.iter().filter_map(|r| r.tmdb_id).collect();
+    let deleted = async {
+        let mut tx = state.db.begin().await?;
+        sqlx::query(
+            "INSERT INTO archived_tmdb (tmdb_id, manual) SELECT unnest($1::int[]), true
+             ON CONFLICT (tmdb_id) DO UPDATE SET manual = true",
+        )
+        .bind(&tmdb_ids)
+        .execute(&mut *tx)
+        .await?;
+        let counts = pipeline::delete_entities(&mut tx, &chosen_ids, true).await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(counts)
+    }
+    .await;
+    let (archive_result, deleted) = {
+        let archive = archive.clone();
+        let failed = deleted.is_err();
+        let slugs = slugs.clone();
+        let result = blocking(move || {
+            let mut writer = writer;
+            if failed {
+                for slug in &slugs {
+                    archive.delete(&writer, slug);
+                }
+                writer.commit()?;
+            }
+            drop(writer);
+            archive.reload()
+        })
+        .await;
+        (result, deleted?)
+    };
+    if let Err(error) = archive_result {
+        tracing::warn!(%error, "archive reload after demote failed");
+    }
+
+    publish::run(&state, touched, &Reporter::silent()).await;
+    tracing::info!(
+        admin_id = %admin.id,
+        archived = slugs.len(),
+        entities_deleted = deleted.0,
+        people_deleted = deleted.1,
+        "entities moved to archive"
+    );
+    Ok(Json(DemoteResult {
+        archived: slugs,
+        skipped,
+    }))
 }

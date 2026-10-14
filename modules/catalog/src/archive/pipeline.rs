@@ -20,7 +20,9 @@
 //! `scripts/archive-purge.sql`.
 //!
 //! Не трогаются: `active_manual` (сиды, ручные правки), сущности без TMDB (их нет в дампе) и
-//! сущности с пользовательскими данными (`InterestDirectory::entities_in_use`).
+//! сущности с пользовательскими данными (`InterestDirectory::entities_in_use`). Перенесённые в
+//! архив вручную (`archived_tmdb.manual`, `POST /admin/archive/demote`) в горячий слой не
+//! попадают.
 
 use super::index::{Archive, ArchiveDoc, ArchiveError};
 use crate::models::EntityKind;
@@ -387,14 +389,21 @@ impl TopK {
     }
 }
 
-/// Проход 1: slug'и горячего слоя.
-fn elite(path: &Path, ru: usize, foreign: usize) -> Result<(HashSet<String>, u64), BoxError> {
+/// Проход 1: slug'и горячего слоя. Фильмы из `manual` (TMDB id перенесённых в архив вручную)
+/// в топ не идут. Возвращает топ, число неверных строк и число отсеянных `manual`.
+fn elite(
+    path: &Path,
+    ru: usize,
+    foreign: usize,
+    manual: &HashSet<i32>,
+) -> Result<(HashSet<String>, u64, u64), BoxError> {
     let (mut reader, columns) = open_dump(path)?;
     let (mut top_ru, mut top_foreign) = (TopK::new(ru), TopK::new(foreign));
     let mut record = csv::StringRecord::new();
-    let mut invalid = 0;
+    let (mut invalid, mut kept_cold) = (0, 0);
     while reader.read_record(&mut record)? {
         match columns.parse(&record) {
+            Some(row) if row.tmdb_id.is_some_and(|id| manual.contains(&id)) => kept_cold += 1,
             Some(row) if row.ru => top_ru.offer(row.popularity, &row.slug),
             Some(row) => top_foreign.offer(row.popularity, &row.slug),
             None => invalid += 1,
@@ -406,6 +415,7 @@ fn elite(path: &Path, ru: usize, foreign: usize) -> Result<(HashSet<String>, u64
             .chain(top_foreign.into_slugs())
             .collect(),
         invalid,
+        kept_cold,
     ))
 }
 
@@ -462,6 +472,8 @@ pub struct BuildReport {
     pub deferred: u64,
     /// Документов в архиве после сборки.
     pub archive_size: u64,
+    /// Строк, не допущенных в горячий слой: перенесены в архив вручную.
+    pub manual_archived: u64,
 }
 
 impl fmt::Display for BuildReport {
@@ -490,6 +502,9 @@ impl fmt::Display for BuildReport {
                 "deferred:         {} (still in PostgreSQL: run scripts/archive-purge.sql)",
                 self.deferred
             )?;
+        }
+        if self.manual_archived > 0 {
+            writeln!(f, "manual archive:   {} (kept cold)", self.manual_archived)?;
         }
         writeln!(f, "archive size:     {}", self.archive_size)
     }
@@ -557,10 +572,17 @@ pub async fn build(
     let mut report = BuildReport::default();
 
     // Проход 1.
-    let (elite, invalid) = {
+    let manual: HashSet<i32> = sqlx::query_scalar("SELECT tmdb_id FROM archived_tmdb WHERE manual")
+        .fetch_all(&state.db)
+        .await?
+        .into_iter()
+        .collect();
+    let (elite, invalid, kept_cold) = {
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || elite(&path, options.ru, options.foreign)).await??
+        tokio::task::spawn_blocking(move || elite(&path, options.ru, options.foreign, &manual))
+            .await??
     };
+    report.manual_archived = kept_cold;
     tracing::info!(
         elite = elite.len(),
         invalid,
@@ -828,30 +850,44 @@ async fn delete_archived(
             &tmdb_ids.into_iter().flatten().collect::<Vec<_>>(),
         )
         .await?;
-        let people: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT person_id FROM entity_credits WHERE entity_id = ANY($1)",
-        )
-        .bind(&ids)
-        .fetch_all(&mut *tx)
-        .await?;
-        let deleted = sqlx::query("DELETE FROM entities WHERE id = ANY($1) AND NOT active_manual")
-            .bind(&ids)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-        let people_deleted = sqlx::query(
-            "DELETE FROM people p WHERE p.id = ANY($1)
-               AND NOT EXISTS (SELECT 1 FROM entity_credits c WHERE c.person_id = p.id)",
-        )
-        .bind(&people)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        let (deleted, people_deleted) = delete_entities(&mut tx, &ids, false).await?;
         tx.commit().await?;
         report.deleted += deleted;
         report.people_deleted += people_deleted;
     }
     Ok(())
+}
+
+/// Удаляет строки `entities`, ушедшие в архив (каскадом титры, теги, статистика, связки
+/// импорта), и людей, у которых не осталось работ. `with_manual` — и `active_manual` (ручной
+/// перенос из админки). Возвращает (сущностей, людей).
+pub(crate) async fn delete_entities(
+    tx: &mut sqlx::PgConnection,
+    ids: &[Uuid],
+    with_manual: bool,
+) -> sqlx::Result<(u64, u64)> {
+    let people: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT person_id FROM entity_credits WHERE entity_id = ANY($1)",
+    )
+    .bind(ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let deleted =
+        sqlx::query("DELETE FROM entities WHERE id = ANY($1) AND ($2 OR NOT active_manual)")
+            .bind(ids)
+            .bind(with_manual)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    let people_deleted = sqlx::query(
+        "DELETE FROM people p WHERE p.id = ANY($1)
+           AND NOT EXISTS (SELECT 1 FROM entity_credits c WHERE c.person_id = p.id)",
+    )
+    .bind(&people)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    Ok((deleted, people_deleted))
 }
 
 async fn archive_tmdb_ids(db: impl sqlx::PgExecutor<'_>, tmdb_ids: &[i32]) -> sqlx::Result<()> {

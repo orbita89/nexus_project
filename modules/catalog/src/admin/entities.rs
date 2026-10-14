@@ -45,11 +45,13 @@ pub async fn list(
         kind: query.kind,
         tag: query.tag,
         year: query.year,
-        q: query.q,
+        q: None,
         limit: query.limit,
         offset: query.offset,
     };
-    Ok(Json(list_page(&state.db, list, query.active).await?))
+    Ok(Json(
+        list_page(&state.db, list, query.q.as_deref(), query.active).await?,
+    ))
 }
 
 /// Создать сущность. `metadata` проверяется по схеме своего `kind`. `active` — по умолчанию `true`.

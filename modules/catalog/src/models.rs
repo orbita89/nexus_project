@@ -346,6 +346,9 @@ pub struct Person {
     pub slug: String,
     #[schema(example = "Дени Вильнёв")]
     pub full_name: String,
+    /// Имя латиницей (английское из TMDB), если отличается от `full_name`: по нему тоже ищут.
+    #[schema(example = "Denis Villeneuve")]
+    pub original_name: Option<String>,
     pub birth_date: Option<NaiveDate>,
     pub photo_url: Option<String>,
     pub bio: Option<String>,
@@ -354,7 +357,8 @@ pub struct Person {
 }
 
 pub const PERSON_COLUMNS: &str =
-    "p.id, p.slug, p.full_name, p.birth_date, p.photo_url, p.bio, p.created_at, p.updated_at";
+    "p.id, p.slug, p.full_name, p.original_name, p.birth_date, p.photo_url, p.bio, p.created_at, \
+     p.updated_at";
 
 /// Человек и его фильмография (новые работы сверху).
 #[derive(Debug, Serialize, ToSchema)]
@@ -404,6 +408,12 @@ pub enum SearchSort {
     Trending,
     /// Байесовский рейтинг IMDb (`quality`).
     TopRated,
+    /// Вышедшие, новые сверху.
+    New,
+    /// Ещё не вышедшие, ближайшие сверху.
+    Soon,
+    /// По названию.
+    Title,
 }
 
 /// Сущность в админском списке: как в публичном, плюс флаг активности.
@@ -547,8 +557,9 @@ pub struct ListEntitiesQuery {
     /// Год выхода.
     #[param(example = 2021)]
     pub year: Option<i32>,
-    /// Подстрока в названии или оригинальном названии, без учёта регистра.
-    #[param(example = "дюна")]
+    /// Не поддерживается: поиск по названию — только `GET /search` (Meilisearch), здесь — 400
+    /// `use_search`.
+    #[param(ignore)]
     pub q: Option<String>,
     /// 1–100, по умолчанию 20.
     pub limit: Option<i64>,
@@ -583,6 +594,60 @@ pub struct SimilarQuery {
     pub limit: Option<i64>,
 }
 
+/// Подсказки студий для фильтра поиска.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct StudiosQuery {
+    /// Начало или часть названия, опечатки допустимы. Пустой — самые частые.
+    #[param(example = "warn")]
+    pub q: Option<String>,
+    /// Только студии сущностей этого типа.
+    pub kind: Option<EntityKind>,
+    /// 1–50, по умолчанию 10. Вне диапазона приводится к границам.
+    pub limit: Option<i64>,
+}
+
+/// Поиск людей.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PeopleSearchQuery {
+    /// Имя или его начало, русское или латиницей, опечатки допустимы; до 300 символов. Пустой —
+    /// самые известные.
+    #[param(example = "брэд")]
+    pub q: Option<String>,
+    /// Только с этой основной ролью: `actor`, `director`, `writer`, `producer`, ...
+    #[param(example = "director")]
+    pub known_for: Option<String>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Человек в выдаче поиска людей.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PersonHit {
+    pub id: Uuid,
+    #[schema(example = "brad-pitt")]
+    pub slug: String,
+    #[schema(example = "Брэд Питт")]
+    pub full_name: String,
+    #[schema(example = "Brad Pitt")]
+    pub original_name: Option<String>,
+    pub birth_date: Option<NaiveDate>,
+    pub photo_url: Option<String>,
+    /// Основная роль: где вклад в известность больше всего.
+    #[schema(example = "actor")]
+    pub known_for: Option<String>,
+}
+
+/// Студия в подсказках: название (значение для `studio`) и сколько сущностей в индексе.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct StudioHit {
+    #[schema(example = "Warner Bros. Pictures")]
+    pub name: String,
+    pub count: i64,
+}
+
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListPeopleQuery {
@@ -598,7 +663,8 @@ pub struct ListPeopleQuery {
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct SearchQuery {
-    /// Поисковый запрос: название, оригинальное название, люди, теги, описание. Опечатки допустимы.
+    /// Поисковый запрос: название, оригинальное название, студии. Опечатки допустимы. Пустой —
+    /// все, кто подходит под фильтры.
     #[param(example = "дюан")]
     pub q: Option<String>,
     /// Не передан — по релевантности.
@@ -606,7 +672,25 @@ pub struct SearchQuery {
     pub kind: Option<EntityKind>,
     /// Slug тега.
     pub tag: Option<String>,
+    /// Ровно этот год выхода. Вместе с `year_from` / `year_to` — 400.
+    #[param(example = 2001)]
     pub year: Option<i32>,
+    /// Год выхода от (включительно).
+    #[param(example = 2000)]
+    pub year_from: Option<i32>,
+    /// Год выхода до (включительно).
+    #[param(example = 2010)]
+    pub year_to: Option<i32>,
+    /// Студия — точное название (без учёта регистра); подсказки — `GET /search/studios`.
+    #[param(example = "Warner Bros. Pictures")]
+    pub studio: Option<String>,
+    /// Slug человека: фильмы с его участием. **Заглушка:** людей в индексе пока нет — 503
+    /// `person_filter_unavailable`.
+    #[param(example = "christopher-nolan")]
+    pub person: Option<String>,
+    /// Роль человека из `person`: `actor`, `director`, `producer`, `writer`, ... Без `person` — 400.
+    #[param(example = "director")]
+    pub role: Option<String>,
     /// 1–100, по умолчанию 20.
     pub limit: Option<i64>,
     /// С 0.
@@ -696,6 +780,9 @@ pub struct CreatePerson {
     pub slug: String,
     #[schema(example = "Дени Вильнёв")]
     pub full_name: String,
+    /// Имя латиницей, если отличается от `full_name`.
+    #[schema(example = "Denis Villeneuve")]
+    pub original_name: Option<String>,
     pub birth_date: Option<NaiveDate>,
     pub photo_url: Option<String>,
     pub bio: Option<String>,
@@ -707,6 +794,9 @@ pub struct CreatePerson {
 pub struct UpdatePerson {
     pub slug: Option<String>,
     pub full_name: Option<String>,
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>)]
+    pub original_name: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<NaiveDate>)]
     pub birth_date: Option<Option<NaiveDate>>,
@@ -751,6 +841,9 @@ pub struct ReindexResult {
     /// Сколько сущностей в новом индексе.
     #[schema(example = 100_000)]
     pub indexed: usize,
+    /// Сколько людей в новом индексе `people`.
+    #[schema(example = 880_000)]
+    pub people_indexed: usize,
     /// Сколько документов было в индексе до перестройки.
     #[schema(example = 99_870)]
     pub previous_count: u64,

@@ -33,18 +33,20 @@ pub async fn create(
 ) -> AppResult<(StatusCode, Json<Person>)> {
     validate::slug("slug", &req.slug)?;
     let full_name = validate::required("full_name", &req.full_name, MAX_TITLE)?;
+    let original_name = validate::optional("original_name", req.original_name, MAX_TITLE)?;
     let photo_url = validate::url("photo_url", req.photo_url)?;
     let bio = validate::optional("bio", req.bio, MAX_LONG_TEXT)?;
 
     let person: Person = sqlx::query_as(&format!(
-        "INSERT INTO people AS p (slug, full_name, birth_date, photo_url, bio)
-         VALUES ($1, $2, $3, $4, $5) RETURNING {PERSON_COLUMNS}"
+        "INSERT INTO people AS p (slug, full_name, birth_date, photo_url, bio, original_name)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING {PERSON_COLUMNS}"
     ))
     .bind(&req.slug)
     .bind(full_name)
     .bind(req.birth_date)
     .bind(photo_url)
     .bind(bio)
+    .bind(original_name)
     .fetch_one(&state.db)
     .await
     .map_err(validate::conflict("slug is already taken"))?;
@@ -82,6 +84,11 @@ pub async fn update(
         .full_name
         .map(|name| validate::required("full_name", &name, MAX_TITLE))
         .transpose()?;
+    let original_name = nullable_param(
+        req.original_name
+            .map(|v| validate::optional("original_name", v, MAX_TITLE))
+            .transpose()?,
+    );
     let birth_date = nullable_param(req.birth_date);
     let photo_url = nullable_param(
         req.photo_url
@@ -101,7 +108,8 @@ pub async fn update(
              full_name = COALESCE($3, full_name),
              birth_date = CASE WHEN $4 THEN $5 ELSE birth_date END,
              photo_url = CASE WHEN $6 THEN $7 ELSE photo_url END,
-             bio = CASE WHEN $8 THEN $9 ELSE bio END
+             bio = CASE WHEN $8 THEN $9 ELSE bio END,
+             original_name = CASE WHEN $10 THEN $11 ELSE original_name END
          WHERE id = $1 RETURNING {PERSON_COLUMNS}"
     ))
     .bind(id)
@@ -113,6 +121,8 @@ pub async fn update(
     .bind(photo_url.1)
     .bind(bio.0)
     .bind(bio.1)
+    .bind(original_name.0)
+    .bind(original_name.1)
     .fetch_optional(&state.db)
     .await
     .map_err(validate::conflict("slug is already taken"))?;

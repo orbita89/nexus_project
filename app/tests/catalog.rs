@@ -233,16 +233,29 @@ async fn list_entities_filters(pool: PgPool) {
     let page = ctx.get_ok("/entities?year=2021").await;
     assert_eq!(slugs(&page), ["dune-2021"]);
 
-    // Подстрока без учёта регистра, в названии или оригинальном названии.
-    let page = ctx.get_ok("/entities?q=%D0%94%D0%AE%D0%9D").await; // «ДЮН»
+    // Поиск по названию на сайте — только через Meilisearch (`GET /search`).
+    let response = ctx.get("/entities?q=witcher").await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(response.json()["code"], "use_search");
+
+    // В админке (скрытых нет в Meilisearch) — подстрока без учёта регистра, в названии или
+    // оригинальном названии.
+    let admin_q = |q: &'static str| {
+        let ctx = &ctx;
+        async move {
+            let (status, page) = ctx
+                .admin_send(Method::GET, &format!("/admin/entities?q={q}"), None)
+                .await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            page
+        }
+    };
+    let page = admin_q("%D0%94%D0%AE%D0%9D").await; // «ДЮН»
     assert_eq!(page["total"], 3);
-    let page = ctx.get_ok("/entities?q=witcher").await;
-    assert_eq!(slugs(&page), ["witcher-3"]);
+    assert_eq!(slugs(&admin_q("witcher").await), ["witcher-3"]);
     // % — обычный символ, а не шаблон LIKE.
-    let page = ctx.get_ok("/entities?q=100%25").await;
-    assert_eq!(slugs(&page), ["no-date"]);
-    let page = ctx.get_ok("/entities?q=%25").await;
-    assert_eq!(slugs(&page), ["no-date"]);
+    assert_eq!(slugs(&admin_q("100%25").await), ["no-date"]);
+    assert_eq!(slugs(&admin_q("%25").await), ["no-date"]);
 
     let page = ctx.get_ok("/entities?tag=no-such-tag").await;
     assert_eq!(page["total"], 0);
@@ -1082,9 +1095,104 @@ async fn search_after_reindex(pool: PgPool) {
     let (status, body) = ctx
         .admin_send(Method::POST, "/admin/search/reindex", None)
         .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["indexed"], 5);
     assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 3);
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn search_filters_and_sorts(pool: PgPool) {
+    let ctx = Ctx::unindexed(pool);
+    sqlx::raw_sql(
+        "UPDATE entities SET metadata = metadata || '{\"studios\": [\"Legendary Pictures\", \"Warner Bros. Pictures\"]}'
+         WHERE slug IN ('dune-2021', 'dune-part-two-2024');
+         UPDATE entities SET metadata = metadata || '{\"studios\": [\"CD Projekt Red\"]}'
+         WHERE slug = 'witcher-3';
+         INSERT INTO entities (kind, slug, title, release_date)
+         VALUES ('movie', 'future-film', 'Будущий фильм', current_date + 30);",
+    )
+    .execute(&ctx.state.db)
+    .await
+    .unwrap();
+    let (status, body) = ctx
+        .admin_send(Method::POST, "/admin/search/reindex", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Годы: ровно, диапазон включительно, открытые границы.
+    assert_eq!(
+        slugs(
+            &ctx.get_ok("/search?year_from=2015&year_to=2021&sort=new")
+                .await
+        ),
+        ["dune-2021", "witcher-3"]
+    );
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?year_to=2000").await),
+        ["dune-novel"]
+    );
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?year_from=2022&sort=new").await),
+        ["dune-part-two-2024"]
+    );
+
+    // Студия: точное название без учёта регистра, любая из `metadata.studios`.
+    let page = ctx
+        .get_ok("/search?studio=warner%20bros.%20pictures&sort=new")
+        .await;
+    assert_eq!(slugs(&page), ["dune-part-two-2024", "dune-2021"]);
+    assert_eq!(
+        slugs(
+            &ctx.get_ok("/search?studio=CD%20Projekt%20Red&kind=game")
+                .await
+        ),
+        ["witcher-3"]
+    );
+    assert_eq!(ctx.get_ok("/search?studio=Warner").await["total"], 0);
+    // По студии и ищется.
+    assert_eq!(slugs(&ctx.get_ok("/search?q=projekt").await), ["witcher-3"]);
+
+    // Сортировки по дате: `new` — только вышедшие, `soon` — только будущие.
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?sort=new").await),
+        ["dune-part-two-2024", "dune-2021", "witcher-3", "dune-novel"]
+    );
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?sort=soon").await),
+        ["future-film"]
+    );
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?q=dune&sort=title&kind=movie").await),
+        ["dune-2021", "dune-part-two-2024"]
+    );
+
+    // Подсказки студий: по части названия, без запроса — самые частые.
+    let studios = ctx.get_ok("/search/studios?q=warn").await;
+    assert_eq!(
+        studios,
+        json!([{ "name": "Warner Bros. Pictures", "count": 2 }])
+    );
+    let studios = ctx.get_ok("/search/studios?limit=1").await;
+    assert_eq!(studios.as_array().unwrap().len(), 1, "{studios}");
+    assert_eq!(studios[0]["count"], 2, "{studios}");
+    let studios = ctx.get_ok("/search/studios?kind=game").await;
+    assert_eq!(studios, json!([{ "name": "CD Projekt Red", "count": 1 }]));
+
+    // Люди — заглушка: в индексе их пока нет.
+    let response = ctx
+        .get("/search?person=denis-villeneuve&role=director")
+        .await;
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.json()["code"], "person_filter_unavailable");
+
+    for bad in [
+        "/search?year=2001&year_from=2000",
+        "/search?year_from=2010&year_to=2000",
+        "/search?role=director",
+        "/search?studio=%20",
+    ] {
+        assert_eq!(ctx.get(bad).await.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
@@ -1374,14 +1482,19 @@ async fn reindex_keeps_current_and_one_previous_version(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["indexed"], 5);
     assert_eq!(body["previous_count"], 5);
-    assert_eq!(body["deleted"], json!(first));
+    // Устаревшие версии обоих индексов: `entities_v*` (их и проверяем) и `people_v*`.
+    let deleted = body["deleted"].as_array().unwrap();
+    assert_eq!(deleted.len(), 2, "{body}");
+    assert!(first.iter().all(|v| deleted.contains(&json!(v))), "{body}");
     let second = ctx.versions().await;
     assert_eq!(second, [body["previous_version"].as_str().unwrap()]);
     assert_ne!(second, first);
 
     let (status, body) = ctx.reindex("").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["deleted"], json!(second));
+    let deleted = body["deleted"].as_array().unwrap();
+    assert_eq!(deleted.len(), 2, "{body}");
+    assert!(second.iter().all(|v| deleted.contains(&json!(v))), "{body}");
     assert_eq!(ctx.versions().await.len(), 1);
 
     // Поиск всё это время работает и видит всё.
@@ -1465,7 +1578,15 @@ async fn reindex_stream_reports_progress_rotation_and_isr(pool: PgPool) {
         .collect();
     assert_eq!(
         plan,
-        ["create_index", "fill", "check", "swap", "rotate", "isr"]
+        [
+            "create_index",
+            "fill",
+            "fill_people",
+            "check",
+            "swap",
+            "rotate",
+            "isr"
+        ]
     );
     let finished: Vec<(String, String)> = steps(&events)
         .into_iter()
@@ -1476,22 +1597,32 @@ async fn reindex_stream_reports_progress_rotation_and_isr(pool: PgPool) {
         pairs(&[
             ("create_index", "done"),
             ("fill", "done"),
+            ("fill_people", "done"),
             ("check", "done"),
             ("swap", "done"),
             ("rotate", "done"),
             ("isr", "done"),
         ])
     );
-    let progress: Vec<&Value> = events
-        .iter()
-        .filter(|(event, _)| event == "progress")
-        .map(|(_, data)| data)
-        .collect();
-    assert_eq!(progress.first().unwrap()["done"], 0);
-    let last = progress.last().unwrap();
+    let progress = |step: &str| -> Vec<&Value> {
+        events
+            .iter()
+            .filter(|(event, data)| event == "progress" && data["step"] == step)
+            .map(|(_, data)| data)
+            .collect()
+    };
+    let entities = progress("fill");
+    assert_eq!(entities.first().unwrap()["done"], 0);
+    let last = entities.last().unwrap();
     assert_eq!(
         (last["done"].as_u64(), last["total"].as_u64()),
         (Some(5), Some(5))
+    );
+    // Люди фикстур: четверо, у всех есть видимые работы или работ нет вовсе.
+    let last = *progress("fill_people").last().unwrap();
+    assert_eq!(
+        (last["done"].as_u64(), last["total"].as_u64()),
+        (Some(4), Some(4))
     );
 
     let rotate = events
@@ -1507,6 +1638,7 @@ async fn reindex_stream_reports_progress_rotation_and_isr(pool: PgPool) {
     assert_eq!(done["type"], "done");
     assert_eq!(done["ok"], true);
     assert_eq!(done["reindex"]["indexed"], 5);
+    assert_eq!(done["reindex"]["people_indexed"], 4);
     assert_eq!(isr.bodies(), [json!({ "all": true })]);
     // Фронтенд пересобирает в фоне: шаг сообщает «запущена», а не «пересобрана».
     let isr_done = events
@@ -1544,6 +1676,7 @@ async fn reindex_stream_reports_refused_switch(pool: PgPool) {
         pairs(&[
             ("create_index", "done"),
             ("fill", "done"),
+            ("fill_people", "done"),
             ("check", "failed"),
         ])
     );
@@ -1551,6 +1684,111 @@ async fn reindex_stream_reports_refused_switch(pool: PgPool) {
     assert_eq!(done["ok"], false);
     assert!(done.get("reindex").is_none(), "{done}");
     assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 3);
+}
+
+fn person_slugs(page: &Value) -> Vec<&str> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["slug"].as_str().unwrap())
+        .collect()
+}
+
+/// Поиск людей: известность (`person_stats.fame`) из работ и оценок TMDB, ранжирование совпадений
+/// одинакового качества по ней, поиск латиницей, фильтр по основной роли, правка в админке.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn people_search_ranks_by_fame(pool: PgPool) {
+    let ctx = Ctx::unindexed(pool);
+    sqlx::raw_sql(
+        "INSERT INTO entity_stats (entity_id, tmdb_votes)
+         SELECT id, v.votes FROM entities e
+         JOIN (VALUES ('dune-2021', 1000), ('dune-part-two-2024', 500), ('dune-novel', 10))
+             AS v(slug, votes) ON v.slug = e.slug;
+         UPDATE people SET original_name = 'Denis Villeneuve' WHERE slug = 'denis-villeneuve';
+         -- Тёзка без известности: актёр массовки в игре без оценок.
+         INSERT INTO people (slug, full_name) VALUES ('denis-extra', 'Дени Статист');
+         INSERT INTO entity_credits (entity_id, person_id, role, position)
+         SELECT e.id, p.id, 'actor', 5 FROM entities e, people p
+         WHERE e.slug = 'witcher-3' AND p.slug = 'denis-extra';",
+    )
+    .execute(&ctx.state.db)
+    .await
+    .unwrap();
+
+    let (status, body) = ctx.reindex("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["people_indexed"], 5);
+    let stats: Vec<(String, f64, Option<String>)> = sqlx::query_as(
+        "SELECT p.slug, s.fame, s.known_for FROM person_stats s JOIN people p ON p.id = s.person_id
+         ORDER BY s.fame DESC, p.slug",
+    )
+    .fetch_all(&ctx.state.db)
+    .await
+    .unwrap();
+    let stats: Vec<(&str, f64, Option<&str>)> = stats
+        .iter()
+        .map(|(slug, fame, role)| (slug.as_str(), *fame, role.as_deref()))
+        .collect();
+    assert_eq!(
+        stats,
+        [
+            ("denis-villeneuve", 1500.0, Some("director")),
+            ("timothee-chalamet", 1000.0, Some("actor")),
+            ("frank-herbert", 1.5, Some("author")),
+            ("denis-extra", 0.0, Some("actor")),
+            ("nobody", 0.0, None),
+        ]
+    );
+
+    // Одинаково подходящие «Дени» — по известности; без запроса — самые известные.
+    let page = ctx
+        .get_ok(&format!("/search/people?q={}", "%D0%B4%D0%B5%D0%BD%D0%B8"))
+        .await;
+    assert_eq!(person_slugs(&page), ["denis-villeneuve", "denis-extra"]);
+    assert_eq!(page["items"][0]["original_name"], "Denis Villeneuve");
+    assert_eq!(page["items"][0]["known_for"], "director");
+    assert!(page["items"][0].get("fame").is_none(), "{page}");
+    let page = ctx.get_ok("/search/people?limit=3").await;
+    assert_eq!(
+        person_slugs(&page),
+        ["denis-villeneuve", "timothee-chalamet", "frank-herbert"]
+    );
+    assert_eq!(page["total"], 5);
+    assert_eq!(
+        person_slugs(&ctx.get_ok("/search/people?q=villenuve").await),
+        ["denis-villeneuve"],
+        "latin name with a typo"
+    );
+    assert_eq!(
+        person_slugs(&ctx.get_ok("/search/people?known_for=actor").await),
+        ["timothee-chalamet", "denis-extra"]
+    );
+    for bad in [
+        "/search/people?known_for=Actor",
+        "/search/people?known_for=a%20OR%20b",
+    ] {
+        assert_eq!(ctx.get(bad).await.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    // Правка в админке сразу в индексе: имя латиницей и известность после новой работы.
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM people WHERE slug = 'denis-extra'")
+        .fetch_one(&ctx.state.db)
+        .await
+        .unwrap();
+    let (status, body) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/people/{id}"),
+            Some(json!({ "original_name": "Denis Extra" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["original_name"], "Denis Extra");
+    assert_eq!(
+        person_slugs(&ctx.get_ok("/search/people?q=extra").await),
+        ["denis-extra"]
+    );
 }
 
 /// Одна перестройка за раз: вторая — 409 до потока.

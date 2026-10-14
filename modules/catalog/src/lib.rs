@@ -12,6 +12,7 @@ pub mod media;
 pub mod metadata;
 pub mod models;
 pub mod people;
+pub mod people_search;
 pub mod publish;
 pub mod ranking;
 pub mod search;
@@ -33,6 +34,8 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(tags::list))
         .routes(routes!(tags::get))
         .routes(routes!(search::search))
+        .routes(routes!(people_search::search))
+        .routes(routes!(search::studios))
         .routes(routes!(archive::search))
         .routes(routes!(archive::get))
         .routes(routes!(admin::entities::list, admin::entities::create))
@@ -55,4 +58,5 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(ranking::preview))
         .routes(routes!(ranking::save_stream))
         .routes(routes!(archive::promote))
+        .routes(routes!(archive::demote))
 }

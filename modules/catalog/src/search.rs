@@ -1,6 +1,7 @@
 //! Поиск по каталогу через Meilisearch.
 //!
-//! Источник правды — PostgreSQL, индекс `entities` производный и нужен только для поиска:
+//! Два индекса: `entities` (здесь) и `people` ([`crate::people_search`]); перестраиваются и
+//! переключаются вместе. Источник правды — PostgreSQL, индексы производные и нужны только для поиска:
 //! карточки (`GET /entities/{slug}`, `GET /people/{slug}`) читаются из БД. Документ компактный
 //! ([`SearchDoc`]): без карточки, описания и участников.
 //!
@@ -10,13 +11,15 @@
 //!
 //! **Перестройка** ([`reindex`]) — без простоя и без очистки живого индекса. Поиск всегда
 //! читает индекс `entities` (роль алиаса: в Meilisearch 1.15 алиасов нет):
-//! 1. создаётся теневой `entities_v<unix ms>`;
-//! 2. все сущности из БД пачками по [`BATCH`] уходят в него (`progress` в потоке);
-//! 3. новый индекс должен быть не меньше `SEARCH_REINDEX_MIN_PERCENT`% текущего (80, в dev — 0) — иначе поиск не
-//!    переключается (сломанная или неполная выборка), теневой удаляется; `force` — пропустить;
-//! 4. `swap-indexes`: `entities` получает новые документы атомарно для всех инстансов, а
-//!    `entities_v<ms>` — предыдущую версию (откат — swap обратно);
-//! 5. ротация: хранятся текущая и одна предыдущая версия, `entities_v*` старше удаляются;
+//! 1. создаются теневые `entities_v<unix ms>` и `people_v<unix ms>`;
+//! 2. все сущности из БД пачками по [`BATCH`] уходят в первый, затем пересчитывается известность
+//!    людей и все публичные люди уходят во второй (`progress` в потоке по каждому шагу);
+//! 3. каждый новый индекс должен быть не меньше `SEARCH_REINDEX_MIN_PERCENT`% текущего (80, в
+//!    dev — 0) — иначе поиск не переключается (сломанная или неполная выборка), теневые
+//!    удаляются; `force` — пропустить;
+//! 4. `swap-indexes` (обе пары одной задачей): `entities` и `people` получают новые документы
+//!    атомарно для всех инстансов, а `*_v<ms>` — предыдущую версию (откат — swap обратно);
+//! 5. ротация: хранятся текущая и одна предыдущая версия, `*_v*` старше удаляются;
 //! 6. фронтенду — запустить пересборку всей статики (`{"all": true}`; он отвечает `202` и
 //!    пересобирает в фоне), только при ручном запуске.
 //!
@@ -27,15 +30,17 @@ use crate::entities::check_year;
 use crate::jobs::{self, DoneEvent, JobEvent, Reporter, Step, StepStatus};
 use crate::models::{
     page_bounds, Entity, EntityKind, EntitySummary, Page, ReindexQuery, ReindexResult,
-    ReleaseStatus, SearchQuery, SearchSort, ENTITY_COLUMNS, ENTITY_STATS_JOIN, VISIBLE,
+    ReleaseStatus, SearchQuery, SearchSort, StudioHit, StudiosQuery, ENTITY_COLUMNS,
+    ENTITY_STATS_JOIN, VISIBLE,
 };
+use crate::people_search;
 use crate::publish::Touched;
 use crate::validate;
 use axum::extract::State;
 use axum::http::Method;
 use axum::response::Response;
 use axum::Json;
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, NaiveDate, NaiveTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use shared::error::ErrorBody;
@@ -64,11 +69,12 @@ const RUNNING_LOCK: &str = "catalog:reindex-running";
 const RUNNING_LOCK_TTL: Duration = Duration::from_secs(120);
 const RUNNING_LOCK_RENEW: Duration = Duration::from_secs(30);
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Документ индекса — компактный (решение 2026-10-14): то, по чему ищут (`title`,
-/// `original_title`, `studio`), что показывает выдача (`EntitySummary`: `slug`, постер, дата,
-/// статус выхода, рейтинг IMDb), фильтры (`kind`, `tags`, `year`, `slug`) и сортировки. Карточки,
+/// `original_title`, `studios`), что показывает выдача (`EntitySummary`: `slug`, постер, дата,
+/// статус выхода, рейтинг IMDb), фильтры (`kind`, `tags`, `year`, `studios`, `release_ts`,
+/// `slug`) и сортировки. Карточки,
 /// описания, имён участников и названий тегов в индексе нет: карточка читается из БД, а полный
 /// состав (миллионы титров) делал перестройку в разы дольше.
 #[derive(Debug, Serialize)]
@@ -80,10 +86,13 @@ struct SearchDoc {
     original_title: Option<String>,
     release_date: Option<NaiveDate>,
     cover_url: Option<String>,
-    /// Для фильтра `year = 2021`.
+    /// Для фильтров `year = 2021`, `year 2000 TO 2010`.
     year: Option<i32>,
-    /// Первая студия из `metadata.studios`: поиск («dreamworks»).
-    studio: Option<String>,
+    /// `release_date` в unix-секундах (полночь UTC): сортировки `new` / `soon` и их фильтр
+    /// «вышел / не вышел» (Meilisearch сравнивает только числа).
+    release_ts: Option<i64>,
+    /// Все студии из `metadata.studios`: поиск («dreamworks»), фильтр `studio`, подсказки.
+    studios: Vec<String>,
     /// Slug'и тегов: фильтр.
     tags: Vec<String>,
     /// Статистика (`entity_stats`): сортировки `recommended` (`rank_score`), `trending`
@@ -98,21 +107,27 @@ struct SearchDoc {
 
 impl SearchDoc {
     fn new(entity: Entity, tags: Vec<String>) -> Self {
-        let studio = entity.metadata["studios"]
+        let studios = entity.metadata["studios"]
             .as_array()
-            .and_then(|studios| studios.first())
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+            .map(|studios| {
+                studios
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             id: entity.id,
             kind: entity.kind,
             year: entity.release_date.map(|date| date.year()),
+            release_ts: entity.release_date.map(day_ts),
             slug: entity.slug,
             title: entity.title,
             original_title: entity.original_title,
             release_date: entity.release_date,
             cover_url: entity.cover_url,
-            studio,
+            studios,
             tags,
             rank_score: entity.rank_score,
             popularity: entity.tmdb_popularity,
@@ -124,12 +139,19 @@ impl SearchDoc {
     }
 }
 
+/// Дата → unix-секунды её полуночи (UTC).
+fn day_ts(date: NaiveDate) -> i64 {
+    date.and_time(NaiveTime::MIN).and_utc().timestamp()
+}
+
 fn entity_settings() -> Value {
     json!({
-        // Порядок задаёт вес: совпадение в названии важнее, чем в описании.
-        "searchableAttributes": ["title", "original_title", "studio"],
-        "filterableAttributes": ["kind", "tags", "year", "slug"],
-        "sortableAttributes": ["rank_score", "popularity", "quality"],
+        // Порядок задаёт вес: совпадение в названии важнее, чем в студии.
+        "searchableAttributes": ["title", "original_title", "studios"],
+        "filterableAttributes": ["kind", "tags", "year", "slug", "studios", "release_ts"],
+        "sortableAttributes": ["rank_score", "popularity", "quality", "release_ts", "title"],
+        // Подсказки студий без запроса — самые частые.
+        "faceting": { "sortFacetValuesBy": { "studios": "count" } },
     })
 }
 
@@ -160,6 +182,11 @@ async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchD
 /// удалённое из БД и невидимое удаляет из индекса. Вызывается из [`crate::publish::run`] после
 /// коммита.
 pub(crate) async fn update_index(state: &AppState, touched: &Touched) -> Result<(), BoxError> {
+    update_entities(state, touched).await?;
+    people_search::update_index(state, &touched.people).await
+}
+
+async fn update_entities(state: &AppState, touched: &Touched) -> Result<(), BoxError> {
     if touched.entities.is_empty() {
         return Ok(());
     }
@@ -189,7 +216,7 @@ pub(crate) async fn update_index(state: &AppState, touched: &Touched) -> Result<
 
 /// Обновляет документы `docs` в индексе `index` и удаляет те из `ids`, которых нет среди
 /// `present`. Ждёт применения.
-async fn upsert_and_delete(
+pub(crate) async fn upsert_and_delete(
     search: &Search,
     index: &str,
     docs: &Value,
@@ -241,6 +268,7 @@ impl ReindexOptions {
         let mut steps = vec![
             Step::CreateIndex,
             Step::Fill,
+            Step::FillPeople,
             Step::Check,
             Step::Swap,
             Step::Rotate,
@@ -259,6 +287,8 @@ pub enum ReindexError {
     Busy,
     /// Новый индекс слишком мал: поиск не переключён.
     TooSmall {
+        /// `entities` или `people`.
+        index: &'static str,
         new: u64,
         current: u64,
         /// Порог, `search_reindex_min_percent`.
@@ -272,9 +302,14 @@ impl fmt::Display for ReindexError {
         match self {
             Self::Disabled => write!(f, "search is disabled"),
             Self::Busy => write!(f, "reindex is already running"),
-            Self::TooSmall { new, current, min } => write!(
+            Self::TooSmall {
+                index,
+                new,
+                current,
+                min,
+            } => write!(
                 f,
-                "new index has {new} documents, current has {current}: less than \
+                "new {index} index has {new} documents, current has {current}: less than \
                  {min}%, search was not switched (use force=true if intended)"
             ),
             Self::Failed(error) => write!(f, "reindex failed: {error}"),
@@ -302,7 +337,7 @@ static RUNNING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 /// Теневой индекс идущей перестройки: основной → теневой.
 static SHADOWS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
-fn shadow_of(main: &str) -> Option<String> {
+pub(crate) fn shadow_of(main: &str) -> Option<String> {
     SHADOWS.lock().unwrap().as_ref()?.get(main).cloned()
 }
 
@@ -318,6 +353,8 @@ fn set_shadow(main: &str, shadow: Option<String>) {
 /// Право на перестройку. Снимать через [`ReindexLock::release`]; в процессе снимается и при drop.
 pub struct ReindexLock {
     main: String,
+    /// Индекс людей: его теневой тоже снимается при drop.
+    people: String,
     redis: bool,
     /// Продление блокировки в Redis, пока она взята.
     renew: Option<tokio::task::JoinHandle<()>>,
@@ -339,6 +376,7 @@ impl ReindexLock {
         }
         let mut lock = Self {
             main,
+            people: state.search.index(people_search::INDEX),
             redis: false,
             renew: None,
         };
@@ -383,6 +421,7 @@ impl Drop for ReindexLock {
             running.remove(&self.main);
         }
         set_shadow(&self.main, None);
+        set_shadow(&self.people, None);
     }
 }
 
@@ -407,23 +446,42 @@ pub async fn reindex_locked(
     report: &Reporter,
 ) -> Result<ReindexResult, ReindexError> {
     let search = &state.search;
+    let stamp = unix_ms();
     let main = lock.main.clone();
-    let version = format!("{main}_v{}", unix_ms());
+    let version = format!("{main}_v{stamp}");
+    let people_main = lock.people.clone();
+    let people_version = format!("{people_main}_v{stamp}");
     let fail = |step: Step, started: Instant, error: String| {
         report.finish(step, StepStatus::Failed, error.clone(), started);
         ReindexError::Failed(error)
     };
+    let drop_versions = || async {
+        drop_index(search, &version).await;
+        drop_index(search, &people_version).await;
+    };
 
-    // 1. Теневой индекс. Основной создаётся, если его нет: swap требует оба.
+    // 1. Теневые индексы. Основные создаются, если их нет: swap требует оба.
     let started = report.start(Step::CreateIndex);
-    create_version(search, &main, &version)
+    let created = async {
+        create_version(search, &main, &version, &entity_settings()).await?;
+        create_version(
+            search,
+            &people_main,
+            &people_version,
+            &people_search::settings(),
+        )
         .await
-        .map_err(|error| fail(Step::CreateIndex, started, error.to_string()))?;
+    };
+    if let Err(error) = created.await {
+        drop_versions().await;
+        return Err(fail(Step::CreateIndex, started, error.to_string()));
+    }
     set_shadow(&main, Some(version.clone()));
+    set_shadow(&people_main, Some(people_version.clone()));
     report.finish(
         Step::CreateIndex,
         StepStatus::Done,
-        format!("Создан теневой индекс {version}"),
+        format!("Созданы теневые индексы {version}, {people_version}"),
         started,
     );
 
@@ -432,7 +490,7 @@ pub async fn reindex_locked(
     let indexed = match fill(state, &version, report).await {
         Ok(indexed) => indexed,
         Err(error) => {
-            drop_index(search, &version).await;
+            drop_versions().await;
             return Err(fail(Step::Fill, started, error.to_string()));
         }
     };
@@ -443,78 +501,123 @@ pub async fn reindex_locked(
         started,
     );
 
+    // 2б. Известность людей и все публичные люди.
+    let started = report.start(Step::FillPeople);
+    let people_indexed = match people_search::fill(state, &people_version, report).await {
+        Ok(indexed) => indexed,
+        Err(error) => {
+            drop_versions().await;
+            return Err(fail(Step::FillPeople, started, error.to_string()));
+        }
+    };
+    report.finish(
+        Step::FillPeople,
+        StepStatus::Done,
+        format!("Проиндексировано {people_indexed} человек"),
+        started,
+    );
+
     // 3. Не переключать на подозрительно маленький индекс.
     let started = report.start(Step::Check);
     let sizes = async {
-        Ok::<_, SearchError>((
-            documents(search, &version).await?,
-            documents(search, &main).await?,
-        ))
+        Ok::<_, SearchError>([
+            (
+                INDEX,
+                documents(search, &version).await?,
+                documents(search, &main).await?,
+            ),
+            (
+                people_search::INDEX,
+                documents(search, &people_version).await?,
+                documents(search, &people_main).await?,
+            ),
+        ])
     };
-    let (new, current) = match sizes.await {
+    let sizes = match sizes.await {
         Ok(sizes) => sizes,
         Err(error) => {
-            drop_index(search, &version).await;
+            drop_versions().await;
             return Err(fail(Step::Check, started, error.to_string()));
         }
     };
-    let percent = (new * 100).checked_div(current).unwrap_or(100);
     let min = state.config.search_reindex_min_percent;
-    if new * 100 < current * min {
-        if !options.force {
-            drop_index(search, &version).await;
+    let describe = |(name, new, current): &(&str, u64, u64)| {
+        let percent = (new * 100).checked_div(*current).unwrap_or(100);
+        format!("{name}: {new} документов, текущий: {current} ({percent}%)")
+    };
+    let summary = sizes.iter().map(describe).collect::<Vec<_>>().join("; ");
+    let current = sizes[0].2;
+    match sizes
+        .iter()
+        .find(|(_, new, current)| new * 100 < current * min)
+    {
+        Some(&(index, new, current)) if !options.force => {
+            drop_versions().await;
             report.finish(
                 Step::Check,
                 StepStatus::Failed,
                 format!(
-                    "Новый индекс: {new} документов, текущий: {current} ({percent}%). Нужно не \
-                     меньше {min}% — поиск не переключён, теневой индекс удалён. \
-                     Если сущности удалены намеренно — повторить с force=true"
+                    "Новые индексы — {summary}. Нужно не меньше {min}% — поиск не переключён, \
+                     теневые индексы удалены. Если данные удалены намеренно — повторить с \
+                     force=true"
                 ),
                 started,
             );
-            return Err(ReindexError::TooSmall { new, current, min });
+            return Err(ReindexError::TooSmall {
+                index,
+                new,
+                current,
+                min,
+            });
         }
-        report.finish(
+        Some(_) => report.finish(
             Step::Check,
             StepStatus::Done,
-            format!(
-                "Новый индекс: {new} документов, текущий: {current} ({percent}%) — меньше \
-                 {min}%, но force=true"
-            ),
+            format!("Новые индексы — {summary}: меньше {min}%, но force=true"),
             started,
-        );
-    } else {
-        report.finish(
+        ),
+        None => report.finish(
             Step::Check,
             StepStatus::Done,
-            format!("Новый индекс: {new} документов, текущий: {current} ({percent}%)"),
+            format!("Новые индексы — {summary}"),
             started,
-        );
+        ),
     }
 
-    // 4. Переключение: entities ⇄ entities_v<ms>.
+    // 4. Переключение одной задачей: entities ⇄ entities_v<ms>, people ⇄ people_v<ms>.
     let started = report.start(Step::Swap);
     search
         .call_and_wait(
             Method::POST,
             "/swap-indexes",
-            Some(&json!([{ "indexes": [main, version] }])),
+            Some(&json!([
+                { "indexes": [main, version] },
+                { "indexes": [people_main, people_version] },
+            ])),
         )
         .await
         .map_err(|error| fail(Step::Swap, started, error.to_string()))?;
-    // До сих пор правки шли и в теневой: ни одна не осталась только в старой версии.
+    // До сих пор правки шли и в теневые: ни одна не осталась только в старой версии.
     set_shadow(&main, None);
+    set_shadow(&people_main, None);
     report.finish(
         Step::Swap,
         StepStatus::Done,
-        format!("Поиск переключён на новый индекс; предыдущая версия сохранена в {version}"),
+        format!(
+            "Поиск переключён на новые индексы; предыдущие версии сохранены в {version}, \
+             {people_version}"
+        ),
         started,
     );
 
     // 5. Ротация: текущая (main) и предыдущая (version), всё старше — удалить.
     let started = report.start(Step::Rotate);
-    let deleted = rotate(search, &main, &version)
+    let rotated = async {
+        let mut deleted = rotate(search, &main, &version).await?;
+        deleted.extend(rotate(search, &people_main, &people_version).await?);
+        Ok::<_, SearchError>(deleted)
+    };
+    let deleted = rotated
         .await
         .map_err(|error| fail(Step::Rotate, started, error.to_string()))?;
     let message = if deleted.is_empty() {
@@ -558,6 +661,7 @@ pub async fn reindex_locked(
 
     Ok(ReindexResult {
         indexed,
+        people_indexed,
         previous_count: current,
         previous_version: version,
         deleted,
@@ -576,7 +680,12 @@ fn version_ms(main: &str, uid: &str) -> Option<u128> {
     uid.strip_prefix(main)?.strip_prefix("_v")?.parse().ok()
 }
 
-async fn create_version(search: &Search, main: &str, version: &str) -> Result<(), SearchError> {
+async fn create_version(
+    search: &Search,
+    main: &str,
+    version: &str,
+    settings: &Value,
+) -> Result<(), SearchError> {
     search
         .call_and_wait(
             Method::POST,
@@ -588,7 +697,7 @@ async fn create_version(search: &Search, main: &str, version: &str) -> Result<()
         .call_and_wait(
             Method::PATCH,
             &format!("/indexes/{version}/settings"),
-            Some(&entity_settings()),
+            Some(settings),
         )
         .await?;
     ignore(
@@ -746,9 +855,16 @@ pub(crate) fn unavailable() -> AppError {
     AppError::Unavailable("search is temporarily unavailable".into())
 }
 
-/// Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры.
+/// Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры. Весь
+/// поиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).
+///
+/// Фильтры (через AND): `kind`, `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон
+/// включительно), `studio` (точное название, без учёта регистра). `person` / `role` — заглушка:
+/// людей в индексе пока нет, ответ 503 `person_filter_unavailable`.
+///
 /// Сортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу
-/// «Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце).
+/// «Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только
+/// вышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию.
 ///
 /// Индекс обновляется после изменений в админке с задержкой в доли секунды.
 #[utoipa::path(
@@ -757,7 +873,7 @@ pub(crate) fn unavailable() -> AppError {
     responses(
         (status = 200, description = "Страница результатов. `total` — оценка", body = Page<EntitySummary>),
         (status = 400, description = "Неверный фильтр", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен; `person_filter_unavailable` — фильтр по людям ещё не готов", body = ErrorBody),
     )
 )]
 pub async fn search(
@@ -765,20 +881,23 @@ pub async fn search(
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Json<Page<EntitySummary>>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
-    let mut filters = Vec::new();
-    if let Some(kind) = query.kind {
-        filters.push(format!("kind = {}", kind.as_str()));
-    }
-    if let Some(tag) = &query.tag {
-        // Проверенный slug безопасно подставлять в строку фильтра.
-        validate::slug("tag", tag)?;
-        filters.push(format!("tags = \"{tag}\""));
-    }
-    if let Some(year) = query.year {
-        check_year(year)?;
-        filters.push(format!("year = {year}"));
-    }
-    let body = json!({
+    let mut filters = filters_of(&query)?;
+    let sort = match query.sort {
+        Some(SearchSort::Recommended) => Some("rank_score:desc"),
+        Some(SearchSort::Trending) => Some("popularity:desc"),
+        Some(SearchSort::TopRated) => Some("quality:desc"),
+        Some(SearchSort::New) => {
+            filters.push(format!("release_ts <= {}", day_ts(Utc::now().date_naive())));
+            Some("release_ts:desc")
+        }
+        Some(SearchSort::Soon) => {
+            filters.push(format!("release_ts > {}", day_ts(Utc::now().date_naive())));
+            Some("release_ts:asc")
+        }
+        Some(SearchSort::Title) => Some("title:asc"),
+        None => None,
+    };
+    let mut body = json!({
         "q": query.q.as_deref().unwrap_or_default().trim(),
         "filter": if filters.is_empty() { Value::Null } else { filters.join(" AND ").into() },
         "limit": limit,
@@ -787,12 +906,8 @@ pub async fn search(
             ["id", "kind", "slug", "title", "original_title", "release_date", "cover_url",
              "release_status", "imdb_rating", "imdb_votes"],
     });
-    let mut body = body;
-    match query.sort {
-        Some(SearchSort::Recommended) => body["sort"] = json!(["rank_score:desc"]),
-        Some(SearchSort::Trending) => body["sort"] = json!(["popularity:desc"]),
-        Some(SearchSort::TopRated) => body["sort"] = json!(["quality:desc"]),
-        None => {}
+    if let Some(sort) = sort {
+        body["sort"] = json!([sort]);
     }
 
     let path = format!("/indexes/{}/search", state.search.index(INDEX));
@@ -816,6 +931,136 @@ pub async fn search(
         limit,
         offset,
     }))
+}
+
+/// Длина значения фильтра `studio` и запроса подсказок.
+const MAX_STUDIO: usize = 200;
+
+/// Фильтры Meilisearch из запроса. Всё, что подставляется строкой, проверено или экранировано.
+fn filters_of(query: &SearchQuery) -> AppResult<Vec<String>> {
+    let mut filters = Vec::new();
+    if let Some(kind) = query.kind {
+        filters.push(format!("kind = {}", kind.as_str()));
+    }
+    if let Some(tag) = &query.tag {
+        // Проверенный slug безопасно подставлять в строку фильтра.
+        validate::slug("tag", tag)?;
+        filters.push(format!("tags = \"{tag}\""));
+    }
+    match (query.year, query.year_from, query.year_to) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+            return Err(AppError::BadRequest(
+                "year cannot be combined with year_from / year_to".into(),
+            ))
+        }
+        (Some(year), None, None) => {
+            check_year(year)?;
+            filters.push(format!("year = {year}"));
+        }
+        (None, from, to) => {
+            for year in [from, to].into_iter().flatten() {
+                check_year(year)?;
+            }
+            match (from, to) {
+                (Some(from), Some(to)) if from > to => {
+                    return Err(AppError::BadRequest(
+                        "year_from must not be greater than year_to".into(),
+                    ))
+                }
+                (Some(from), Some(to)) => filters.push(format!("year {from} TO {to}")),
+                (Some(from), None) => filters.push(format!("year >= {from}")),
+                (None, Some(to)) => filters.push(format!("year <= {to}")),
+                (None, None) => {}
+            }
+        }
+    }
+    if let Some(studio) = &query.studio {
+        let studio = studio.trim();
+        if studio.is_empty() || studio.chars().count() > MAX_STUDIO {
+            return Err(AppError::BadRequest(format!(
+                "studio must be 1-{MAX_STUDIO} characters"
+            )));
+        }
+        filters.push(format!("studios = {}", filter_string(studio)));
+    }
+    match (&query.person, &query.role) {
+        (None, Some(_)) => {
+            return Err(AppError::BadRequest("role requires person".into()));
+        }
+        (Some(person), role) => {
+            validate::slug("person", person)?;
+            if let Some(role) = role {
+                validate::role(role)?;
+            }
+            // Заглушка: участников в документе нет (компактный индекс). Когда появятся — здесь
+            // фильтр по ним.
+            return Err(
+                AppError::Unavailable("search by people is not available yet".into())
+                    .with_code("person_filter_unavailable"),
+            );
+        }
+        (None, None) => {}
+    }
+    Ok(filters)
+}
+
+/// Строка в кавычках для фильтра Meilisearch: `\` и `"` экранируются.
+fn filter_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Подсказки студий для фильтра `studio` (facet search Meilisearch по полю `studios`): по части
+/// названия с опечатками; без `q` — самые частые. `count` — сколько видимых сущностей в индексе.
+#[utoipa::path(
+    get, operation_id = "search_studios", path = "/search/studios", tag = "catalog",
+    params(StudiosQuery),
+    responses(
+        (status = 200, description = "Студии", body = Vec<StudioHit>),
+        (status = 400, description = "Слишком длинный `q`", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+    )
+)]
+pub async fn studios(
+    State(state): State<AppState>,
+    Query(query): Query<StudiosQuery>,
+) -> AppResult<Json<Vec<StudioHit>>> {
+    let q = query.q.as_deref().unwrap_or_default().trim();
+    if q.chars().count() > MAX_STUDIO {
+        return Err(AppError::BadRequest(format!(
+            "q must be at most {MAX_STUDIO} characters"
+        )));
+    }
+    let limit = query.limit.unwrap_or(10).clamp(1, 50) as usize;
+    let body = json!({
+        "facetName": "studios",
+        "facetQuery": q,
+        "filter": query.kind.map(|kind| format!("kind = {}", kind.as_str())),
+    });
+    let path = format!("/indexes/{}/facet-search", state.search.index(INDEX));
+    let response = match state.search.call(Method::POST, &path, Some(&body)).await {
+        Ok(response) => response,
+        Err(error) if error.code() == Some("index_not_found") => json!({ "facetHits": [] }),
+        Err(SearchError::Disabled) => return Err(unavailable()),
+        Err(error) => {
+            tracing::warn!(%error, "studio facet search failed");
+            return Err(unavailable());
+        }
+    };
+    let hits = response["facetHits"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    Ok(Json(
+        hits.into_iter()
+            .take(limit)
+            .filter_map(|hit| {
+                Some(StudioHit {
+                    name: hit["value"].as_str()?.to_string(),
+                    count: hit["count"].as_i64()?,
+                })
+            })
+            .collect(),
+    ))
 }
 
 /// Перестроить поисковый индекс из PostgreSQL без простоя: теневой индекс, проверка размера,
@@ -914,6 +1159,47 @@ mod tests {
         assert_eq!(version_ms("entities", "entities"), None);
         assert_eq!(version_ms("entities", "entities_reindex"), None);
         assert_eq!(version_ms("entities", "other_entities_v1"), None);
+    }
+
+    fn query(params: Value) -> SearchQuery {
+        serde_json::from_value(params).unwrap()
+    }
+
+    #[test]
+    fn filters() {
+        let ok = |params| filters_of(&query(params)).unwrap();
+        assert_eq!(ok(json!({ "year": 2001 })), ["year = 2001"]);
+        assert_eq!(
+            ok(json!({ "year_from": 2000, "year_to": 2010 })),
+            ["year 2000 TO 2010"]
+        );
+        assert_eq!(ok(json!({ "year_from": 2000 })), ["year >= 2000"]);
+        assert_eq!(
+            ok(json!({ "year_to": 2010, "kind": "movie" })),
+            ["kind = movie", "year <= 2010"]
+        );
+        // Кавычка и обратный слеш не выходят из строки фильтра.
+        assert_eq!(
+            ok(json!({ "studio": r#" A" OR kind = book \"# })),
+            [r#"studios = "A\" OR kind = book \\""#]
+        );
+        for bad in [
+            json!({ "year": 2001, "year_from": 2000 }),
+            json!({ "year_from": 2010, "year_to": 2000 }),
+            json!({ "year_from": 0 }),
+            json!({ "studio": " " }),
+            json!({ "role": "director" }),
+            json!({ "person": "Bad Slug" }),
+            json!({ "person": "christopher-nolan", "role": "Director" }),
+        ] {
+            let error = filters_of(&query(bad.clone())).unwrap_err();
+            assert_eq!(error.code(), "validation", "{bad}");
+        }
+        let error = filters_of(&query(
+            json!({ "person": "christopher-nolan", "role": "director" }),
+        ))
+        .unwrap_err();
+        assert_eq!(error.code(), "person_filter_unavailable");
     }
 
     #[test]

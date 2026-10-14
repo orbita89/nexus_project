@@ -117,6 +117,17 @@ impl Ctx {
         .unwrap()
     }
 
+    async fn send_json(
+        &self,
+        method: Method,
+        path: &str,
+        body: Value,
+        token: Option<&str>,
+    ) -> TestResponse {
+        let app = nexus::build_app(self.state.clone());
+        request(app, method, &format!("{CATALOG}{path}"), Some(body), token).await
+    }
+
     async fn archived_tmdb(&self) -> Vec<i32> {
         sqlx::query_scalar("SELECT tmdb_id FROM archived_tmdb ORDER BY 1")
             .fetch_all(&self.state.db)
@@ -246,6 +257,7 @@ async fn build_splits_hot_layer_and_archive(pool: PgPool) {
             people_deleted: 1,
             deferred: 0,
             archive_size: 4,
+            manual_archived: 0,
         }
     );
 
@@ -503,4 +515,145 @@ async fn promote_moves_film_from_archive_to_catalog(pool: PgPool) {
 
     let again = ctx.send(Method::POST, path, Some(&admin)).await;
     assert_eq!(again.status, StatusCode::NOT_FOUND);
+}
+
+/// Ручной перенос в архив: только админ, проверка списка, пропуски с причиной (нет на сайте, данные
+/// пользователя), документ в архиве и удаление из БД вместе с людьми без работ; сборка горячего
+/// слоя такой фильм не возвращает; пока писатель архива занят — 409 без изменений; промоушен
+/// снимает пометку.
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn demote_moves_films_to_archive_and_build_keeps_them_cold(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    ctx.seed().await;
+    ctx.dump_and_build().await;
+    sqlx::query(
+        "UPDATE entities SET cover_url = 'https://img.test/hit.jpg' WHERE slug = 'ru-hit-1'",
+    )
+    .execute(&ctx.state.db)
+    .await
+    .unwrap();
+    let user = ctx.token("user@example.com", "user").await;
+    let admin = ctx.token("admin@example.com", "admin").await;
+    let path = "/admin/archive/demote";
+
+    let body = json!({ "slugs": ["ru-hit-1"] });
+    assert_eq!(
+        ctx.send_json(Method::POST, path, body.clone(), None)
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        ctx.send_json(Method::POST, path, body.clone(), Some(&user))
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    let many: Vec<String> = (0..101).map(|i| format!("film-{i}")).collect();
+    for bad in [
+        json!({ "slugs": [] }),
+        json!({ "slugs": many }),
+        json!({ "slugs": ["a", "a"] }),
+        json!({ "slugs": ["Bad Slug"] }),
+    ] {
+        let response = ctx
+            .send_json(Method::POST, path, bad.clone(), Some(&admin))
+            .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    let writer = ctx.archive().writer().unwrap();
+    let busy = ctx.send_json(Method::POST, path, body, Some(&admin)).await;
+    assert_eq!(busy.status, StatusCode::CONFLICT, "{:?}", busy.json());
+    assert!(ctx.slugs().await.contains(&"ru-hit-1".to_string()));
+    drop(writer);
+
+    let response = ctx
+        .send_json(
+            Method::POST,
+            path,
+            json!({ "slugs": ["ru-hit-1", "en-used", "nope", "manual-low"] }),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.json());
+    assert_eq!(
+        response.json(),
+        json!({
+            "archived": ["ru-hit-1", "manual-low"],
+            "skipped": [
+                { "slug": "en-used", "reason": "in_use" },
+                { "slug": "nope", "reason": "not_found" },
+            ],
+        })
+    );
+    assert_eq!(ctx.slugs().await, ["en-hit", "en-used", "ru-new"]);
+    let people: Vec<String> = sqlx::query_scalar("SELECT slug FROM people ORDER BY slug")
+        .fetch_all(&ctx.state.db)
+        .await
+        .unwrap();
+    assert!(people.is_empty(), "'both' had no other works: {people:?}");
+    let manual: Vec<i32> =
+        sqlx::query_scalar("SELECT tmdb_id FROM archived_tmdb WHERE manual ORDER BY 1")
+            .fetch_all(&ctx.state.db)
+            .await
+            .unwrap();
+    assert_eq!(manual, [1, 7]);
+    let page = ctx
+        .send(Method::GET, "/archive/entities/ru-hit-1", None)
+        .await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert_eq!(page.json()["cover_url"], "https://img.test/hit.jpg");
+    assert_eq!(page.json()["popularity"], 50.0);
+    assert_eq!(
+        ctx.send(Method::GET, "/entities/ru-hit-1", None)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+
+    // Сборка: ru-hit-1 (50) — лучший русский, но перенесён вручную и остаётся в архиве.
+    pipeline::dump(&ctx.state, Some(ctx.archive()), &ctx.dump_path())
+        .await
+        .unwrap();
+    let report = pipeline::build(
+        &ctx.state,
+        ctx.archive(),
+        &ctx.dump_path(),
+        BuildOptions {
+            ru: 2,
+            foreign: 1,
+            fresh: false,
+            defer_delete: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.manual_archived, 2);
+    assert_eq!(
+        ctx.slugs().await,
+        ["en-hit", "en-used", "ru-hit-2", "ru-new"]
+    );
+    assert_eq!(ctx.search("один").await, ["ru-hit-1"]);
+
+    // Промоушен возвращает фильм и снимает пометку.
+    let promoted = ctx
+        .send(
+            Method::POST,
+            "/admin/archive/promote/ru-hit-1",
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(
+        promoted.status,
+        StatusCode::CREATED,
+        "{:?}",
+        promoted.json()
+    );
+    let manual: Vec<i32> =
+        sqlx::query_scalar("SELECT tmdb_id FROM archived_tmdb WHERE manual ORDER BY 1")
+            .fetch_all(&ctx.state.db)
+            .await
+            .unwrap();
+    assert_eq!(manual, [7]);
 }

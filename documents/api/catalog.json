@@ -10,6 +10,93 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/catalog/admin/archive/demote": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Перенести ненужные фильмы с сайта в холодный архив: документ в Tantivy (название,\nоригинальное название, дата, постер, TMDB id, popularity), затем строка удаляется из\nPostgreSQL (каскадом титры, теги, статистика, полные данные TMDB; люди без других работ — тоже),\nTMDB id — в `archived_tmdb` с `manual`: сборка горячего слоя такой фильм не вернёт, импорт\nпропустит. Поиск сайта и статика обновляются. Вернуть — `POST /admin/archive/promote/{slug}`\n(«скелетом»: без описания, титров и жанров).",
+        "description": "Не переносятся (`skipped`): нет на сайте, без TMDB, с данными пользователей.",
+        "operationId": "archive_demote",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DemoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Перенесённые и пропущенные с причиной",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пусто, больше 100, повтор или неверный slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Архив занят сборкой (ничего не перенесено)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Архив не настроен или недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/archive/promote/{slug}": {
       "post": {
         "tags": [
@@ -2107,7 +2194,7 @@
           "catalog"
         ],
         "summary": "Список видимых сущностей (активные; фильмы из TMDB — вышедшие или «Скоро премьера»). `sort`:\n`recommended` (по умолчанию: балл — рейтинг IMDb + популярность + свежесть), `trending`\n(смотрят сейчас), `top_rated` (рейтинг IMDb), `new` (вышедшие, новые сверху), `soon` (ближайшие\nпремьеры), `popular` (больше наших оценок), `rating` (выше наша средняя), `title`. Фильмы с датой\nв будущем — только в `soon`.",
-        "description": "Наши оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в\nтаблицы рецензий не ходит.",
+        "description": "Наши оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в\nтаблицы рецензий не ходит.\n\nПоиска по названию здесь нет: весь поиск на сайте — `GET /search` (Meilisearch); `q` — 400\n`use_search`.",
         "operationId": "list_entities",
         "parameters": [
           {
@@ -2150,16 +2237,6 @@
             "example": 2021
           },
           {
-            "name": "q",
-            "in": "query",
-            "description": "Подстрока в названии или оригинальном названии, без учёта регистра.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "example": "дюна"
-          },
-          {
             "name": "limit",
             "in": "query",
             "description": "1–100, по умолчанию 20.",
@@ -2192,7 +2269,7 @@
             }
           },
           "400": {
-            "description": "Неверный фильтр",
+            "description": "Неверный фильтр; `q` — `use_search`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2446,14 +2523,14 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры.\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце).",
-        "description": "Индекс обновляется после изменений в админке с задержкой в доли секунды.",
+        "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры. Весь\nпоиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).",
+        "description": "Фильтры (через AND): `kind`, `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра). `person` / `role` — заглушка:\nлюдей в индексе пока нет, ответ 503 `person_filter_unavailable`.\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
         "operationId": "search",
         "parameters": [
           {
             "name": "q",
             "in": "query",
-            "description": "Поисковый запрос: название, оригинальное название, люди, теги, описание. Опечатки допустимы.",
+            "description": "Поисковый запрос: название, оригинальное название, студии. Опечатки допустимы. Пустой —\nвсе, кто подходит под фильтры.",
             "required": false,
             "schema": {
               "type": "string"
@@ -2489,11 +2566,65 @@
           {
             "name": "year",
             "in": "query",
+            "description": "Ровно этот год выхода. Вместе с `year_from` / `year_to` — 400.",
             "required": false,
             "schema": {
               "type": "integer",
               "format": "int32"
-            }
+            },
+            "example": 2001
+          },
+          {
+            "name": "year_from",
+            "in": "query",
+            "description": "Год выхода от (включительно).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2000
+          },
+          {
+            "name": "year_to",
+            "in": "query",
+            "description": "Год выхода до (включительно).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2010
+          },
+          {
+            "name": "studio",
+            "in": "query",
+            "description": "Студия — точное название (без учёта регистра); подсказки — `GET /search/studios`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "Warner Bros. Pictures"
+          },
+          {
+            "name": "person",
+            "in": "query",
+            "description": "Slug человека: фильмы с его участием. **Заглушка:** людей в индексе пока нет — 503\n`person_filter_unavailable`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "christopher-nolan"
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "description": "Роль человека из `person`: `actor`, `director`, `producer`, `writer`, ... Без `person` — 400.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "director"
           },
           {
             "name": "limit",
@@ -2529,6 +2660,163 @@
           },
           "400": {
             "description": "Неверный фильтр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен; `person_filter_unavailable` — фильтр по людям ещё не готов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/search/people": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Поиск людей: по имени (русскому и латиницей) с опечатками и по началу слова. Из одинаково\nподходящих выше известные (`fame`: работы в фильмах с большим числом оценок); без `q` — самые\nизвестные. `known_for` — основная роль (`actor`, `director`, ...).",
+        "operationId": "search_people",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Имя или его начало, русское или латиницей, опечатки допустимы; до 300 символов. Пустой —\nсамые известные.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "брэд"
+          },
+          {
+            "name": "known_for",
+            "in": "query",
+            "description": "Только с этой основной ролью: `actor`, `director`, `writer`, `producer`, ...",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "director"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница людей. `total` — оценка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_PersonHit"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Длинный `q` или неверный `known_for`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/search/studios": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Подсказки студий для фильтра `studio` (facet search Meilisearch по полю `studios`): по части\nназвания с опечатками; без `q` — самые частые. `count` — сколько видимых сущностей в индексе.",
+        "operationId": "search_studios",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Начало или часть названия, опечатки допустимы. Пустой — самые частые.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "warn"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Только студии сущностей этого типа.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–50, по умолчанию 10. Вне диапазона приводится к границам.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Студии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StudioHit"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Слишком длинный `q`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2987,6 +3275,14 @@
             "type": "string",
             "example": "Дени Вильнёв"
           },
+          "original_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Имя латиницей, если отличается от `full_name`.",
+            "example": "Denis Villeneuve"
+          },
           "photo_url": {
             "type": [
               "string",
@@ -3021,6 +3317,71 @@
           }
         },
         "additionalProperties": false
+      },
+      "DemoteRequest": {
+        "type": "object",
+        "required": [
+          "slugs"
+        ],
+        "properties": {
+          "slugs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "slug'и фильмов на сайте, 1–100, без повторов.",
+            "example": [
+              "the-night-visitor-1971"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "DemoteResult": {
+        "type": "object",
+        "required": [
+          "archived",
+          "skipped"
+        ],
+        "properties": {
+          "archived": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Перенесены в архив: удалены из каталога, поиска и статики."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DemoteSkip"
+            }
+          }
+        }
+      },
+      "DemoteSkip": {
+        "type": "object",
+        "required": [
+          "slug",
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "$ref": "#/components/schemas/DemoteSkipReason"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "DemoteSkipReason": {
+        "type": "string",
+        "description": "Почему фильм не перенесён.",
+        "enum": [
+          "not_found",
+          "no_tmdb",
+          "in_use"
+        ]
       },
       "DoneEvent": {
         "type": "object",
@@ -3941,6 +4302,88 @@
           }
         }
       },
+      "Page_PersonHit": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Человек в выдаче поиска людей.",
+              "required": [
+                "id",
+                "slug",
+                "full_name"
+              ],
+              "properties": {
+                "birth_date": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date"
+                },
+                "full_name": {
+                  "type": "string",
+                  "example": "Брэд Питт"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "known_for": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Основная роль: где вклад в известность больше всего.",
+                  "example": "actor"
+                },
+                "original_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "example": "Brad Pitt"
+                },
+                "photo_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "slug": {
+                  "type": "string",
+                  "example": "brad-pitt"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "Page_PersonSummary": {
         "type": "object",
         "description": "Страница списка.",
@@ -4044,6 +4487,14 @@
             "type": "string",
             "format": "uuid"
           },
+          "original_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Имя латиницей (английское из TMDB), если отличается от `full_name`: по нему тоже ищут.",
+            "example": "Denis Villeneuve"
+          },
           "photo_url": {
             "type": [
               "string",
@@ -4109,6 +4560,57 @@
           }
         ],
         "description": "Человек и его фильмография (новые работы сверху)."
+      },
+      "PersonHit": {
+        "type": "object",
+        "description": "Человек в выдаче поиска людей.",
+        "required": [
+          "id",
+          "slug",
+          "full_name"
+        ],
+        "properties": {
+          "birth_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "full_name": {
+            "type": "string",
+            "example": "Брэд Питт"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "known_for": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Основная роль: где вклад в известность больше всего.",
+            "example": "actor"
+          },
+          "original_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Brad Pitt"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "brad-pitt"
+          }
+        }
       },
       "PersonRef": {
         "type": "object",
@@ -4381,6 +4883,7 @@
         "type": "object",
         "required": [
           "indexed",
+          "people_indexed",
           "previous_count",
           "previous_version",
           "deleted"
@@ -4400,6 +4903,12 @@
             "type": "integer",
             "description": "Сколько сущностей в новом индексе.",
             "example": 100000,
+            "minimum": 0
+          },
+          "people_indexed": {
+            "type": "integer",
+            "description": "Сколько людей в новом индексе `people`.",
+            "example": 880000,
             "minimum": 0
           },
           "previous_count": {
@@ -4459,7 +4968,10 @@
         "enum": [
           "recommended",
           "trending",
-          "top_rated"
+          "top_rated",
+          "new",
+          "soon",
+          "title"
         ]
       },
       "SeriesMetadata": {
@@ -4639,6 +5151,7 @@
           "search",
           "create_index",
           "fill",
+          "fill_people",
           "check",
           "swap",
           "rotate",
@@ -4689,6 +5202,24 @@
           "skipped",
           "failed"
         ]
+      },
+      "StudioHit": {
+        "type": "object",
+        "description": "Студия в подсказках: название (значение для `studio`) и сколько сущностей в индексе.",
+        "required": [
+          "name",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string",
+            "example": "Warner Bros. Pictures"
+          }
+        }
       },
       "Tag": {
         "type": "object",
@@ -4861,6 +5392,12 @@
             "format": "date"
           },
           "full_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "original_name": {
             "type": [
               "string",
               "null"

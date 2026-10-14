@@ -21,7 +21,7 @@
 
 `--people` — второй этап: люди из титров горячего слоя, `GET /3/person/{id}?language=ru-RU&
 append_to_response=external_ids,translations,images` → `person_tmdb_data`, `people.bio`
-(русская биография, иначе прежняя), `birth_date`, `photo_url`. Фильмографию (`combined_credits`,
+(русская биография, иначе прежняя), `birth_date`, `photo_url`, `original_name` (английское имя). Фильмографию (`combined_credits`,
 ~200 КБ на человека) не берём: она дублирует титры фильмов.
 
 Пачки фильмов пишутся без построчных триггеров (`session_replication_role = replica`, нужен
@@ -317,6 +317,14 @@ ON CONFLICT DO NOTHING
 """
 
 
+def english_name(data: dict) -> str | None:
+    """Имя латиницей — английский перевод TMDB (`people.original_name`: поиск по «brad pitt»)."""
+    for tr in (data.get("translations") or {}).get("translations") or []:
+        if tr.get("iso_639_1") == "en":
+            return clean((tr.get("data") or {}).get("name")) or None
+    return None
+
+
 async def apply_people(conn, batch: list[tuple[object, int, dict]], stats: Stats):
     async with conn.transaction():
         ids = [b[0] for b in batch]
@@ -328,13 +336,16 @@ async def apply_people(conn, batch: list[tuple[object, int, dict]], stats: Stats
             ids, [b[1] for b in batch], [json.dumps(b[2], ensure_ascii=False) for b in batch])
         await conn.execute(
             """UPDATE people p SET bio = COALESCE(u.b, p.bio), birth_date = COALESCE(u.d, p.birth_date),
-                      photo_url = COALESCE(u.f, p.photo_url)
-               FROM unnest($1::uuid[], $2::text[], $3::date[], $4::text[]) AS u(id, b, d, f)
+                      photo_url = COALESCE(u.f, p.photo_url),
+                      original_name = COALESCE(NULLIF(u.o, p.full_name), p.original_name)
+               FROM unnest($1::uuid[], $2::text[], $3::date[], $4::text[], $5::text[])
+                    AS u(id, b, d, f, o)
                WHERE p.id = u.id""",
             ids,
             [(clean(d.get("biography")) or "")[:MAX_TEXT] or None for _, _, d in batch],
             [parse_date(d.get("birthday")) for _, _, d in batch],
-            [f"{PROFILE}{d['profile_path']}" if d.get("profile_path") else None for _, _, d in batch])
+            [f"{PROFILE}{d['profile_path']}" if d.get("profile_path") else None for _, _, d in batch],
+            [english_name(d) for _, _, d in batch])
         stats.applied += len(batch)
 
 
