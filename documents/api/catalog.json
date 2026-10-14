@@ -102,7 +102,7 @@
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Вернуть фильм из архива на сайт: строка в `entities` (`active`, `active_manual` — сборка\nгорячего слоя её не уберёт), связь с TMDB и popularity; затем документ удаляется из архива\n(`delete_term` + `commit`), поиск сайта и статика обновляются. Карточка — «скелет»: название,\nоригинальное название, дата выхода, постер.",
+        "summary": "Вернуть фильм из архива на сайт. С `TMDB_API_KEY` — со всеми данными TMDB (описание,\nпостер, титры, жанры, трейлеры; [`enrich`]), TMDB недоступен или ключа нет — «скелетом»:\nназвание, оригинальное название, дата выхода, постер. `active_manual` — сборка горячего слоя\nфильм не уберёт; пометка ручного переноса в архив снимается. Документ удаляется из архива,\nпоиск сайта и статика обновляются.",
         "operationId": "archive_promote",
         "parameters": [
           {
@@ -2104,6 +2104,89 @@
           },
           "503": {
             "description": "Архив не настроен (`ARCHIVE_DIR`) или недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/archive/entities/{slug}/restore": {
+      "post": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Открыли страницу фильма в архиве — фильм возвращается на сайт со всеми данными TMDB\n(описание, постер, длительность, страны, студии, возрастной рейтинг, трейлеры, жанры, все\nактёры и съёмочная группа) и сразу отдаётся полной карточкой: фронтенд показывает её вместо\nархивной страницы. Кто-то ищет фильм в архиве — значит, ему место на сайте.",
+        "description": "Уже на сайте (вернулся раньше или параллельным запросом) — 200 и карточка. Поиск сайта,\nизвестность участников и статика обновляются в фоне. Без авторизации; лимит — сколько фильмов\nв час возвращается открытием страницы (`ARCHIVE_RESTORE_PER_HOUR`).",
+        "operationId": "archive_restore",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug фильма в архиве",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Фильм уже на сайте",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityDetail"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Фильм возвращён на сайт",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет ни в архиве, ни на сайте",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`kept_in_archive` — админ убрал фильм в архив вручную; `not_restorable` — не фильм TMDB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Лимит возвратов в час исчерпан (`Retry-After`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`restore_unavailable` — нет `TMDB_API_KEY` или лимит 0; `tmdb_unavailable` — TMDB не ответил; архив недоступен",
             "content": {
               "application/json": {
                 "schema": {

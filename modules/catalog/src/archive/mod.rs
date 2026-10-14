@@ -6,6 +6,7 @@
 //! возврат в каталог ([`promote`]) и ручной перенос ненужных фильмов в архив ([`demote`]). Раскладку делает
 //! [`pipeline`] (`nexus archive dump|build`).
 
+pub mod enrich;
 pub mod index;
 pub mod pipeline;
 
@@ -21,12 +22,16 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::NaiveDate;
+use governor::clock::{Clock, DefaultClock};
+use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use serde::{Deserialize, Serialize};
 use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path, Query};
 use shared::pagination::Page;
 use shared::{AdminUser, AppError, AppResult, AppState};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::num::NonZeroU32;
+use std::sync::{Arc, Mutex};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -158,10 +163,11 @@ pub async fn get(
         .ok_or(AppError::NotFound)
 }
 
-/// Вернуть фильм из архива на сайт: строка в `entities` (`active`, `active_manual` — сборка
-/// горячего слоя её не уберёт), связь с TMDB и popularity; затем документ удаляется из архива
-/// (`delete_term` + `commit`), поиск сайта и статика обновляются. Карточка — «скелет»: название,
-/// оригинальное название, дата выхода, постер.
+/// Вернуть фильм из архива на сайт. С `TMDB_API_KEY` — со всеми данными TMDB (описание,
+/// постер, титры, жанры, трейлеры; [`enrich`]), TMDB недоступен или ключа нет — «скелетом»:
+/// название, оригинальное название, дата выхода, постер. `active_manual` — сборка горячего слоя
+/// фильм не уберёт; пометка ручного переноса в архив снимается. Документ удаляется из архива,
+/// поиск сайта и статика обновляются.
 #[utoipa::path(
     post, operation_id = "archive_promote", path = "/admin/archive/promote/{slug}",
     tag = "catalog-admin",
@@ -193,61 +199,243 @@ pub async fn promote(
         let archive = archive.clone();
         blocking(move || archive.writer()).await?
     };
-
-    // TODO: Fetch rich data from external API (TMDB: описание, титры, жанры).
+    let data = match fetch(&state, &doc).await {
+        Ok(data) => data,
+        Err(enrich::TmdbError::Disabled) => None,
+        Err(error) => {
+            tracing::warn!(%error, %slug, "promote without TMDB data");
+            None
+        }
+    };
 
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO entities
-             (kind, slug, title, original_title, release_date, cover_url, active, active_manual)
-         VALUES ($1, $2, $3, $4, $5, $6, true, true) RETURNING id",
-    )
-    .bind(doc.kind)
-    .bind(&doc.slug)
-    .bind(&doc.title)
-    .bind(&doc.original_title)
-    .bind(doc.release_date)
-    .bind(&doc.cover_url)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(validate::conflict("slug is already taken"))?;
-    if let Some(tmdb_id) = doc.tmdb_id {
-        sqlx::query("INSERT INTO entity_tmdb (entity_id, tmdb_id) VALUES ($1, $2)")
-            .bind(id)
-            .bind(tmdb_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(validate::conflict("tmdb id is already in the catalog"))?;
-        sqlx::query("DELETE FROM archived_tmdb WHERE tmdb_id = $1")
-            .bind(tmdb_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-    sqlx::query("INSERT INTO entity_stats (entity_id, tmdb_popularity) VALUES ($1, $2)")
-        .bind(id)
-        .bind(doc.popularity)
-        .execute(&mut *tx)
-        .await?;
+    let id = enrich::insert_film(&mut tx, &doc, data.as_ref())
+        .await
+        .map_err(validate::conflict(
+            "slug or tmdb id is already in the catalog",
+        ))?;
     tx.commit().await?;
+    remove_from_archive(&archive, writer, &slug).await;
 
-    // Ленивое удаление из архива: документ помечен удалённым, место освободит слияние.
-    let deleted = {
-        let (archive, slug) = (archive.clone(), slug.clone());
-        blocking(move || {
+    publish::run(
+        &state,
+        Touched::collect(&state.db, &[id], &[]).await?,
+        &Reporter::silent(),
+    )
+    .await;
+    tracing::info!(admin_id = %admin.id, entity_id = %id, %slug, full = data.is_some(), "entity promoted from archive");
+    Ok((
+        StatusCode::CREATED,
+        Json(detail_by_id(&state.db, id).await?),
+    ))
+}
+
+/// Полный ответ TMDB по фильму архива; не фильм или без TMDB id — `None`.
+async fn fetch(
+    state: &AppState,
+    doc: &ArchiveDoc,
+) -> Result<Option<serde_json::Value>, enrich::TmdbError> {
+    match doc.tmdb_id {
+        Some(tmdb_id) if enrich::is_movie(doc) => enrich::fetch_movie(&state.config, tmdb_id).await,
+        _ => Ok(None),
+    }
+}
+
+/// Ленивое удаление документа (место освободит слияние) и коммит. Не вышло — фильм уже в
+/// каталоге, документ уберёт следующая сборка (`active_manual` → `keep`).
+async fn remove_from_archive(archive: &Arc<Archive>, writer: tantivy::IndexWriter, slug: &str) {
+    let (archive, slug) = (archive.clone(), slug.to_string());
+    let removed = blocking({
+        let slug = slug.clone();
+        move || {
             let mut writer = writer;
             archive.delete(&writer, &slug);
             writer.commit()?;
             archive.reload()
-        })
-        .await
+        }
+    })
+    .await;
+    if let Err(error) = removed {
+        tracing::warn!(%error, %slug, "returned entity is still in the archive");
+    }
+}
+
+/// Возвраты открытием страницы: лимит в час на каталог архива (в тестах у каждого свой).
+type Limiters = HashMap<(String, u64), Arc<DefaultDirectRateLimiter>>;
+static RESTORES: Mutex<Option<Limiters>> = Mutex::new(None);
+/// Фильмы, которые сейчас возвращаются: второй запрос того же slug ждёт первого.
+static IN_FLIGHT: Mutex<Option<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = Mutex::new(None);
+
+fn restore_limiter(state: &AppState) -> Option<Arc<DefaultDirectRateLimiter>> {
+    let per_hour = NonZeroU32::new(u32::try_from(state.config.archive_restore_per_hour).ok()?)?;
+    let key = (
+        state.config.archive_dir.clone().unwrap_or_default(),
+        state.config.archive_restore_per_hour,
+    );
+    let mut limiters = RESTORES.lock().unwrap();
+    Some(
+        limiters
+            .get_or_insert_with(HashMap::new)
+            .entry(key)
+            .or_insert_with(|| Arc::new(RateLimiter::direct(Quota::per_hour(per_hour))))
+            .clone(),
+    )
+}
+
+fn in_flight(slug: &str) -> Arc<tokio::sync::Mutex<()>> {
+    IN_FLIGHT
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .entry(slug.to_string())
+        .or_default()
+        .clone()
+}
+
+/// Уже на сайте (вернулся раньше): карточка.
+async fn on_site(state: &AppState, slug: &str) -> AppResult<Option<EntityDetail>> {
+    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM entities WHERE slug = $1 AND active")
+        .bind(slug)
+        .fetch_optional(&state.db)
+        .await?;
+    match id {
+        Some(id) => Ok(Some(detail_by_id(&state.db, id).await?)),
+        None => Ok(None),
+    }
+}
+
+/// Открыли страницу фильма в архиве — фильм возвращается на сайт со всеми данными TMDB
+/// (описание, постер, длительность, страны, студии, возрастной рейтинг, трейлеры, жанры, все
+/// актёры и съёмочная группа) и сразу отдаётся полной карточкой: фронтенд показывает её вместо
+/// архивной страницы. Кто-то ищет фильм в архиве — значит, ему место на сайте.
+///
+/// Уже на сайте (вернулся раньше или параллельным запросом) — 200 и карточка. Поиск сайта,
+/// известность участников и статика обновляются в фоне. Без авторизации; лимит — сколько фильмов
+/// в час возвращается открытием страницы (`ARCHIVE_RESTORE_PER_HOUR`).
+#[utoipa::path(
+    post, operation_id = "archive_restore", path = "/archive/entities/{slug}/restore",
+    tag = "catalog",
+    params(("slug" = String, Path, description = "slug фильма в архиве")),
+    responses(
+        (status = 201, description = "Фильм возвращён на сайт", body = EntityDetail),
+        (status = 200, description = "Фильм уже на сайте", body = EntityDetail),
+        (status = 404, description = "Нет ни в архиве, ни на сайте", body = ErrorBody),
+        (status = 409, description = "`kept_in_archive` — админ убрал фильм в архив вручную; `not_restorable` — не фильм TMDB", body = ErrorBody),
+        (status = 429, description = "Лимит возвратов в час исчерпан (`Retry-After`)", body = ErrorBody),
+        (status = 503, description = "`restore_unavailable` — нет `TMDB_API_KEY` или лимит 0; `tmdb_unavailable` — TMDB не ответил; архив недоступен", body = ErrorBody),
+    )
+)]
+pub async fn restore(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> AppResult<(StatusCode, Json<EntityDetail>)> {
+    validate::slug("slug", &slug).map_err(|_| AppError::NotFound)?;
+    let lock = in_flight(&slug);
+    let result = {
+        let _guard = lock.lock().await;
+        restore_locked(&state, &slug).await
     };
-    if let Err(error) = deleted {
-        // Фильм уже в каталоге; документ уберёт следующая сборка.
-        tracing::warn!(%error, %slug, "promoted entity is still in the archive");
+    // Запись снимается последним вышедшим: ждущие держат свою копию Arc.
+    let mut flights = IN_FLIGHT.lock().unwrap();
+    if let Some(map) = flights.as_mut() {
+        if map.get(&slug).is_some_and(|m| Arc::strong_count(m) <= 2) {
+            map.remove(&slug);
+        }
+    }
+    result
+}
+
+async fn restore_locked(
+    state: &AppState,
+    slug: &str,
+) -> AppResult<(StatusCode, Json<EntityDetail>)> {
+    if let Some(card) = on_site(state, slug).await? {
+        return Ok((StatusCode::OK, Json(card)));
+    }
+    let archive = open(state)?;
+    let doc = {
+        let (archive, slug) = (archive.clone(), slug.to_string());
+        blocking(move || archive.get(&slug)).await?
+    }
+    .ok_or(AppError::NotFound)?;
+    let Some(tmdb_id) = doc.tmdb_id.filter(|_| enrich::is_movie(&doc)) else {
+        return Err(
+            AppError::Conflict("only TMDB films are restored".into()).with_code("not_restorable")
+        );
+    };
+    let manual: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM archived_tmdb WHERE tmdb_id = $1 AND manual)",
+    )
+    .bind(tmdb_id)
+    .fetch_one(&state.db)
+    .await?;
+    if manual {
+        return Err(
+            AppError::Conflict("the film was moved to the archive by an admin".into())
+                .with_code("kept_in_archive"),
+        );
+    }
+    let disabled = || {
+        AppError::Unavailable("restoring from the archive is disabled".into())
+            .with_code("restore_unavailable")
+    };
+    if state.config.tmdb_api_key.is_none() {
+        return Err(disabled());
+    }
+    let limiter = restore_limiter(state).ok_or_else(disabled)?;
+    if let Err(not_until) = limiter.check() {
+        let wait = not_until.wait_time_from(DefaultClock::default().now());
+        return Err(AppError::TooManyRequests {
+            retry_after_secs: wait.as_secs().max(1),
+        });
     }
 
-    publish::run(&state, Touched::entity(id), &Reporter::silent()).await;
-    tracing::info!(admin_id = %admin.id, entity_id = %id, %slug, "entity promoted from archive");
+    // TMDB не ответил — фильм остаётся в архиве, страница показывает его как есть.
+    let data = enrich::fetch_movie(&state.config, tmdb_id)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, %slug, "archive restore: TMDB request failed");
+            AppError::Unavailable("TMDB is not available, try again later".into())
+                .with_code("tmdb_unavailable")
+        })?;
+    let mut tx = state.db.begin().await?;
+    let id = match enrich::insert_film(&mut tx, &doc, data.as_ref()).await {
+        Ok(id) => id,
+        // Вернул другой инстанс: отдаём его карточку.
+        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+            drop(tx);
+            return match on_site(state, slug).await? {
+                Some(card) => Ok((StatusCode::OK, Json(card))),
+                None => Err(AppError::Conflict("slug is already taken".into())),
+            };
+        }
+        Err(error) => return Err(error.into()),
+    };
+    tx.commit().await?;
+
+    // Документ архива — если писатель свободен (идёт сборка — уберёт она).
+    let writer = {
+        let archive = archive.clone();
+        blocking(move || archive.writer()).await
+    };
+    match writer {
+        Ok(writer) => remove_from_archive(&archive, writer, slug).await,
+        Err(error) => {
+            tracing::info!(%error, %slug, "restored entity stays in the archive until the next build")
+        }
+    }
+
+    // Поиск, известность участников и статика — в фоне: карточка уже готова.
+    let background = state.clone();
+    tokio::spawn(async move {
+        match Touched::collect(&background.db, &[id], &[]).await {
+            Ok(touched) => {
+                publish::run(&background, touched, &Reporter::silent()).await;
+            }
+            Err(error) => tracing::warn!(%error, %id, "restored entity is not published"),
+        }
+    });
+    tracing::info!(entity_id = %id, slug, full = data.is_some(), "entity restored from archive by a visitor");
     Ok((
         StatusCode::CREATED,
         Json(detail_by_id(&state.db, id).await?),

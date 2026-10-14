@@ -143,6 +143,13 @@ TMDB с русским названием (121 371) и 500 самых попул
 `/people` и `/people/{slug}` показывают только таких (админу карточка открыта всегда),
 фильмография — только активные сущности.
 
+### `catalog_import.people` ✅ — связь людей с TMDB и Wikidata
+
+Таблица импорта (`merge.py`, `STATE_SCHEMA`): `person_id` (PK, FK → `people`, CASCADE), `tmdb_id`
+(UNIQUE), `qid` (UNIQUE), `created`, `written`. Миграция `20261023100000_catalog_import_people.sql`
+создаёт её с тем же определением (`IF NOT EXISTS`): возврат фильма из архива находит по ней людей
+из титров TMDB и записывает связь для новых.
+
 ### `person_stats` ✅ — известность людей
 
 Миграция `20261021100000_person_stats.sql`. Для ранжирования поиска людей ([«Поиск людей»](#поиск-людей-)).
@@ -315,6 +322,7 @@ Tantivy, [«Холодный архив»](#холодный-архив-)); зд
 | Поиск | `shared::search` (HTTP API Meilisearch через reqwest, без SDK) | индекс `entities`, `update_index`, перестройка |
 | ISR-вебхук фронтенда | `shared::isr` (`POST {ISR_URL}/_isr/revalidate`) | пересборка статики после правок |
 | Дампы TMDB и IMDb | `reqwest` + `flate2` (распаковка `.gz`): `TMDB_EXPORTS_URL` (`https://files.tmdb.org/p/exports`), `IMDB_DATASETS_URL` (`https://datasets.imdbws.com`), без ключей | «Обновить рейтинги» в админке |
+| TMDB API (возврат из архива) | `reqwest`; `TMDB_API_KEY` (v3 — параметром, v4 JWT — заголовком), `TMDB_API_URL` (по умолчанию `https://api.themoviedb.org/3`, в тестах — подставной сервер), `ARCHIVE_RESTORE_PER_HOUR` (300; `governor`); `unicode-normalization` — slug людей | `archive::enrich`: полные данные фильма при `restore` и `promote` |
 | Холодный архив | `tantivy` 0.26 (`mmap`, `lz4-compression`, без zstd) + `csv`; каталог `ARCHIVE_DIR` (`Config::archive_dir`, dev/prod — том `archivedata` в `/var/lib/nexus/archive`; не задан — эндпоинты архива 503) | `catalog::archive`: индекс, поиск, страница фильма, промоушен, `nexus archive dump\|build` |
 | `InterestDirectory::entities_in_use` (реализует `social`) | `shared::directory`, `state.interests` | какие сущности нужны пользователям (интересы, рецензии, коллекции, отметки, реакции, темы форума) — их сборка архива не удаляет |
 | Блокировки перестройки | Redis (`shared::cache`): `nexus:v1:catalog:reindex-running`, `nexus:v1:catalog:reindex-lock` | «одна перестройка за раз» между инстансами |
@@ -704,10 +712,50 @@ id, popularity) и `commit` → одна транзакция: `archived_tmdb` �
 
 **Повторная сборка** (новые popularity после «Обновить рейтинги»): `dump` + `build` без `--fresh` —
 фильмы архива участвуют в Top-K наравне, поднявшиеся возвращаются в PostgreSQL «скелетом».
-Ограничения: возвращённый сборкой или промоушеном фильм — без описания, титров и жанров (постер —
-из архива, если есть)
-(обогащение из TMDB — `TODO` в `archive::promote`); «Пересобрать активные» работает только по
-горячему слою.
+Ограничения: возвращённый **сборкой** фильм — «скелетом», без описания, титров и жанров (постер —
+из архива, если есть; дозаливка — `tmdb_full.py`). Промоушен и возврат открытием страницы берут
+полные данные TMDB ([«Возврат из архива открытием страницы»](#возврат-из-архива-открытием-страницы-)).
+«Пересобрать активные» работает только по горячему слою.
+
+### Возврат из архива открытием страницы ✅
+
+Решение пользователя (2026-10-15): кто-то открыл фильм в архиве — значит, ему место на сайте.
+Фронтенд показывает архивную страницу (`GET /archive/entities/{slug}`) и сразу шлёт
+`POST /archive/entities/{slug}/restore` (публичный): бэкенд за ~1–2 с берёт всё из TMDB, возвращает
+фильм на сайт и отвечает **полной карточкой** (`EntityDetail`, как `GET /entities/{slug}`) —
+фронтенд подменяет страницу. Код — `archive::restore`, раскладка TMDB — `archive/enrich.rs`.
+
+1. slug неверный — 404; фильм уже на сайте (`active`) — 200 и карточка (второй посетитель,
+   параллельный запрос: запросы одного slug в процессе идут по очереди, `IN_FLIGHT`).
+2. Документа в архиве нет — 404; не фильм или без TMDB id — 409 `not_restorable`;
+   `archived_tmdb.manual` (убран админом) — 409 `kept_in_archive`.
+3. Нет `TMDB_API_KEY` или `ARCHIVE_RESTORE_PER_HOUR = 0` — 503 `restore_unavailable`. Лимит
+   возвратов в час (`ARCHIVE_RESTORE_PER_HOUR`, по умолчанию 300, `governor`, на процесс и каталог
+   архива) — 429 с `Retry-After`: боты не вытащат архив на сайт.
+4. `GET {TMDB_API_URL}/movie/{id}?language=ru-RU&append_to_response=credits,release_dates,keywords,
+   translations,alternative_titles,images,videos,external_ids,watch/providers,recommendations,
+   similar,reviews,lists` (таймаут 8 с). Сеть/5xx/429/401 — 503 `tmdb_unavailable`, фильм остаётся в
+   архиве; 404 (фильма в TMDB нет) — возврат «скелетом» из документа архива.
+5. Одна транзакция (`enrich::insert_film`, правила полей — как `tmdb_full.py`): `entities`
+   (`active`, `active_manual`; название — русское из TMDB, нет перевода — из архива; оригинальное,
+   описание, дата, постер `w780`; `metadata`: `runtime_min`, `countries`, `studios`, `age_rating` RU
+   иначе US, `trailers` — YouTube, официальные и русские первыми, до 5), `entity_tmdb`, удаление
+   из `archived_tmdb`, `entity_stats` (`imdb_id`, `tmdb_popularity`, `tmdb_votes`),
+   `entity_tmdb_data` (сырьё), жанры → теги `genre` (slug как `GENRE_SLUGS`; нет тега — создаётся),
+   титры: режиссёры, сценаристы, продюсеры, композиторы, операторы, монтажёры, весь актёрский
+   состав по `order`; позиции — по ролям. Люди — по TMDB id в `catalog_import.people`, новые
+   создаются (slug — транслит имени, `enrich::slugify` = `slugify` из `import_tmdb.py`; занят —
+   `<slug>-<tmdb_id>`; фото `h632`). Конфликт уникальности (вернул другой инстанс) — 200 и его
+   карточка.
+6. Документ удаляется из архива, если писатель свободен (идёт сборка — останется до неё:
+   `active_manual` → `keep`).
+7. Публикация в фоне (`tokio::spawn`): Meilisearch, `fame` участников, ISR — статическая страница
+   генерируется; ответ не ждёт.
+
+Не делается: сиквелы по коллекциям TMDB (поиск по сырью без индекса), рейтинг IMDb (придёт с
+«Обновить рейтинги»). Админский промоушен — тот же `insert_film`: с ключом — полные данные, TMDB
+недоступен — «скелетом» (warning). Тест — `restore_on_open_brings_the_full_film_back`
+(подставной TMDB: полный фильм, 404 → «скелет», 500 → 503, повтор, лимит, `kept_in_archive`).
 
 **Постеры архива** (2026-10-14). Архив собирался без постеров, а `tmdb_full.py` качает только
 горячий слой. `scripts/catalog-import/archive_covers.py DUMP OUT [--cache F] [--rate 40]
@@ -767,6 +815,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `entities_count`; нет — 404 |
 | GET | `/archive/search` | Поиск по холодному архиву (Tantivy): `q` (1–200 символов, все слова в `title` или `orig_title`; синтаксис Tantivy разбирается снисходительно), `limit` 1–20 (20), `offset` 0–1000 (0) → `Page<ArchiveDoc>` `{items, total, limit, offset}` (`total` — всего найдено, `Count`); `ArchiveDoc`: `slug`, `title`, `original_title`, `kind`, `tmdb_id`, `release_date`, `popularity`, `cover_url` (`null` — нет постера). Публичный. На сайте — второй блок выдачи после `GET /search` (чекбокс «Архив», по умолчанию включён). 400 — пустой/длинный `q`, `limit`/`offset` вне диапазона; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/entities/{slug}` | Фильм из архива для его страницы (только чтение): `ArchiveDoc` (название, оригинальное название, дата, постер). Публичный. 404 — нет в архиве или неверный slug (фильм мог вернуться на сайт — `GET /entities/{slug}`); 503 — архив недоступен |
+| POST | `/archive/entities/{slug}/restore` | Открыли архивную страницу — вернуть фильм на сайт со всеми данными TMDB ([«Возврат из архива открытием страницы»](#возврат-из-архива-открытием-страницы-)) → 201 `EntityDetail`; уже на сайте → 200 `EntityDetail`. Публичный. 404 — нет ни в архиве, ни на сайте; 409 `kept_in_archive` (убран админом) / `not_restorable` (не фильм TMDB); 429 — лимит `ARCHIVE_RESTORE_PER_HOUR` (`Retry-After`); 503 `restore_unavailable` (нет ключа TMDB, лимит 0) / `tmdb_unavailable` (TMDB не ответил; фильм в архиве) / архив недоступен |
 | GET | `/search` | Весь поиск сайта, Meilisearch, по видимым: `q` (название, оригинальное, студии; пустой — все), фильтры `kind`, `tag`, `year` (ровно) или `year_from`/`year_to` (диапазон включительно), `studio` (точное название, без учёта регистра), `person`+`role` — заглушка, 503 `person_filter_unavailable` ([«Поиск»](#поиск)). По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb; `new` (вышедшие, новые сверху), `soon` (будущие, ближайшие сверху), `title` (без значения — в конце); другое значение — 400. 400 — `year` вместе с диапазоном, `year_from > year_to`, год вне 1–9998, пустая/длинная (>200) студия, `role` без `person`, неверный slug тега/человека |
 | GET | `/search/people` | Поиск людей, Meilisearch, индекс `people` ([«Поиск людей»](#поиск-людей-)): `q` (имя по-русски или латиницей, опечатки, начало слова; до 300 символов; пустой — самые известные), `known_for` (основная роль: `actor`, `director`, …), `limit` 1–100 (20), `offset` → `Page<PersonHit>`: `id`, `slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `known_for`. Ранжирование — качество совпадения, затем известность (`person_stats.fame`). 400 — длинный `q`, `known_for` не `a-z`/`_`; 503 — Meilisearch недоступен; индекса нет — пустая страница |
 | GET | `/search/studios` | Подсказки для фильтра `studio` (facet search Meilisearch): `q` — часть названия, опечатки допустимы (пустой — самые частые), `kind`, `limit` 1–50 (10) → `[{"name", "count"}]`. 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` |
@@ -819,7 +868,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | POST | `/admin/tmdb/stats/stream` | «Обновить рейтинги»: дампы TMDB (popularity) и IMDb (рейтинг) → `entity_stats`, пересчёт балла, перестройка поиска; потоком; `done.stats`. `409` — уже идёт долгая операция ([«Сортировка и активные»](#сортировка-и-активные-)) |
 | POST | `/admin/tmdb/active/stream` | «Пересобрать активные»: `?count=` (80000, 0–1000000, иначе 400) вышедших по баллу + все «Скоро премьера»; потоком; `done.active`. `409` — как выше |
 | POST | `/admin/archive/demote` | Перенести фильмы с сайта в архив: `{"slugs": [...]}` 1–100 → 200 `{"archived": [slug], "skipped": [{"slug", "reason": "not_found" \| "no_tmdb" \| "in_use"}]}`; документы в Tantivy, строки удалены из БД (с людьми без работ), `archived_tmdb.manual` — сборка не вернёт; поиск и статика обновляются. 400 — пусто, >100, повтор, неверный slug; 409 — писатель архива занят (ничего не перенесено); 503 — архив недоступен |
-| POST | `/admin/archive/promote/{slug}` | Вернуть фильм из архива: вставка в `entities` (`title`, `original_title`, `release_date`, `cover_url`, `active`, `active_manual`), `entity_tmdb`, `entity_stats.tmdb_popularity`, удаление из `archived_tmdb`; затем `delete_term` + `commit` в Tantivy, публикация (Meilisearch, ISR) → 201, карточка. 404 — нет в архиве (и неверный slug); 409 — slug или TMDB id уже в каталоге, писатель архива занят сборкой (в БД ничего не пишется); 503 — архив недоступен |
+| POST | `/admin/archive/promote/{slug}` | Вернуть фильм из архива (`enrich::insert_film`): с `TMDB_API_KEY` — со всеми данными TMDB (как возврат открытием страницы), TMDB недоступен или ключа нет — «скелетом» (`title`, `original_title`, `release_date`, `cover_url`); `active`, `active_manual`, `entity_tmdb`, `entity_stats`, удаление из `archived_tmdb` (и пометки `manual`); затем `delete_term` + `commit` в Tantivy, публикация (Meilisearch, ISR) → 201, карточка. 404 — нет в архиве (и неверный slug); 409 — slug или TMDB id уже в каталоге, писатель архива занят сборкой (в БД ничего не пишется); 503 — архив недоступен |
 | GET | `/admin/ranking` | Настройки балла и окна «Скоро премьера» |
 | POST | `/admin/ranking/preview` | Топ по формуле с настройками из тела (`?limit=` 1–200, 50), без записи → `[RankPreviewRow]`; неверные настройки — 400 |
 | PUT | `/admin/ranking/stream` | Сохранить настройки и применить потоком: `rank`, перестройка поиска. 400 / 409 |
@@ -1176,9 +1225,10 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), `GET /search` (фильтры — `filters_of`), `GET /search/studios` |
 | `people_search.rs` | Индекс `people` (`PersonDoc`, `settings`, `fill`, `update_index`), известность `refresh_fame` → `person_stats`, `GET /search/people` |
 | `tmdb.rs` | Операции админки: «Обновить рейтинги» (дампы TMDB и IMDb), «Пересобрать активные» |
+| `archive/enrich.rs` | Полные данные TMDB: `fetch_movie`, `film_fields`, `film_credits`, `slugify`, `insert_film` (фильм, статистика, сырьё, жанры, люди, титры) |
 | `archive/index.rs` | Индекс Tantivy архива: схема (с `cover_url`), открытие по каталогу (и старой схемы), `recreate`, поиск с `offset` и `Count`, `get`, `upsert`/`delete`, писатель 50 МБ |
 | `archive/pipeline.rs` | `dump` (TSV из БД и архива, с `cover_url`), `build` (Top-K без `archived_tmdb.manual`, маршрутизация, удаление из PostgreSQL; `--fresh` — `recreate`), `delete_entities` (и для ручного переноса) |
-| `archive/mod.rs` | `GET /archive/search`, `GET /archive/entities/{slug}`, `POST /admin/archive/promote/{slug}`, `POST /admin/archive/demote`, `archive::open` |
+| `archive/mod.rs` | `GET /archive/search`, `GET /archive/entities/{slug}`, `POST /archive/entities/{slug}/restore` (лимит, `IN_FLIGHT`), `POST /admin/archive/promote/{slug}`, `POST /admin/archive/demote`, `archive::open` |
 | `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
 | `publish.rs` | Публикация правки: `Touched`, поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |

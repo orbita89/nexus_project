@@ -87,6 +87,8 @@ services:
       # Индекс холодного архива (catalog::archive): GET /catalog/archive/search, промоушен,
       # nexus archive dump|build.
       ARCHIVE_DIR: /var/lib/nexus/archive
+      # Возврат фильма из архива открытием его страницы: не больше N в час (0 — выключен).
+      ARCHIVE_RESTORE_PER_HOUR: ${ARCHIVE_RESTORE_PER_HOUR:-300}
       # Не короче 32 символов. В проде — свой случайный секрет (openssl rand -base64 48).
       JWT_SECRET: ${JWT_SECRET:-nexus-dev-jwt-secret-change-me-in-production}
       # Письма уходят в Mailpit: веб-интерфейс http://localhost:8025.

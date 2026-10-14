@@ -43,6 +43,8 @@ impl Ctx {
         let mut config = Config::from_env();
         config.dev_login = true;
         config.archive_dir = Some(dir.0.join("index").to_string_lossy().into_owned());
+        // В dev-контейнере ключ TMDB задан: тесты в настоящий TMDB не ходят.
+        config.tmdb_api_key = None;
         let state = test_utils::state_with_config(pool, config).0;
         Self {
             state,
@@ -656,4 +658,213 @@ async fn demote_moves_films_to_archive_and_build_keeps_them_cold(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(manual, [7]);
+}
+
+/// Подставной TMDB: `GET /movie/{id}` — фильм 3 целиком, 9 — 500, остальные — 404. Запоминает
+/// запросы (путь и параметры).
+async fn fake_tmdb() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let app = axum::Router::new().route(
+        "/movie/{id}",
+        axum::routing::get(
+            move |shared::extract::Path(id): shared::extract::Path<i32>,
+                  axum::extract::RawQuery(query): axum::extract::RawQuery| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(format!("{id}?{}", query.unwrap_or_default()));
+                    match id {
+                        3 => (StatusCode::OK, axum::Json(json!({
+                            "id": 3,
+                            "title": "Низкий старт",
+                            "original_title": "Low Start",
+                            "overview": "Полное описание из TMDB.",
+                            "release_date": "2001-02-03",
+                            "poster_path": "/low.jpg",
+                            "runtime": 95,
+                            "imdb_id": "tt0000003",
+                            "popularity": 3.5,
+                            "vote_count": 1200,
+                            "genres": [{"id": 18, "name": "драма"}, {"id": 878, "name": "фантастика"}],
+                            "production_companies": [{"name": "Студия Тест"}],
+                            "credits": {
+                                "crew": [{"id": 100, "name": "Режиссёр Тест", "job": "Director",
+                                          "profile_path": "/d.jpg"}],
+                                "cast": [
+                                    {"id": 102, "name": "Актёр Два", "character": "Друг", "order": 1},
+                                    {"id": 101, "name": "Актёр Один", "character": "Герой", "order": 0},
+                                ],
+                            },
+                        }))),
+                        9 => (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({}))),
+                        _ => (StatusCode::NOT_FOUND, axum::Json(json!({ "status_code": 34 }))),
+                    }
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, requests)
+}
+
+/// Открытие архивной страницы возвращает фильм на сайт со всеми данными TMDB и отдаёт полную
+/// карточку; повтор — та же карточка; TMDB 404 — «скелетом»; TMDB недоступен — фильм остаётся в
+/// архиве; перенесённый админом вручную не возвращается; лимит в час; без ключа — 503.
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn restore_on_open_brings_the_full_film_back(pool: PgPool) {
+    let mut ctx = Ctx::new(pool);
+    ctx.seed().await;
+    ctx.dump_and_build().await;
+    // В архиве: ru-low (TMDB 3), ru-hit-2 (2), en-low (5), old-gem (9).
+    let restore = |slug: &str| format!("/archive/entities/{slug}/restore");
+
+    let off = ctx.send(Method::POST, &restore("ru-low"), None).await;
+    assert_eq!(off.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(off.json()["code"], "restore_unavailable");
+
+    let (url, requests) = fake_tmdb().await;
+    let mut config = (*ctx.state.config).clone();
+    config.tmdb_api_key = Some("test-key".into());
+    config.tmdb_api_url = url;
+    config.archive_restore_per_hour = 3;
+    ctx.state.config = Arc::new(config);
+
+    let response = ctx.send(Method::POST, &restore("ru-low"), None).await;
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "{:?}",
+        response.json()
+    );
+    let card = response.json();
+    assert_eq!(card["slug"], "ru-low");
+    assert_eq!(card["title"], "Низкий старт");
+    assert_eq!(card["original_title"], "Low Start");
+    assert_eq!(card["description"], "Полное описание из TMDB.");
+    assert_eq!(card["cover_url"], "https://image.tmdb.org/t/p/w780/low.jpg");
+    assert_eq!(card["metadata"]["runtime_min"], 95);
+    assert_eq!(card["metadata"]["studios"], json!(["Студия Тест"]));
+    let mut tags: Vec<&str> = card["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["slug"].as_str().unwrap())
+        .collect();
+    tags.sort();
+    assert_eq!(tags, ["drama", "sci-fi"]);
+    // Позиции — по ролям (как у импорта): в карточке режиссёр и первый актёр рядом.
+    let mut credits: Vec<(&str, &str, Option<&str>)> = card["credits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["person"]["slug"].as_str().unwrap(),
+                c["role"].as_str().unwrap(),
+                c["character_name"].as_str(),
+            )
+        })
+        .collect();
+    credits.sort();
+    assert_eq!(
+        credits,
+        [
+            ("akter-dva", "actor", Some("Друг")),
+            ("akter-odin", "actor", Some("Герой")),
+            ("rezhisser-test", "director", None),
+        ]
+    );
+    let positions: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT p.slug, c.position FROM entity_credits c JOIN people p ON p.id = c.person_id
+         JOIN entities e ON e.id = c.entity_id WHERE e.slug = 'ru-low'
+         ORDER BY c.role, c.position",
+    )
+    .fetch_all(&ctx.state.db)
+    .await
+    .unwrap();
+    assert!(
+        positions
+            == [
+                ("akter-odin".to_string(), 0),
+                ("akter-dva".to_string(), 1),
+                ("rezhisser-test".to_string(), 0),
+            ],
+        "{positions:?}"
+    );
+    let query = requests.lock().unwrap()[0].clone();
+    assert!(
+        query.starts_with("3?") && query.contains("language=ru-RU"),
+        "{query}"
+    );
+    assert!(
+        query.contains("api_key=test-key") && query.contains("append_to_response=credits"),
+        "{query}"
+    );
+    let stats: (Option<String>, f64, i32) = sqlx::query_as(
+        "SELECT s.imdb_id, s.tmdb_popularity, s.tmdb_votes FROM entity_stats s
+         JOIN entities e ON e.id = s.entity_id WHERE e.slug = 'ru-low'",
+    )
+    .fetch_one(&ctx.state.db)
+    .await
+    .unwrap();
+    assert_eq!(stats, (Some("tt0000003".into()), 3.5, 1200));
+    let raw: i64 = sqlx::query_scalar("SELECT count(*) FROM entity_tmdb_data WHERE tmdb_id = 3")
+        .fetch_one(&ctx.state.db)
+        .await
+        .unwrap();
+    assert_eq!(raw, 1);
+    assert!(ctx.archive().get("ru-low").unwrap().is_none());
+    assert!(!ctx.archived_tmdb().await.contains(&3));
+    assert_eq!(
+        ctx.send(Method::GET, "/entities/ru-low", None).await.status,
+        StatusCode::OK
+    );
+
+    // Повтор (второй посетитель) — та же карточка, TMDB больше не спрашивается.
+    let again = ctx.send(Method::POST, &restore("ru-low"), None).await;
+    assert_eq!(again.status, StatusCode::OK);
+    assert_eq!(again.json()["description"], "Полное описание из TMDB.");
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    // TMDB недоступен — фильм остаётся в архиве.
+    let down = ctx.send(Method::POST, &restore("old-gem"), None).await;
+    assert_eq!(down.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(down.json()["code"], "tmdb_unavailable");
+    assert!(ctx.archive().get("old-gem").unwrap().is_some());
+    assert!(!ctx.slugs().await.contains(&"old-gem".to_string()));
+
+    // Фильма нет в TMDB — возвращается «скелетом» из архива.
+    let skeleton = ctx.send(Method::POST, &restore("en-low"), None).await;
+    assert_eq!(skeleton.status, StatusCode::CREATED);
+    assert_eq!(skeleton.json()["title"], "Small Film");
+    assert!(skeleton.json()["description"].is_null());
+
+    // Лимит 3 в час исчерпан (ru-low, old-gem, en-low).
+    let limited = ctx.send(Method::POST, &restore("ru-hit-2"), None).await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+
+    for missing in ["nope", "Bad%20Slug"] {
+        let response = ctx.send(Method::POST, &restore(missing), None).await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND, "{missing}");
+    }
+
+    // Убранный админом вручную не возвращается.
+    let admin = ctx.token("admin@example.com", "admin").await;
+    let demoted = ctx
+        .send_json(
+            Method::POST,
+            "/admin/archive/demote",
+            json!({ "slugs": ["en-hit"] }),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(demoted.json()["archived"], json!(["en-hit"]));
+    let kept = ctx.send(Method::POST, &restore("en-hit"), None).await;
+    assert_eq!(kept.status, StatusCode::CONFLICT);
+    assert_eq!(kept.json()["code"], "kept_in_archive");
 }

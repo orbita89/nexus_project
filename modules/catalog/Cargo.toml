@@ -29,6 +29,9 @@ flate2 = { workspace = true }
 # Холодный архив: индекс Tantivy и TSV-дамп (catalog::archive).
 tantivy = { workspace = true }
 csv = { workspace = true }
+# Возврат из архива: лимит авто-возвратов в час и slug людей из имени (NFKD).
+governor = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 shared = { workspace = true, features = ["mock"] }

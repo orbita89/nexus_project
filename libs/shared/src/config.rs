@@ -34,6 +34,14 @@ pub struct Config {
     /// Каталог индекса Tantivy с холодным архивом фильмов (`catalog::archive`), `ARCHIVE_DIR`.
     /// Не задан — архив выключен: его эндпоинты отвечают 503.
     pub archive_dir: Option<String>,
+    /// Ключ API TMDB (v3) или Read Access Token (v4), `TMDB_API_KEY`: полные данные фильма при
+    /// возврате из архива. Не задан — фильм возвращается «скелетом», авто-возврат выключен.
+    pub tmdb_api_key: Option<String>,
+    /// Адрес API TMDB, `TMDB_API_URL` (в тестах — подставной сервер).
+    pub tmdb_api_url: String,
+    /// Сколько фильмов в час можно вернуть из архива открытием страницы (на процесс),
+    /// `ARCHIVE_RESTORE_PER_HOUR`. `0` — авто-возврат выключен.
+    pub archive_restore_per_hour: u64,
     /// Секрет подписи JWT (HS256). Не короче [`MIN_JWT_SECRET_LEN`] байт.
     pub jwt_secret: String,
     /// SMTP для писем, например `smtp://mailpit:1025` или `smtps://user:pass@smtp.example.com`.
@@ -178,6 +186,13 @@ impl Config {
                 .trim_end_matches('/')
                 .to_string(),
             archive_dir: env::var("ARCHIVE_DIR").ok().filter(|dir| !dir.is_empty()),
+            tmdb_api_key: env::var("TMDB_API_KEY")
+                .ok()
+                .filter(|key| !key.trim().is_empty()),
+            tmdb_api_url: var_or("TMDB_API_URL", "https://api.themoviedb.org/3")
+                .trim_end_matches('/')
+                .to_string(),
+            archive_restore_per_hour: number_or("ARCHIVE_RESTORE_PER_HOUR", 300),
             jwt_secret: jwt_secret_from_env(),
             smtp_url: env::var("SMTP_URL").ok().filter(|url| !url.is_empty()),
             mail_from: var_or("MAIL_FROM", "Nexus <no-reply@nexus.local>"),

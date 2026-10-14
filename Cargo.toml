@@ -60,6 +60,7 @@ utoipa-axum = "0.3"
 # vendored: Swagger UI вшивается в бинарник, сборка не ходит за ним в интернет.
 utoipa-swagger-ui = { version = "10", features = ["axum", "vendored"] }
 governor = "0.10"
+unicode-normalization = "0.1"
 lettre = { version = "0.11", default-features = false, features = [
     "smtp-transport",
     "builder",
