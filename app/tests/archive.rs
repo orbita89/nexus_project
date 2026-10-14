@@ -169,6 +169,13 @@ impl Ctx {
         .execute(&self.state.db)
         .await
         .unwrap();
+        sqlx::query(
+            "UPDATE entities SET cover_url = 'https://img.test/' || slug || '.jpg'
+             WHERE slug IN ('en-low', 'ru-low')",
+        )
+        .execute(&self.state.db)
+        .await
+        .unwrap();
         let user = self.login("fan@example.com", "user").await;
         let user_id = uuid::Uuid::parse_str(user["user"]["id"].as_str().unwrap()).unwrap();
         sqlx::query(
@@ -288,15 +295,58 @@ async fn build_splits_hot_layer_and_archive(pool: PgPool) {
         hit["items"][0],
         json!({
             "slug": "old-gem", "title": "Old Gem", "original_title": null, "kind": "movie",
-            "tmdb_id": 9, "release_date": null, "popularity": 0.1
+            "tmdb_id": 9, "release_date": null, "popularity": 0.1, "cover_url": null
         })
     );
+    assert_eq!(
+        (
+            hit["total"].clone(),
+            hit["limit"].clone(),
+            hit["offset"].clone()
+        ),
+        (json!(1), json!(20), json!(0))
+    );
+
+    // Постер из PostgreSQL переехал в архив; страница фильма в архиве.
+    let page = ctx
+        .send(Method::GET, "/archive/entities/en-low", None)
+        .await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert_eq!(page.json()["title"], "Small Film");
+    assert_eq!(page.json()["cover_url"], "https://img.test/en-low.jpg");
+    for missing in ["/archive/entities/ru-hit-1", "/archive/entities/Bad%20Slug"] {
+        let response = ctx.send(Method::GET, missing, None).await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND, "{missing}");
+    }
+
+    // Страницы выдачи: «orig» есть у трёх документов.
+    let first = ctx
+        .send(Method::GET, "/archive/search?q=orig&limit=2", None)
+        .await
+        .json();
+    let rest = ctx
+        .send(Method::GET, "/archive/search?q=orig&limit=2&offset=2", None)
+        .await
+        .json();
+    assert_eq!(
+        (first["total"].clone(), rest["total"].clone()),
+        (json!(3), json!(3))
+    );
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    assert_eq!(rest["items"].as_array().unwrap().len(), 1);
+    assert_ne!(first["items"][0]["slug"], rest["items"][0]["slug"]);
+    assert_ne!(first["items"][1]["slug"], rest["items"][0]["slug"]);
 
     // Повторный дамп: горячие из БД и весь архив; повторная сборка ничего не меняет.
     pipeline::dump(&ctx.state, Some(ctx.archive()), &ctx.dump_path())
         .await
         .unwrap();
     assert_eq!(lines(&ctx.dump_path()), 1 + 4 + 4);
+    let dumped = std::fs::read_to_string(ctx.dump_path()).unwrap();
+    assert!(
+        dumped.contains("\thttps://img.test/en-low.jpg"),
+        "the archive cover survives the next dump"
+    );
     let again = pipeline::build(
         &ctx.state,
         ctx.archive(),
@@ -362,6 +412,8 @@ async fn archive_search_validates_query(pool: PgPool) {
         "/archive/search?q=%20",
         "/archive/search?q=a&limit=0",
         "/archive/search?q=a&limit=21",
+        "/archive/search?q=a&offset=-1",
+        "/archive/search?q=a&offset=1001",
     ] {
         let response = ctx.send(Method::GET, path, None).await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST, "{path}");
@@ -379,16 +431,11 @@ async fn archive_search_validates_query(pool: PgPool) {
     let mut config = (*state.config).clone();
     config.archive_dir = None;
     state.config = Arc::new(config);
-    let app = nexus::build_app(state);
-    let response = request(
-        app,
-        Method::GET,
-        &format!("{CATALOG}/archive/search?q=a"),
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    for path in ["/archive/search?q=a", "/archive/entities/a"] {
+        let app = nexus::build_app(state.clone());
+        let response = request(app, Method::GET, &format!("{CATALOG}{path}"), None, None).await;
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+    }
 }
 
 /// Промоушен: только админ; фильм возвращается в каталог видимым и пропадает из архива;
@@ -436,6 +483,7 @@ async fn promote_moves_film_from_archive_to_catalog(pool: PgPool) {
     assert_eq!(body["title"], "Низкий старт");
     assert_eq!(body["original_title"], "Низкий старт (orig)");
     assert_eq!(body["release_date"], "2001-02-03");
+    assert_eq!(body["cover_url"], "https://img.test/ru-low.jpg");
 
     let card = ctx.send(Method::GET, "/entities/ru-low", None).await;
     assert_eq!(

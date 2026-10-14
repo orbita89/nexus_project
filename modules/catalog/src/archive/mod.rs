@@ -2,7 +2,8 @@
 //!
 //! Горячий слой — `entities` в PostgreSQL (полные карточки, сайт, Meilisearch): все фильмы с
 //! русским названием и 500 самых популярных иностранных. Остальные ~1 млн хранятся только
-//! «скелетом» в архиве: поиск по названию и возврат в каталог ([`promote`]). Раскладку делает
+//! «скелетом» в архиве (название, дата, постер): поиск по названию, страница фильма ([`get`]) и
+//! возврат в каталог ([`promote`]). Раскладку делает
 //! [`pipeline`] (`nexus archive dump|build`).
 
 pub mod index;
@@ -18,16 +19,19 @@ use crate::validate;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use shared::error::ErrorBody;
 use shared::extract::{Path, Query};
+use shared::pagination::Page;
 use shared::{AdminUser, AppError, AppResult, AppState};
 use std::sync::Arc;
-use utoipa::{IntoParams, ToSchema};
+use utoipa::IntoParams;
 use uuid::Uuid;
 
 /// Результатов поиска по умолчанию и максимум.
 pub const SEARCH_LIMIT: usize = 20;
+/// Глубже в выдачу не листаем: Tantivy собирает `offset + limit` лучших.
+pub const MAX_OFFSET: usize = 1_000;
 const MAX_QUERY: usize = 200;
 
 /// Архив из `ARCHIVE_DIR`. Не задан — 503.
@@ -79,29 +83,26 @@ pub struct ArchiveSearchQuery {
     pub q: String,
     /// 1–20, по умолчанию 20.
     pub limit: Option<i64>,
+    /// 0–1000, по умолчанию 0.
+    pub offset: Option<i64>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ArchiveHits {
-    pub items: Vec<ArchiveDoc>,
-}
-
-/// Поиск по холодному архиву: фильмы, которых нет на сайте (вне топ-100 000). Ищет по
-/// названию и оригинальному названию, выше — точнее совпавшие и популярные. Вернуть фильм на
-/// сайт — `POST /admin/archive/promote/{slug}`.
+/// Поиск по холодному архиву: фильмы, которых нет на сайте (вне горячего слоя). Ищет по
+/// названию и оригинальному названию, выше — точнее совпавшие и популярные. Страница фильма —
+/// `GET /archive/entities/{slug}`, вернуть фильм на сайт — `POST /admin/archive/promote/{slug}`.
 #[utoipa::path(
     get, operation_id = "archive_search", path = "/archive/search", tag = "catalog",
     params(ArchiveSearchQuery),
     responses(
-        (status = 200, description = "До `limit` документов архива", body = ArchiveHits),
-        (status = 400, description = "Пустой или длинный `q`, `limit` вне 1–20", body = ErrorBody),
+        (status = 200, description = "Страница документов архива; `total` — всего найдено", body = Page<ArchiveDoc>),
+        (status = 400, description = "Пустой или длинный `q`, `limit` вне 1–20, `offset` вне 0–1000", body = ErrorBody),
         (status = 503, description = "Архив не настроен (`ARCHIVE_DIR`) или недоступен", body = ErrorBody),
     )
 )]
 pub async fn search(
     State(state): State<AppState>,
     Query(query): Query<ArchiveSearchQuery>,
-) -> AppResult<Json<ArchiveHits>> {
+) -> AppResult<Json<Page<ArchiveDoc>>> {
     let q = query.q.trim().to_string();
     if q.is_empty() || q.chars().count() > MAX_QUERY {
         return Err(AppError::BadRequest(format!(
@@ -113,15 +114,52 @@ pub async fn search(
         Some(limit @ 1..=20) => limit as usize,
         Some(_) => return Err(AppError::BadRequest("limit must be 1-20".into())),
     };
+    let offset = match query.offset {
+        None => 0,
+        Some(offset @ 0..=1_000) => offset as usize,
+        Some(_) => {
+            return Err(AppError::BadRequest(format!(
+                "offset must be 0-{MAX_OFFSET}"
+            )))
+        }
+    };
     let archive = open(&state)?;
-    let items = blocking(move || archive.search(&q, limit)).await?;
-    Ok(Json(ArchiveHits { items }))
+    let (items, total) = blocking(move || archive.search(&q, limit, offset)).await?;
+    Ok(Json(Page {
+        items,
+        total: total as i64,
+        limit: limit as i64,
+        offset: offset as i64,
+    }))
+}
+
+/// Фильм из архива для его страницы на сайте: название, оригинальное название, дата выхода,
+/// постер. Только чтение: на сайт фильм возвращает админ (`POST /admin/archive/promote/{slug}`).
+#[utoipa::path(
+    get, operation_id = "archive_get", path = "/archive/entities/{slug}", tag = "catalog",
+    params(("slug" = String, Path, description = "slug фильма в архиве")),
+    responses(
+        (status = 200, description = "Документ архива", body = ArchiveDoc),
+        (status = 404, description = "В архиве нет такого slug (фильм мог вернуться на сайт: `GET /entities/{slug}`)", body = ErrorBody),
+        (status = 503, description = "Архив не настроен (`ARCHIVE_DIR`) или недоступен", body = ErrorBody),
+    )
+)]
+pub async fn get(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> AppResult<Json<ArchiveDoc>> {
+    validate::slug("slug", &slug).map_err(|_| AppError::NotFound)?;
+    let archive = open(&state)?;
+    blocking(move || archive.get(&slug))
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
 }
 
 /// Вернуть фильм из архива на сайт: строка в `entities` (`active`, `active_manual` — сборка
 /// горячего слоя её не уберёт), связь с TMDB и popularity; затем документ удаляется из архива
 /// (`delete_term` + `commit`), поиск сайта и статика обновляются. Карточка — «скелет»: название,
-/// оригинальное название, дата выхода.
+/// оригинальное название, дата выхода, постер.
 #[utoipa::path(
     post, operation_id = "archive_promote", path = "/admin/archive/promote/{slug}",
     tag = "catalog-admin",
@@ -154,19 +192,20 @@ pub async fn promote(
         blocking(move || archive.writer()).await?
     };
 
-    // TODO: Fetch rich data from external API (TMDB: описание, постер, титры, жанры).
+    // TODO: Fetch rich data from external API (TMDB: описание, титры, жанры).
 
     let mut tx = state.db.begin().await?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO entities
-             (kind, slug, title, original_title, release_date, active, active_manual)
-         VALUES ($1, $2, $3, $4, $5, true, true) RETURNING id",
+             (kind, slug, title, original_title, release_date, cover_url, active, active_manual)
+         VALUES ($1, $2, $3, $4, $5, $6, true, true) RETURNING id",
     )
     .bind(doc.kind)
     .bind(&doc.slug)
     .bind(&doc.title)
     .bind(&doc.original_title)
     .bind(doc.release_date)
+    .bind(&doc.cover_url)
     .fetch_one(&mut *tx)
     .await
     .map_err(validate::conflict("slug is already taken"))?;

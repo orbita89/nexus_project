@@ -516,7 +516,11 @@ event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"pre
   Документ: `id` (slug; `STRING | STORED` — точный поиск и `delete_term`), `title` (`TEXT | STORED`),
   `orig_title` (`TEXT | STORED` — в ТЗ только индекс, но без него промоушен потерял бы оригинальное
   название), `type` (`STRING | STORED`), `tmdb_id` (u64), `release_date` (`YYYY-MM-DD`, хранится),
-  `popularity` (f64, `FAST`). Токенизатор `default` (по словам, нижний регистр, без стемминга;
+  `popularity` (f64, `FAST`), `cover_url` (URL постера TMDB `w780`, как `entities.cover_url`; только
+  `STORED`; с 2026-10-14). Схема только растёт: новое поле — последнее, номера прежних не меняются,
+  поэтому индекс старой схемы открывается как есть (`Index::open`; `open_or_create` требует точного
+  совпадения) — постеров в нём нет и при записи они не сохраняются (`Archive::is_current`); новую
+  схему даёт `build --fresh`. Токенизатор `default` (по словам, нижний регистр, без стемминга;
   «ё» ≠ «е»). Ранжирование: BM25 × `1 + ln(1+popularity)/10`.
 - **Писатель** — только на время операции, бюджет ровно `WRITER_BUDGET` = 50 МБ
   (`index.writer(50_000_000)`; Tantivy делит его на ≤3 потока по ≥15 МБ). Один писатель на каталог:
@@ -530,14 +534,16 @@ event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"pre
    `entities` с `entity_tmdb` и без `active_manual` (курсор, запись в отдельном потоке пачками по
    1000) + все документы архива. Колонки: `id`, `title`, `orig_title`, `type`, `popularity_score`
    (`entity_stats.tmdb_popularity`, нет — 0), `has_ru_locale` (`true`/`false`), `tmdb_id`,
-   `release_date`. Читатель берёт колонки по заголовку; неверные строки (slug, тип, число) пропускает.
+   `release_date`, `cover_url` (`entities.cover_url` / постер документа архива). Читатель берёт колонки
+   по заголовку (`tmdb_id`, `release_date`, `cover_url` — необязательные); неверные строки (slug,
+   тип, число) пропускает, неверный `cover_url` (не `http(s)://`) — только обнуляет.
 2. `nexus archive build FILE.tsv [--fresh] [--defer-delete] [--ru N] [--foreign 500]` (`--ru` по
    умолчанию — все):
    - проход 1 — Top-K: две min-кучи `BinaryHeap<Reverse<(popularity, slug)>>` (при равной
      popularity выше меньший slug), в памяти только 100 000 slug'ов;
    - проход 2 — чтение в блокирующем потоке, пачки по 1000 через канал (ёмкость 4). Горячая пачка —
      один `INSERT … ON CONFLICT (slug) DO UPDATE SET active = true WHERE NOT active AND NOT
-     active_manual` (`unnest`); вставленные (вернулись из архива) получают `entity_tmdb` и
+     active_manual` (`unnest`); вставленные (вернулись из архива) — с `cover_url` из дампа — получают `entity_tmdb` и
      `entity_stats.tmdb_popularity`; их `tmdb_id` удаляются из `archived_tmdb`; из архива —
      `delete_term`. Холодная пачка — в архив (`delete_term` + `add_document` по slug), кроме
      `active_manual` и сущностей с данными пользователей (они остаются в PostgreSQL и убираются из
@@ -547,7 +553,10 @@ event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"pre
      `entities_in_use`, `archived_tmdb`, `DELETE FROM entities` — каскадом титры, теги, статистика,
      связки импорта; затем люди без единой работы). Падение посреди сборки оставляет согласованное
      состояние: удалено только то, что уже в архиве; повтор dump + build доводит до конца;
-   - `--fresh` — `delete_all_documents()` перед сборкой (дамп уже содержит архив);
+   - `--fresh` — архив пересоздаётся пустым в **текущей схеме** (`Archive::recreate`: под писателем
+     удаляются файлы индекса, кроме `.tantivy-*.lock`, затем `Index::create`; дамп уже содержит
+     архив). Сервер, открывший индекс раньше, подхватывает новый на коммите и читает постеры сразу
+     (номера полей прежние); между пересозданием и первым коммитом (100 000) поиск по архиву пуст;
    - в конце — перестройка Meilisearch с `force` и ISR `{"all": true}`.
    Отчёт: `rows`, `invalid`, `hot` (`inserted`, `activated`), `archived`, `deleted`,
    `kept_in_use`, `kept_manual`, `people_deleted`, `archive_size`.
@@ -567,9 +576,21 @@ set-based удаление детей, `entities`, людей без работ,
 
 **Повторная сборка** (новые popularity после «Обновить рейтинги»): `dump` + `build` без `--fresh` —
 фильмы архива участвуют в Top-K наравне, поднявшиеся возвращаются в PostgreSQL «скелетом».
-Ограничения: возвращённый сборкой или промоушеном фильм — без описания, постера, титров и жанров
+Ограничения: возвращённый сборкой или промоушеном фильм — без описания, титров и жанров (постер —
+из архива, если есть)
 (обогащение из TMDB — `TODO` в `archive::promote`); «Пересобрать активные» работает только по
 горячему слою.
+
+**Постеры архива** (2026-10-14). Архив собирался без постеров, а `tmdb_full.py` качает только
+горячий слой. `scripts/catalog-import/archive_covers.py DUMP OUT [--cache F] [--rate 40]
+[--limit N]` — для строк дампа с TMDB id без `cover_url` запрос `GET /3/movie/{id}?language=ru-RU`
+(постер русской версии, иначе основной), популярные первыми; ответы — в кэш `OUT.cache` (TSV
+`tmdb_id`, `cover_url`; пусто — нет постера или 404), перезапуск продолжает; затем `OUT` — дамп с
+колонкой `cover_url`. Порядок: `dump` → `archive_covers.py` (~1,07 млн запросов, ~7,5 ч при 40/с)
+→ свежий `dump` → `archive_covers.py` (из кэша, секунды) → `build OUT --fresh` (архив в новой
+схеме) → перезапуск не нужен. Дальше постер живёт в дампе и переходит между слоями сам.
+Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `covers.log`); на первых тысячах
+архивных фильмов постер есть у ~92%.
 
 **Первая раскладка dev (2026-10-13/14).** Бэкап до неё — `pg_dump`
 `/home/dev/backups/nexus_db_before_archive_2026-10-13.dump` (973 МБ). Дамп: 1 192 695 фильмов TMDB
@@ -591,13 +612,14 @@ set-based удаление детей, `entities`, людей без работ,
 Тесты: `app/tests/archive.rs` — `build_splits_hot_layer_and_archive`,
 `archive_search_validates_query`, `promote_moves_film_from_archive_to_catalog`,
 `deferred_delete_and_purge_script`; Top-K и разбор
-дампа — модульные тесты `archive::pipeline`.
+дампа — модульные тесты `archive::pipeline`; индекс старой схемы и `recreate` —
+`archive::index::legacy_index_is_read_and_recreated`.
 
 **Зависимости архива:**
 
 | Что | Где | Назначение |
 |---|---|---|
-| Холодный архив | `tantivy` 0.26 (`mmap`, `lz4-compression`, без zstd) + `csv`; каталог `ARCHIVE_DIR` (`Config::archive_dir`, dev/prod — том `archivedata` в `/var/lib/nexus/archive`; не задан — эндпоинты архива 503) | `catalog::archive`: индекс, поиск, промоушен, `nexus archive dump\|build` |
+| Холодный архив | `tantivy` 0.26 (`mmap`, `lz4-compression`, без zstd) + `csv`; каталог `ARCHIVE_DIR` (`Config::archive_dir`, dev/prod — том `archivedata` в `/var/lib/nexus/archive`; не задан — эндпоинты архива 503) | `catalog::archive`: индекс, поиск, страница фильма, промоушен, `nexus archive dump\|build` |
 | `InterestDirectory::entities_in_use` (реализует `social`) | `shared::directory`, `state.interests` | какие сущности нужны пользователям (интересы, рецензии, коллекции, отметки, реакции, темы форума) — их сборка архива не удаляет |
 
 ## Эндпоинты
@@ -618,7 +640,8 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/people/{slug}` | Человек и его работы в активных сущностях, новые сверху. Из PostgreSQL. Все работы скрыты — 404; админу — 200 со всеми работами |
 | GET | `/tags` | Все теги с `kind` и `entities_count` (активных сущностей), без пагинации (тегов немного); `?kind=genre\|tag` — только жанры или только теги |
 | GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `entities_count`; нет — 404 |
-| GET | `/archive/search` | Поиск по холодному архиву (Tantivy): `q` (1–200 символов, все слова в `title` или `orig_title`; синтаксис Tantivy разбирается снисходительно), `limit` 1–20 (20) → `{"items": [ArchiveDoc]}`: `slug`, `title`, `original_title`, `kind`, `tmdb_id`, `release_date`, `popularity`. 400 — пустой/длинный `q`, `limit` вне диапазона; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
+| GET | `/archive/search` | Поиск по холодному архиву (Tantivy): `q` (1–200 символов, все слова в `title` или `orig_title`; синтаксис Tantivy разбирается снисходительно), `limit` 1–20 (20), `offset` 0–1000 (0) → `Page<ArchiveDoc>` `{items, total, limit, offset}` (`total` — всего найдено, `Count`); `ArchiveDoc`: `slug`, `title`, `original_title`, `kind`, `tmdb_id`, `release_date`, `popularity`, `cover_url` (`null` — нет постера). Публичный. На сайте — второй блок выдачи после `GET /search` (чекбокс «Архив», по умолчанию включён). 400 — пустой/длинный `q`, `limit`/`offset` вне диапазона; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
+| GET | `/archive/entities/{slug}` | Фильм из архива для его страницы (только чтение): `ArchiveDoc` (название, оригинальное название, дата, постер). Публичный. 404 — нет в архиве или неверный slug (фильм мог вернуться на сайт — `GET /entities/{slug}`); 503 — архив недоступен |
 | GET | `/search` | Поиск по видимым через Meilisearch: `q`, фильтры `kind`, `tag`, `year`. По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb (без значения — в конце); другое значение — 400 |
 
 **`related`** в карточке — одна лента для карусели: `[{...EntitySummary, "relation": "prequel"|"sequel"|"remake"}, ...]`, хронологически по `release_date` (без даты — в конце, затем `position`, затем заголовок), пусто — `[]`. Сиквелы, ремейки и приквелы идут **в одной полосе**, тип связи — у каждой карточки. Связи — в самой карточке, а не отдельным запросом: карточка — статика фронтенда, они попадают в HTML.
@@ -668,7 +691,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | POST | `/admin/search/reindex/stream` | То же потоком `text/event-stream` ([«Перестройка поиска»](#перестройка-поиска-)) |
 | POST | `/admin/tmdb/stats/stream` | «Обновить рейтинги»: дампы TMDB (popularity) и IMDb (рейтинг) → `entity_stats`, пересчёт балла, перестройка поиска; потоком; `done.stats`. `409` — уже идёт долгая операция ([«Сортировка и активные»](#сортировка-и-активные-)) |
 | POST | `/admin/tmdb/active/stream` | «Пересобрать активные»: `?count=` (80000, 0–1000000, иначе 400) вышедших по баллу + все «Скоро премьера»; потоком; `done.active`. `409` — как выше |
-| POST | `/admin/archive/promote/{slug}` | Вернуть фильм из архива: вставка в `entities` (`title`, `original_title`, `release_date`, `active`, `active_manual`), `entity_tmdb`, `entity_stats.tmdb_popularity`, удаление из `archived_tmdb`; затем `delete_term` + `commit` в Tantivy, публикация (Meilisearch, ISR) → 201, карточка. 404 — нет в архиве (и неверный slug); 409 — slug или TMDB id уже в каталоге, писатель архива занят сборкой (в БД ничего не пишется); 503 — архив недоступен |
+| POST | `/admin/archive/promote/{slug}` | Вернуть фильм из архива: вставка в `entities` (`title`, `original_title`, `release_date`, `cover_url`, `active`, `active_manual`), `entity_tmdb`, `entity_stats.tmdb_popularity`, удаление из `archived_tmdb`; затем `delete_term` + `commit` в Tantivy, публикация (Meilisearch, ISR) → 201, карточка. 404 — нет в архиве (и неверный slug); 409 — slug или TMDB id уже в каталоге, писатель архива занят сборкой (в БД ничего не пишется); 503 — архив недоступен |
 | GET | `/admin/ranking` | Настройки балла и окна «Скоро премьера» |
 | POST | `/admin/ranking/preview` | Топ по формуле с настройками из тела (`?limit=` 1–200, 50), без записи → `[RankPreviewRow]`; неверные настройки — 400 |
 | PUT | `/admin/ranking/stream` | Сохранить настройки и применить потоком: `rank`, перестройка поиска. 400 / 409 |
@@ -1001,9 +1024,9 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
 | `search.rs` | Индекс `entities`, `update_index`, перестройка с версиями (в т.ч. по расписанию), `GET /search` |
 | `tmdb.rs` | Операции админки: «Обновить рейтинги» (дампы TMDB и IMDb), «Пересобрать активные» |
-| `archive/index.rs` | Индекс Tantivy архива: схема, открытие по каталогу, поиск, `get`, `upsert`/`delete`, писатель 50 МБ |
-| `archive/pipeline.rs` | `dump` (TSV из БД и архива), `build` (Top-K, маршрутизация, удаление из PostgreSQL) |
-| `archive/mod.rs` | `GET /archive/search`, `POST /admin/archive/promote/{slug}`, `archive::open` |
+| `archive/index.rs` | Индекс Tantivy архива: схема (с `cover_url`), открытие по каталогу (и старой схемы), `recreate`, поиск с `offset` и `Count`, `get`, `upsert`/`delete`, писатель 50 МБ |
+| `archive/pipeline.rs` | `dump` (TSV из БД и архива, с `cover_url`), `build` (Top-K, маршрутизация, удаление из PostgreSQL; `--fresh` — `recreate`) |
+| `archive/mod.rs` | `GET /archive/search`, `GET /archive/entities/{slug}`, `POST /admin/archive/promote/{slug}`, `archive::open` |
 | `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
 | `publish.rs` | Публикация правки: `Touched`, поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |

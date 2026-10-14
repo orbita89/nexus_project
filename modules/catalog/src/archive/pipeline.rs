@@ -3,7 +3,8 @@
 //! **dump** — TSV со всеми фильмами, которые делит конвейер: строки `entities`, связанные с TMDB и
 //! не `active_manual`, плюс документы архива. Колонки: `id` (slug), `title`, `orig_title`, `type`,
 //! `popularity_score` (TMDB popularity), `has_ru_locale` (в названии есть кириллица), `tmdb_id`,
-//! `release_date`.
+//! `release_date`, `cover_url` (постер; для архива его один раз дозагружает
+//! `scripts/catalog-import/archive_covers.py`).
 //!
 //! **build** — два прохода по дампу, память не зависит от его размера:
 //! 1. Top-K: две min-кучи (`BinaryHeap<Reverse<..>>`) — `ru` лучших по popularity с русским
@@ -12,6 +13,8 @@
 //!    `active = true` или вставка), остальные — в архив (Tantivy, писатель с бюджетом 50 МБ, коммит
 //!    каждые [`COMMIT_EVERY`] документов). Строки PostgreSQL, ушедшие в архив, удаляются **после**
 //!    коммита архива, пачками, вместе с людьми, у которых не осталось работ.
+//!
+//! `fresh` — архив пересоздаётся пустым в текущей схеме ([`Archive::recreate`]).
 //!
 //! `defer_delete` (первичная раскладка): строки не удаляются, только `archived_tmdb`; удаление —
 //! `scripts/archive-purge.sql`.
@@ -46,7 +49,7 @@ pub const COMMIT_EVERY: u64 = 100_000;
 pub const DEFAULT_RU: usize = usize::MAX;
 pub const DEFAULT_FOREIGN: usize = 500;
 
-const HEADER: [&str; 8] = [
+const HEADER: [&str; 9] = [
     "id",
     "title",
     "orig_title",
@@ -55,6 +58,7 @@ const HEADER: [&str; 8] = [
     "has_ru_locale",
     "tmdb_id",
     "release_date",
+    "cover_url",
 ];
 
 /// Строка дампа.
@@ -68,6 +72,7 @@ struct Row {
     ru: bool,
     tmdb_id: Option<i32>,
     release_date: Option<NaiveDate>,
+    cover_url: Option<String>,
 }
 
 impl Row {
@@ -80,6 +85,7 @@ impl Row {
             tmdb_id: self.tmdb_id,
             release_date: self.release_date,
             popularity: self.popularity,
+            cover_url: self.cover_url.clone(),
         }
     }
 }
@@ -125,6 +131,7 @@ struct DbRow {
     popularity: f64,
     tmdb_id: i32,
     release_date: Option<NaiveDate>,
+    cover_url: Option<String>,
 }
 
 fn write_row(out: &mut csv::Writer<BufWriter<File>>, row: &Row) -> csv::Result<()> {
@@ -137,6 +144,7 @@ fn write_row(out: &mut csv::Writer<BufWriter<File>>, row: &Row) -> csv::Result<(
         if row.ru { "true" } else { "false" }.to_string(),
         row.tmdb_id.map(|id| id.to_string()).unwrap_or_default(),
         row.release_date.map(|d| d.to_string()).unwrap_or_default(),
+        row.cover_url.as_deref().map(clean).unwrap_or_default(),
     ])
 }
 
@@ -178,6 +186,7 @@ pub async fn dump(
                         ru,
                         tmdb_id: doc.tmdb_id,
                         release_date: doc.release_date,
+                        cover_url: doc.cover_url,
                     },
                 )?;
                 Ok(())
@@ -189,7 +198,8 @@ pub async fn dump(
 
     let mut rows = sqlx::query_as::<_, DbRow>(
         "SELECT e.slug, e.title, e.original_title, e.kind,
-                COALESCE(s.tmdb_popularity, 0) AS popularity, t.tmdb_id, e.release_date
+                COALESCE(s.tmdb_popularity, 0) AS popularity, t.tmdb_id, e.release_date,
+                e.cover_url
          FROM entities e
          JOIN entity_tmdb t ON t.entity_id = e.id
          LEFT JOIN entity_stats s ON s.entity_id = e.id
@@ -208,6 +218,7 @@ pub async fn dump(
             popularity: row.popularity,
             tmdb_id: Some(row.tmdb_id),
             release_date: row.release_date,
+            cover_url: row.cover_url,
         });
         if batch.len() == BATCH {
             // Писатель упал — его ошибку вернёт join ниже.
@@ -237,6 +248,7 @@ struct Columns {
     ru: usize,
     tmdb_id: Option<usize>,
     release_date: Option<usize>,
+    cover_url: Option<usize>,
 }
 
 impl Columns {
@@ -252,10 +264,12 @@ impl Columns {
             ru: need("has_ru_locale")?,
             tmdb_id: find("tmdb_id"),
             release_date: find("release_date"),
+            cover_url: find("cover_url"),
         })
     }
 
     /// Строка дампа; неполная или неверная (slug, тип, число) — `None`, она пропускается.
+    /// Неверный `cover_url` строку не портит: фильм остаётся без постера.
     fn parse(&self, record: &csv::StringRecord) -> Option<Row> {
         let field = |i: usize| record.get(i).map(str::trim).unwrap_or_default();
         let optional = |i: Option<usize>| i.map(field).filter(|v| !v.is_empty());
@@ -291,6 +305,9 @@ impl Columns {
                 Some(date) => Some(NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?),
                 None => None,
             },
+            cover_url: validate::url("cover_url", optional(self.cover_url).map(str::to_owned))
+                .ok()
+                .flatten(),
         })
     }
 }
@@ -400,7 +417,7 @@ pub struct BuildOptions {
     pub ru: usize,
     /// Сколько иностранных без русского названия.
     pub foreign: usize,
-    /// Очистить архив перед сборкой (иначе документы заменяются по slug).
+    /// Пересоздать архив пустым в текущей схеме (иначе документы заменяются по slug).
     pub fresh: bool,
     /// Не удалять из PostgreSQL ушедшие в архив строки, только записать их TMDB id в
     /// `archived_tmdb`: первичная раскладка миллиона строк построчно (FK-каскады, триггеры
@@ -551,10 +568,12 @@ pub async fn build(
     );
 
     // Проход 2: читатель в своём потоке, запись — здесь.
+    let archive = if options.fresh {
+        tokio::task::spawn_blocking(move || archive.recreate()).await??
+    } else {
+        archive
+    };
     let mut writer = Some(archive.writer()?);
-    if options.fresh {
-        writer.as_mut().expect("writer").delete_all_documents()?;
-    }
     let (tx, mut rx) = mpsc::channel::<Batch>(4);
     let reader = {
         let (path, elite) = (path.to_path_buf(), Arc::new(elite));
@@ -641,7 +660,7 @@ async fn commit(writer: &mut Option<IndexWriter>, archive: &Arc<Archive>) -> Res
 }
 
 /// Горячая пачка: существующие строки включаются, отсутствующие (вернулись из архива)
-/// вставляются со связью TMDB и popularity. `active_manual` не трогается.
+/// вставляются с постером, связью TMDB и popularity. `active_manual` не трогается.
 async fn upsert_hot(
     state: &AppState,
     rows: &[Row],
@@ -649,9 +668,10 @@ async fn upsert_hot(
 ) -> Result<(), BoxError> {
     let mut tx = state.db.begin().await?;
     let changed: Vec<(Uuid, String, bool)> = sqlx::query_as(
-        "INSERT INTO entities (kind, slug, title, original_title, release_date, active)
-         SELECT u.k::entity_kind, u.s, u.t, u.o, u.d, true
-         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::date[]) AS u(k, s, t, o, d)
+        "INSERT INTO entities (kind, slug, title, original_title, release_date, cover_url, active)
+         SELECT u.k::entity_kind, u.s, u.t, u.o, u.d, u.c, true
+         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::date[], $6::text[])
+             AS u(k, s, t, o, d, c)
          ON CONFLICT (slug) DO UPDATE SET active = true
              WHERE NOT entities.active AND NOT entities.active_manual
          RETURNING id, slug, (xmax = 0) AS inserted",
@@ -665,6 +685,11 @@ async fn upsert_hot(
             .collect::<Vec<_>>(),
     )
     .bind(rows.iter().map(|r| r.release_date).collect::<Vec<_>>())
+    .bind(
+        rows.iter()
+            .map(|r| r.cover_url.as_deref())
+            .collect::<Vec<_>>(),
+    )
     .fetch_all(&mut *tx)
     .await?;
 
@@ -884,6 +909,7 @@ mod tests {
             "popularity_score",
             "has_ru_locale",
             "extra",
+            "cover_url",
         ]);
         let columns = Columns::from_header(&header).unwrap();
         let row = |fields: Vec<&str>| columns.parse(&csv::StringRecord::from(fields));
@@ -896,6 +922,7 @@ mod tests {
             "12.5",
             "1",
             "x",
+            "https://image.tmdb.org/t/p/w780/a.jpg",
         ])
         .unwrap();
         assert_eq!(parsed.slug, "dune-2021");
@@ -903,6 +930,15 @@ mod tests {
         assert!(parsed.ru);
         assert_eq!(parsed.popularity, 12.5);
         assert_eq!(parsed.tmdb_id, None);
+        assert_eq!(
+            parsed.cover_url.as_deref(),
+            Some("https://image.tmdb.org/t/p/w780/a.jpg")
+        );
+        let bad_cover = row(vec!["movie", "ok", "T", "", "1", "0", "", "/a.jpg"]).unwrap();
+        assert_eq!(
+            bad_cover.cover_url, None,
+            "not a URL: the row stays, without a cover"
+        );
 
         assert!(row(vec!["movie", "Bad Slug", "T", "", "1", "0", ""]).is_none());
         assert!(row(vec!["tvSeries", "ok", "T", "", "1", "0", ""]).is_none());
