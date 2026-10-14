@@ -23,6 +23,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --no-create-home nexus
 COPY --from=builder /app/target/release/nexus /usr/local/bin/nexus
+# Том холодного архива (ARCHIVE_DIR) получает владельца каталога из образа.
+RUN mkdir -p /var/lib/nexus/archive && chown -R nexus /var/lib/nexus
 USER nexus
 ENV BIND_ADDR=0.0.0.0:8080
 EXPOSE 8080

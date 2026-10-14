@@ -46,7 +46,7 @@ import asyncpg
 
 API = "https://api.themoviedb.org/3"
 EXPORTS = "https://files.tmdb.org/p/exports"
-POSTER = "https://image.tmdb.org/t/p/w780"  # как у постеров в seeds/catalog.sql
+POSTER = "https://image.tmdb.org/t/p/w780"
 PROFILE = "https://image.tmdb.org/t/p/h632"
 LANGUAGE = "ru-RU"
 MAX_ACTORS = 15

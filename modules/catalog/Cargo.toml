@@ -26,6 +26,9 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 # Дамп TMDB для «обновить popularity» (catalog::tmdb).
 flate2 = { workspace = true }
+# Холодный архив: индекс Tantivy и TSV-дамп (catalog::archive).
+tantivy = { workspace = true }
+csv = { workspace = true }
 
 [dev-dependencies]
 shared = { workspace = true, features = ["mock"] }

@@ -73,6 +73,9 @@ services:
       - cargo-registry:/cargo-cache
       # Сборка вне /app (CARGO_TARGET_DIR=/target в Dockerfile.dev): в проекте не появляется target/ от root.
       - app-target:/target
+      # Холодный архив каталога (Tantivy) и дампы `nexus archive`: вне /app, иначе cargo watch
+      # перезапускал бы приложение на каждую запись индекса.
+      - archivedata:/var/lib/nexus
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@postgres:5432/${POSTGRES_DB:-nexus_db}
       REDIS_URL: redis://redis:6379
@@ -81,6 +84,9 @@ services:
       # Перестройка поиска переключается на индекс любого размера: в разработке каталог часто
       # перезаливается целиком. В проде (docker-compose.prod.yml) — по умолчанию 80%.
       SEARCH_REINDEX_MIN_PERCENT: ${SEARCH_REINDEX_MIN_PERCENT:-0}
+      # Индекс холодного архива (catalog::archive): GET /catalog/archive/search, промоушен,
+      # nexus archive dump|build.
+      ARCHIVE_DIR: /var/lib/nexus/archive
       # Не короче 32 символов. В проде — свой случайный секрет (openssl rand -base64 48).
       JWT_SECRET: ${JWT_SECRET:-nexus-dev-jwt-secret-change-me-in-production}
       # Письма уходят в Mailpit: веб-интерфейс http://localhost:8025.
@@ -175,6 +181,7 @@ volumes:
   pgdata18:
   redisdata:
   meilidata:
+  archivedata:
   cargo-registry:
   app-target:
   tools-cargo:

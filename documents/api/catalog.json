@@ -10,6 +10,93 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/catalog/admin/archive/promote/{slug}": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Вернуть фильм из архива на сайт: строка в `entities` (`active`, `active_manual` — сборка\nгорячего слоя её не уберёт), связь с TMDB и popularity; затем документ удаляется из архива\n(`delete_term` + `commit`), поиск сайта и статика обновляются. Карточка — «скелет»: название,\nоригинальное название, дата выхода.",
+        "operationId": "archive_promote",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug фильма в архиве",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Фильм в каталоге",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "В архиве нет такого slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug или TMDB id уже в каталоге; архив занят сборкой",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Архив не настроен или недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/entities": {
       "get": {
         "tags": [
@@ -1889,6 +1976,69 @@
         ]
       }
     },
+    "/api/v1/catalog/archive/search": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Поиск по холодному архиву: фильмы, которых нет на сайте (вне топ-100 000). Ищет по\nназванию и оригинальному названию, выше — точнее совпавшие и популярные. Вернуть фильм на\nсайт — `POST /admin/archive/promote/{slug}`.",
+        "operationId": "archive_search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Слова из названия (русского или оригинального), 1–200 символов. Должны найтись все.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "night visitor"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–20, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "До `limit` документов архива",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveHits"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пустой или длинный `q`, `limit` вне 1–20",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Архив не настроен (`ARCHIVE_DIR`) или недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/catalog/entities": {
       "get": {
         "tags": [
@@ -2526,6 +2676,73 @@
           }
         ],
         "description": "Сущность в админском списке: как в публичном, плюс флаг активности."
+      },
+      "ArchiveDoc": {
+        "type": "object",
+        "description": "Документ архива — «скелет» фильма: ровно то, что нужно для поиска и возврата в каталог.",
+        "required": [
+          "slug",
+          "title",
+          "kind",
+          "popularity"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/EntityKind"
+          },
+          "original_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "The Night Visitor"
+          },
+          "popularity": {
+            "type": "number",
+            "format": "double",
+            "description": "TMDB popularity на момент переноса в архив.",
+            "example": 1.84
+          },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "example": "1971-02-04"
+          },
+          "slug": {
+            "type": "string",
+            "example": "the-night-visitor-1971"
+          },
+          "title": {
+            "type": "string",
+            "example": "Ночной посетитель"
+          },
+          "tmdb_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Id фильма в TMDB: по нему импорт пропускает фильмы архива.",
+            "example": 42491
+          }
+        }
+      },
+      "ArchiveHits": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArchiveDoc"
+            }
+          }
+        }
       },
       "Award": {
         "type": "object",

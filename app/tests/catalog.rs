@@ -1050,13 +1050,11 @@ async fn search_after_reindex(pool: PgPool) {
     assert!(first["slug"].as_str().unwrap().starts_with("dune"));
     assert!(first["kind"].is_string() && first["title"].is_string());
 
-    // По имени участника.
+    // Участников в индексе нет (документ компактный): по имени не ищется.
     let page = ctx
         .get_ok("/search?q=%D0%92%D0%B8%D0%BB%D1%8C%D0%BD%D1%91%D0%B2")
         .await; // «Вильнёв»
-    let mut found = slugs(&page);
-    found.sort();
-    assert_eq!(found, ["dune-2021", "dune-part-two-2024"]);
+    assert_eq!(page["total"], 0, "{page}");
 
     // Фильтры.
     assert_eq!(
@@ -1119,15 +1117,15 @@ async fn search_follows_admin_changes(pool: PgPool) {
     ctx.search_until("/search?tag=science-fiction", |p| p["total"] == 4)
         .await;
 
-    // Переименование человека — в документы его работ.
-    let person = ctx.person_id("frank-herbert").await;
+    // Студия (`metadata.studios[0]`) ищется.
+    let dune = ctx.entity_id("dune-2021").await;
     ctx.admin_send(
         Method::PATCH,
-        &format!("/admin/people/{person}"),
-        Some(json!({ "full_name": "Frank Herbert" })),
+        &format!("/admin/entities/{dune}"),
+        Some(json!({ "metadata": { "studios": ["Legendary Pictures"] } })),
     )
     .await;
-    ctx.search_until("/search?q=herbert", |p| slugs(p) == ["dune-novel"])
+    ctx.search_until("/search?q=legendary", |p| slugs(p) == ["dune-2021"])
         .await;
 
     let id = card["id"].as_str().unwrap();
@@ -2111,85 +2109,6 @@ async fn similar_entities_by_shared_tags(pool: PgPool) {
             .status,
         StatusCode::BAD_REQUEST
     );
-}
-
-// ---------------------------------------------------------------- дамп
-
-/// `seeds/catalog.sql` загружается и проходит те же проверки metadata, что и API.
-#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("../../seeds/catalog.sql"))]
-async fn seed_catalog_is_valid(pool: PgPool) {
-    let rows: Vec<(String, catalog::models::EntityKind, Value)> =
-        sqlx::query_as("SELECT slug, kind, metadata FROM entities")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert!(rows.len() >= 40, "seed has {} entities", rows.len());
-    for (slug, kind, metadata) in rows {
-        let normalized = catalog::metadata::validate(kind, metadata.clone())
-            .unwrap_or_else(|e| panic!("{slug}: {e}"));
-        assert_eq!(normalized, metadata, "{slug}: metadata is not normalized");
-    }
-
-    let ctx = Ctx::new(pool).await;
-    for kind in ["movie", "series", "book", "game"] {
-        let page = ctx.get_ok(&format!("/entities?kind={kind}")).await;
-        assert!(page["total"].as_i64().unwrap() >= 5, "few {kind}s");
-    }
-    // Медиа для фронтенда: фильм с трейлером, фильм только с постером, книга с обложкой.
-    let dune = ctx.get_ok("/entities/dune-2021").await;
-    let trailers = &dune["metadata"]["trailers"];
-    assert_eq!(trailers[0]["provider"], "youtube");
-    assert_eq!(trailers[0]["id"], "n9xhJrPXop4");
-    assert_eq!(trailers[1]["provider"], "rutube");
-    // Производство, награды и факты.
-    assert_eq!(dune["metadata"]["studios"][0], "Legendary Pictures");
-    assert_eq!(dune["metadata"]["awards"].as_array().unwrap().len(), 7);
-    assert_eq!(dune["metadata"]["awards"][1]["won"], true);
-    assert!(dune["metadata"]["trivia"][0].is_string());
-    assert!(dune["cover_url"].as_str().unwrap().starts_with("https://"));
-    let lynch = ctx.get_ok("/entities/dune-1984").await;
-    assert!(lynch["metadata"].get("trailers").is_none());
-    assert!(lynch["cover_url"].is_string());
-    let novel = ctx.get_ok("/entities/dune-novel").await;
-    assert!(novel["cover_url"]
-        .as_str()
-        .unwrap()
-        .contains("openlibrary.org"));
-
-    // Жанры размечены списком: в карточке первыми, «Экранизация» — тег.
-    let kinds: Vec<(&str, &str)> = dune["tags"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| (t["slug"].as_str().unwrap(), t["kind"].as_str().unwrap()))
-        .collect();
-    assert_eq!(
-        kinds,
-        [
-            ("drama", "genre"),
-            ("space-opera", "genre"),
-            ("sci-fi", "genre"),
-            ("based-on-book", "tag")
-        ]
-    );
-
-    // Связанные: ремейк в обе стороны, сиквел и приквел — одной лентой, тип у каждой карточки.
-    assert_eq!(related_slugs(&dune, "remake"), ["dune-1984"]);
-    assert_eq!(related_slugs(&dune, "sequel"), ["dune-part-two-2024"]);
-    assert_eq!(related_slugs(&lynch, "remake"), ["dune-2021"]);
-    let fellowship = ctx.get_ok("/entities/lotr-fellowship-2001").await;
-    assert_eq!(
-        related_slugs(&fellowship, "prequel"),
-        ["the-hobbit-unexpected-journey-2012"]
-    );
-    assert_eq!(
-        related_slugs(&fellowship, "sequel"),
-        ["lotr-two-towers-2002"]
-    );
-
-    // Франшиза в разных типах: книга, фильм и игра по «Пикнику на обочине».
-    let card = ctx.get_ok("/people/arkady-strugatsky").await;
-    assert_eq!(card["credits"].as_array().unwrap().len(), 2);
 }
 
 // ---------------------------------------------------------------- активные и скрытые

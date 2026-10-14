@@ -1,5 +1,6 @@
 //! Точка входа: конфиг, логирование, БД, миграции, фоновые задачи, HTTP-сервер.
 //! `nexus media fill|check` — разовая команда вместо сервера: постеры и трейлеры каталога.
+//! `nexus archive dump|build` — горячий слой каталога и холодный архив (`catalog::archive`).
 
 use shared::mail::Mailer;
 use shared::{db, telemetry, AppState, Config};
@@ -35,6 +36,13 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!(e))?;
         print!("{report}");
         // Повторное удаление карточек из Redis (см. shared::cache) — до выхода процесса.
+        state.cache.wait_pending().await;
+        return Ok(());
+    }
+
+    if args.first().map(String::as_str) == Some("archive") {
+        let command = archive_command(&args[1..]).map_err(anyhow::Error::msg)?;
+        run_archive(&state, command).await?;
         state.cache.wait_pending().await;
         return Ok(());
     }
@@ -82,4 +90,78 @@ fn media_options(args: &[String]) -> Result<catalog::media::Options, String> {
         }
     }
     Ok(options)
+}
+
+const ARCHIVE_USAGE: &str = "usage: nexus archive dump FILE.tsv\n       \
+     nexus archive build FILE.tsv [--fresh] [--defer-delete] [--ru N] [--foreign N]";
+
+enum ArchiveCommand {
+    Dump(std::path::PathBuf),
+    Build(std::path::PathBuf, catalog::archive::pipeline::BuildOptions),
+}
+
+/// Аргументы `nexus archive ...`.
+fn archive_command(args: &[String]) -> Result<ArchiveCommand, String> {
+    let (command, file) = match args {
+        [command, file, ..] => (command.as_str(), std::path::PathBuf::from(file)),
+        _ => return Err(ARCHIVE_USAGE.into()),
+    };
+    let mut options = catalog::archive::pipeline::BuildOptions::default();
+    let mut rest = args[2..].iter();
+    let number = |value: Option<&String>| -> Result<usize, String> {
+        value
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| ARCHIVE_USAGE.to_string())
+    };
+    match command {
+        "dump" if args.len() == 2 => Ok(ArchiveCommand::Dump(file)),
+        "build" => {
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--fresh" => options.fresh = true,
+                    "--defer-delete" => options.defer_delete = true,
+                    "--ru" => options.ru = number(rest.next())?,
+                    "--foreign" => options.foreign = number(rest.next())?,
+                    _ => return Err(ARCHIVE_USAGE.into()),
+                }
+            }
+            Ok(ArchiveCommand::Build(file, options))
+        }
+        _ => Err(ARCHIVE_USAGE.into()),
+    }
+}
+
+/// `dump` — дамп из БД и архива; `build` — горячий слой и архив из дампа, затем перестройка
+/// поиска сайта (с `force`: горячий слой мог уменьшиться) и всей статики; с `--defer-delete` —
+/// без неё (сначала `scripts/archive-purge.sql`, затем `POST /admin/search/reindex?force=true`).
+async fn run_archive(state: &AppState, command: ArchiveCommand) -> anyhow::Result<()> {
+    use catalog::archive::{self, pipeline};
+    let archive = archive::open(state).map_err(|e| anyhow::anyhow!("{e} (set ARCHIVE_DIR)"))?;
+    match command {
+        ArchiveCommand::Dump(file) => {
+            let report = pipeline::dump(state, Some(archive), &file)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+            print!("{report}");
+        }
+        ArchiveCommand::Build(file, options) => {
+            let report = pipeline::build(state, archive, &file, options)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+            print!("{report}");
+            // Отложенное удаление: до archive-purge.sql холодные строки ещё в БД.
+            if state.search.is_enabled() && !options.defer_delete {
+                let options = catalog::search::ReindexOptions {
+                    force: true,
+                    revalidate: true,
+                };
+                let reporter = catalog::jobs::Reporter::silent();
+                let result = catalog::search::reindex(state, options, &reporter)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("search reindexed: {result:?}");
+            }
+        }
+    }
+    Ok(())
 }

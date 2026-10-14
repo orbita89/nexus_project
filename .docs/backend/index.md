@@ -5,7 +5,7 @@ Modular monolith: Rust, axum 0.8, sqlx 0.8, PostgreSQL 18. Rules: `../CLAUDE.md`
 | Module | Base path | Owns | LOD 2 |
 |---|---|---|---|
 | auth | `/api/v1/auth` | users, login, JWT, roles, profile | auth.md |
-| catalog | `/api/v1/catalog` | entities, people, tags, search | catalog.md |
+| catalog | `/api/v1/catalog` | entities, people, tags, search, cold archive (Tantivy) | catalog.md |
 | social | `/api/v1/social` | reviews, follows, collections, forum, feed | social.md |
 | realtime | `/ws` | WebSocket channels, event delivery | realtime.md |
 

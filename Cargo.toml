@@ -83,6 +83,10 @@ tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # Распаковка ежедневного дампа TMDB (`movie_ids_*.json.gz`) в catalog.
 flate2 = "1"
+# Холодный архив каталога (catalog::archive): индекс через mmap, без zstd (C-зависимость).
+tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression"] }
+# Дамп сущностей для сборки архива (TSV, потоковое чтение).
+csv = "1"
 
 [profile.dev]
 # Меньше отладочной информации -> заметно быстрее линковка и меньше target/ при hot-reload.

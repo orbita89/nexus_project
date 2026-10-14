@@ -79,6 +79,11 @@ impl EntityKind {
         }
     }
 
+    /// `movie` → [`EntityKind::Movie`]; неизвестный тип — `None`.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+
     /// Раздел в адресе страницы на фронтенде: `/films/dune-2021`
     /// (`KINDS` в nexus_web `src/lib/catalog/kinds.ts`).
     pub fn url_segment(self) -> &'static str {

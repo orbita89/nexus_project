@@ -228,8 +228,12 @@
 | `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных) |
 | `EntityRatings` | `catalog::directory::PgEntityRatings` | `set`, `replace_all` — `social` сообщает каталогу сводки оценок для сортировок `popular` и `rating` (`social::ratings`: после записи рецензии и при старте) |
 
-В обратную сторону `social` сам реализует `InterestDirectory` (`social::directory::PgInterestDirectory`,
-`entity_ids(user)`): по нему `realtime` узнаёт интересы, не читая `user_interests`.
+В обратную сторону `social` сам реализует `InterestDirectory` (`social::directory::PgInterestDirectory`):
+`entity_ids(user)` — по нему `realtime` узнаёт интересы, не читая `user_interests`;
+`entities_in_use(ids)` → `HashSet<Uuid>` — какие из сущностей есть в `user_interests`, `reviews`,
+`collection_items`, `entity_marks`, `entity_reactions`, `forum_thread_entities` (один `UNION`-запрос
+на пачку): `catalog` не переносит такие в холодный архив, иначе удаление строки `entities` стёрло бы
+их каскадом.
 
 - `EntityRef` — `id`, `kind`, `slug`, `title`, `cover_url`, `release_date` (по году различаются «Дюна» 1984 и 2021); `UserRef` — `id`, `username`,
   `display_name`, `avatar_url`. Это же их вид в ответах API.
@@ -440,21 +444,12 @@ WebSocket-соединений пользователя (`interest.added` / `int
 Строки обрезаются по краям, пустая необязательная строка становится `null`. Неизвестные поля в
 теле — 400.
 
-## Мини-дамп
+## Мини-дамп — удалён
 
-`seeds/social.sql` (загружает `make seed` после `dev.sql` и `catalog.sql`): рецензии `user`,
-`author`, `admin` и заблокированного `blocked` (с текстом, только оценки, только текст),
-подписки между ними, три коллекции: «Дюна во всех видах» и приватная «Посмотреть позже» у `user`,
-«Зона: Стругацкие и наследники» у `author`. Форум: четыре темы на несколько сущностей («Дюна:
-книга против экранизаций» — книга и три фильма; Зона; Ведьмак — закрытая; «Бегущий по лезвию» —
-без ответов), сообщения с ветками и заглушка удалённого сообщения `blocked`, на которое ответили.
-Интересы: у `user` — «Дюна» (фильм и книга) и «Ведьмак 3», у `author` — «Пикник на обочине» и
-«Бегущий по лезвию 2049». Карточка «Дюны» 2021: голоса за рецензии `user` и `author` (лайки,
-дизлайк `blocked`), два комментария к рецензии `user`, реакции 🔥🔥🤔; рецензия `author` на вторую
-часть — со спойлером и комментарием `user`. Отметки: у `user` «Дюна» 2021 просмотрена,
-«Бегущий по лезвию 2049» и «Интерстеллар» — позже. Сводки оценок для сортировок каталога
-(`entity_ratings`) дамп пересчитывает сам.
-Повторная загрузка безопасна: у коллекций, тем и сообщений фиксированные id. Тест `seed_social_is_valid` загружает все три дампа в чистую БД и читает их через API.
+До 2026-10-14 `seeds/social.sql` (рецензии, подписки, коллекции, форум, интересы, голоса,
+реакции, отметки поверх сидов каталога) грузил `make seed`. Удалён вместе с сидами каталога и тестом
+`seed_social_is_valid`; `make seed` грузит только пользователей `seeds/dev.sql`. Живые проверки
+`http/social.http`, `http/forum.http` в части чтения ждут данных, созданных запросами или вручную.
 
 ## Код
 
@@ -472,7 +467,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `interests.rs` | Интересы |
 | `feed.rs` | Лента: ярусы, курсор |
 | `events.rs` | События для `realtime` |
-| `directory.rs` | `InterestDirectory` для других модулей |
+| `directory.rs` | `InterestDirectory` для других модулей: `entity_ids`, `entities_in_use` |
 | `admin.rs` | Модерация |
 
 Тесты — `app/tests/social.rs`, `app/tests/forum.rs`, `app/tests/interests.rs`, `app/tests/feed.rs` (сущности — `app/tests/fixtures/catalog.sql`,

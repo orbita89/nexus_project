@@ -93,6 +93,10 @@ services:
       TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID:-}
       TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET:-}
       RUST_LOG: ${RUST_LOG:-info}
+      # Холодный архив каталога (Tantivy, mmap): ~1 млн фильмов — сотни МБ на диске.
+      ARCHIVE_DIR: /var/lib/nexus/archive
+    volumes:
+      - archivedata:/var/lib/nexus
     depends_on:
       postgres:
         condition: service_healthy
@@ -118,3 +122,4 @@ volumes:
   pgdata18:
   redisdata:
   meilidata:
+  archivedata:

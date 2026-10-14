@@ -3,7 +3,8 @@
 //! Модуль не ходит SQL'ем в чужие таблицы (см. «Правила границ» в `documents/architecture.md`).
 //! Если `social` нужно название сущности или имя автора, он вызывает трейт отсюда, а реализует
 //! трейт модуль-владелец данных: [`EntityDirectory`] и [`EntityRatings`] — `catalog`,
-//! [`UserDirectory`] — `auth`, [`InterestDirectory`] — `social`.
+//! [`UserDirectory`] — `auth`, [`InterestDirectory`] — `social` (интересы и «сущность нужна
+//! пользователям»).
 //! Реализации собирает `app` и кладёт в [`AppState`](crate::AppState); в тестах их можно
 //! подменить: `state.entities = Arc::new(Fake)`.
 //!
@@ -11,7 +12,7 @@
 
 use crate::AppResult;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -71,6 +72,10 @@ pub trait UserDirectory: Send + Sync {
 pub trait InterestDirectory: Send + Sync {
     /// Сущности, которые пользователь добавил в интересы.
     async fn entity_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>>;
+    /// Какие из `entity_ids` нужны пользователям: в интересах, рецензиях, коллекциях, отметках,
+    /// реакциях или темах форума. `catalog` не переносит такие сущности в холодный архив —
+    /// удаление строки стёрло бы каскадом пользовательские данные.
+    async fn entities_in_use(&self, entity_ids: &[Uuid]) -> AppResult<HashSet<Uuid>>;
 }
 
 /// Сводка оценок сущности: средняя (без округления) и сколько оценок.

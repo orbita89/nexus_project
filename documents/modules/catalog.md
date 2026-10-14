@@ -39,6 +39,13 @@
 `(release_date DESC NULLS LAST, title, id) WHERE active` — список по умолчанию; GIN по `metadata`
 (фильтры по полям типа); триграммный GIN по `title` (поиск по подстроке, `ILIKE '%дюн%'`).
 
+**Горячий слой и архив.** В `entities` — только горячий слой. С 2026-10-14 это **все** фильмы
+TMDB с русским названием (121 371) и 500 самых популярных иностранных — 121 871 строка; сидов,
+сериалов, книг, игр и фильмов без TMDB на dev больше нет (удалены 2026-10-14, `make seed` вернёт
+сиды). Остальные ~1,07 млн фильмов — «скелетом» в холодном архиве (Tantivy,
+[«Холодный архив»](#холодный-архив-)); полные данные TMDB по горячему слою —
+[«Полные данные TMDB»](#полные-данные-tmdb-). Текст ниже про «~1,2 млн» описывает каталог до архива.
+
 **Активные и скрытые.** Каталог из импорта TMDB + Wikidata — ~1,2 млн фильмов, на сайте —
 отобранная часть (~80 тыс.: топ по баллу «Рекомендуемые» и «Скоро премьера», см. «Сортировка и
 активные»; невышедшие фильмы из TMDB скрыты и без флага). Скрытая
@@ -96,8 +103,8 @@
 
 Жанры — те же теги с `kind = genre`: фильтр `?tag=`, поиск и похожие работают одинаково, а фронтенд
 показывает жанры в шапке карточки, остальные теги — над «О фильме». В карточке `tags` — все теги,
-жанры первыми. Какие теги жанры, решает админка (`kind` в `/admin/tags`); сидовые размечены
-списком в `seeds/catalog.sql`.
+жанры первыми. Какие теги жанры, решает админка (`kind` в `/admin/tags`); жанры TMDB импорт
+создаёт сразу с `kind = genre`.
 
 ### `entity_tags` ✅ — теги сущностей
 
@@ -241,6 +248,33 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 перезапуск. Карточку и статику сводки не меняют (оценка на карточке — `GET /social/.../rating`).
 **Индексы:** `count DESC`; (`average DESC NULLS LAST`, `count DESC`).
 
+### `entity_tmdb_data`, `person_tmdb_data` ✅ — полный ответ TMDB
+
+Миграция `20261020100000_tmdb_data.sql`. Сырьё для горячего слоя: всё, что отдаёт API TMDB по
+фильму и человеку ([«Полные данные TMDB»](#полные-данные-tmdb-)). Приложение пока не читает.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `entity_id` / `person_id` | `uuid` | PK, FK → `entities` / `people`, CASCADE | |
+| `tmdb_id` | `integer` | NOT NULL | Id в TMDB |
+| `data` | `jsonb` | NOT NULL, сжатие `lz4` | Ответ `GET /movie/{id}` / `/person/{id}` с `append_to_response` |
+| `fetched_at` | `timestamptz` | NOT NULL, default `now()` | |
+
+Удалить сырьё — `TRUNCATE entity_tmdb_data, person_tmdb_data`: разложенные поля остаются.
+
+### `archived_tmdb` ✅ — фильмы TMDB в холодном архиве
+
+Миграция `20261019100000_archived_tmdb.sql`. Строки `entities` этих фильмов удалены (они в индексе
+Tantivy, [«Холодный архив»](#холодный-архив-)); здесь только id, чтобы импорт их не вернул.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `tmdb_id` | `integer` | PK | Id фильма в TMDB |
+| `archived_at` | `timestamptz` | NOT NULL, default `now()` | |
+
+Пишет `nexus archive build` (строка ушла в архив); удаляют промоушен и сборка (фильм вернулся в
+горячий слой). `merge.py` пропускает фильмы с этими id (в логе — `archived`).
+
 ## Поиск
 
 Активные сущности индексируются в Meilisearch (индекс `entities`; скрытые — нет: правка `active`
@@ -264,12 +298,14 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 
 ### Что лежит в индексе
 
-Документ индекса `entities` — поля для карточки в выдаче (`id`, `slug`, `kind`, `title`,
-`original_title`, `description`, `release_date`, `cover_url`) и служебные поля для поиска и фильтров:
-`year`, `tags` (slug'и тегов), `tag_names` (названия тегов), `people` (имена участников),
-`popularity` и `vote_count` (из `metadata`, `sortableAttributes`; нет — `null`, в конце сортировки) и `card` —
-полная карточка сущности. `card` больше никто не читает (карточка — из БД и статики фронтенда), поле
-пока оставлено; не ищется, поиском не отдаётся.
+Документ индекса `entities` — компактный (2026-10-14, `SearchDoc` в `search.rs`): `id`, `kind`,
+`slug`, `title`, `original_title`, `release_date`, `cover_url`, `year`, `studio` (первая из
+`metadata.studios`), `tags` (slug'и тегов, фильтр), `rank_score`, `popularity`, `quality`
+(сортировки), `imdb_rating`, `imdb_votes`, `release_status` (выдача). Ищется по `title`,
+`original_title`, `studio`; фильтры — `kind`, `tags`, `year`, `slug`. Карточки (`card`), описания,
+имён участников и названий тегов в индексе больше нет: поиск по имени актёра или названию тега не
+работает (по решению пользователя), а перестройка при 2,75 млн титров шла ~45 мин вместо минут.
+Документы пачки строятся из уже прочитанных строк и одного запроса тегов, без карточек.
 
 Индекса людей нет: он хранил только карточки, теперь они из БД. Оставшийся от прежних версий
 индекс `people` ни на что не влияет, его можно удалить: `curl -X DELETE localhost:7700/indexes/people -H "$KEY"`.
@@ -423,6 +459,147 @@ event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"pre
 (тесты задают 80 явно, независимо от окружения), поток (шаги, `progress`, ротация, `{"all": true}` во
 фронтенд), отказ в потоке (`check: failed`, поиск прежний), `409` при идущей перестройке.
 
+## Полные данные TMDB ✅
+
+`scripts/catalog-import/tmdb_full.py` (2026-10-14; `aiohttp`, `asyncpg`; ключ `TMDB_API_KEY` из
+окружения или `infra/.env`) — всё из TMDB для горячего слоя (строки с `entity_tmdb`; архив не
+трогается). TMDB — источник правды горячего слоя: поля перезаписываются.
+
+- **Фильм:** `GET /3/movie/{id}?language=ru-RU&append_to_response=credits,release_dates,keywords,
+  translations,alternative_titles,images,videos,external_ids,watch/providers,recommendations,
+  similar,reviews,lists&include_image_language=ru,en,null&include_video_language=ru,en,null` —
+  ответ целиком в `entity_tmdb_data` (популярный фильм ~400 КБ JSON, обычный ~50–120 КБ; lz4
+  ~2,4×). Раскладка: `title` (русское; латиницей из TMDB кириллицу не заменяем), `original_title`,
+  `description` (overview ru, пусто — прежнее), `release_date`, `cover_url` (`w780`);
+  `metadata`: `runtime_min`, `countries`, `studios`, `age_rating` (RU, иначе US; `NR`/`Unrated`
+  не пишутся), `trailers` (YouTube `Trailer`: официальные, русские, затем английские; до 5);
+  `entity_stats`: `tmdb_popularity`, `tmdb_votes`, `imdb_id`; жанры → теги `genre` (как
+  `import_tmdb.py`, прочие теги не трогаются); `entity_credits` заменяются целиком: режиссёры
+  (`director`), сценаристы (`writer`: Screenplay, Writer, Story, Novel, Author), продюсеры
+  (`producer`), композиторы (`composer`), операторы (`cinematographer`), монтажёры (`editor`), затем
+  **весь** актёрский состав по порядку TMDB (`actor`, `character_name`). Остальные должности — только
+  в сырье. Люди — по TMDB id (`catalog_import.people`), новые: `slug` из имени (транслит), занят —
+  `<slug>-<tmdb_id>`, фото `h632`.
+- **Коллекции → сиквелы:** в конце соседние по дате выхода фильмы одной коллекции TMDB
+  (`belongs_to_collection`) связываются `sequel`, если связи (в любую сторону) ещё нет.
+- **`--people`** — люди из титров горячего слоя: `GET /3/person/{id}?language=ru-RU&
+  append_to_response=external_ids,translations,images` → `person_tmdb_data`; `bio` (русская
+  биография, иначе прежняя), `birth_date`, `photo_url`. Фильмография (`combined_credits`, ~200 КБ)
+  не берётся — дублирует титры.
+- Только в сырье (в API пока нет): ключевые слова, переводы и альтернативные названия, картинки
+  (постеры, фоны, логотипы), все видео, внешние id, где смотреть, рекомендации и похожие TMDB,
+  рецензии TMDB, списки, `tagline`, `budget`, `revenue`, `vote_average`, `homepage`, полная
+  съёмочная группа.
+- Пачка 100 фильмов — одна транзакция; 32–96 параллельных запросов, общий лимит `--rate` (40/с);
+  перезапуск продолжает (скачанные пропускаются, `--refresh` — заново). Затем перестройка поиска.
+
+**Первый прогон (dev, 2026-10-14).** Фильмы: 121 843 из 121 871 (28 — 404, удалены из TMDB),
+~1 ч 15 мин (12–32 фильма/с; без построчных триггеров — вдвое быстрее). Описание — у 98 760,
+постер — 112 875, длительность — 117 256, трейлеры — 51 500, возрастной рейтинг — 30 439. Титров
+2 750 312 (актёры 2 021 347, сценаристы 180 623, продюсеры 151 169, режиссёры 133 026,
+композиторы 89 688, операторы 88 332, монтажёры 86 127), людей 886 993, сиквелов из коллекций
++6 862. Сырьё `entity_tmdb_data` — 3,4 ГБ (lz4), база — 5,3 ГБ. Meilisearch — 119 884 документа
+(перестройка ~45 мин с полной карточкой в документе; после ужатия документа — см. «Что лежит в индексе»). Люди (`--people`,
+887 тыс. запросов, ~6,5 ч при 40/с) — в процессе.
+
+## Холодный архив ✅
+
+Двухуровневое хранение (2026-10-13, `modules/catalog/src/archive/`):
+
+- **Горячий слой** — `entities` в PostgreSQL (полные карточки, сайт, Meilisearch): по умолчанию
+  **все** фильмы с русским названием (`has_ru_locale`: в `title` есть кириллица; `DEFAULT_RU =
+  usize::MAX`) и 500 самых популярных по TMDB popularity без него (`DEFAULT_FOREIGN`). До
+  2026-10-14 было 90 000 + 10 000 (`--ru 90000 --foreign 10000`). Плюс то, что сборка не трогает:
+  `active_manual` (промоушен, ручные), сущности без TMDB, сущности с пользовательскими данными
+  (`InterestDirectory::entities_in_use`).
+- **Холодный архив** — индекс Tantivy в `ARCHIVE_DIR`, через mmap (индекс не в куче процесса).
+  Документ: `id` (slug; `STRING | STORED` — точный поиск и `delete_term`), `title` (`TEXT | STORED`),
+  `orig_title` (`TEXT | STORED` — в ТЗ только индекс, но без него промоушен потерял бы оригинальное
+  название), `type` (`STRING | STORED`), `tmdb_id` (u64), `release_date` (`YYYY-MM-DD`, хранится),
+  `popularity` (f64, `FAST`). Токенизатор `default` (по словам, нижний регистр, без стемминга;
+  «ё» ≠ «е»). Ранжирование: BM25 × `1 + ln(1+popularity)/10`.
+- **Писатель** — только на время операции, бюджет ровно `WRITER_BUDGET` = 50 МБ
+  (`index.writer(50_000_000)`; Tantivy делит его на ≤3 потока по ≥15 МБ). Один писатель на каталог:
+  второй получает `LockBusy` → промоушен во время сборки — 409. Читатель (`OnCommitWithDelay`)
+  подхватывает коммиты другого процесса сам.
+
+**Конвейер** (`archive/pipeline.rs`, CLI вместо сервера; в dev:
+`docker exec nexus-app cargo run -q -p nexus -- archive ...`, прод: `nexus archive ...`):
+
+1. `nexus archive dump FILE.tsv` — TSV (`\t`, без кавычек; `\t`/`\n` в полях → пробел): строки
+   `entities` с `entity_tmdb` и без `active_manual` (курсор, запись в отдельном потоке пачками по
+   1000) + все документы архива. Колонки: `id`, `title`, `orig_title`, `type`, `popularity_score`
+   (`entity_stats.tmdb_popularity`, нет — 0), `has_ru_locale` (`true`/`false`), `tmdb_id`,
+   `release_date`. Читатель берёт колонки по заголовку; неверные строки (slug, тип, число) пропускает.
+2. `nexus archive build FILE.tsv [--fresh] [--defer-delete] [--ru N] [--foreign 500]` (`--ru` по
+   умолчанию — все):
+   - проход 1 — Top-K: две min-кучи `BinaryHeap<Reverse<(popularity, slug)>>` (при равной
+     popularity выше меньший slug), в памяти только 100 000 slug'ов;
+   - проход 2 — чтение в блокирующем потоке, пачки по 1000 через канал (ёмкость 4). Горячая пачка —
+     один `INSERT … ON CONFLICT (slug) DO UPDATE SET active = true WHERE NOT active AND NOT
+     active_manual` (`unnest`); вставленные (вернулись из архива) получают `entity_tmdb` и
+     `entity_stats.tmdb_popularity`; их `tmdb_id` удаляются из `archived_tmdb`; из архива —
+     `delete_term`. Холодная пачка — в архив (`delete_term` + `add_document` по slug), кроме
+     `active_manual` и сущностей с данными пользователей (они остаются в PostgreSQL и убираются из
+     архива);
+   - `commit()` архива каждые 100 000 документов; **после** коммита строки PostgreSQL, ушедшие в
+     архив, удаляются пачками по 1000 (одна транзакция на пачку: повторная проверка
+     `entities_in_use`, `archived_tmdb`, `DELETE FROM entities` — каскадом титры, теги, статистика,
+     связки импорта; затем люди без единой работы). Падение посреди сборки оставляет согласованное
+     состояние: удалено только то, что уже в архиве; повтор dump + build доводит до конца;
+   - `--fresh` — `delete_all_documents()` перед сборкой (дамп уже содержит архив);
+   - в конце — перестройка Meilisearch с `force` и ISR `{"all": true}`.
+   Отчёт: `rows`, `invalid`, `hot` (`inserted`, `activated`), `archived`, `deleted`,
+   `kept_in_use`, `kept_manual`, `people_deleted`, `archive_size`.
+3. Место на диске PostgreSQL возвращает только `VACUUM FULL` (блокирует таблицы — окно
+   обслуживания): `entities`, `entity_credits`, `people`, `person_credit_counts`, `entity_stats`,
+   `entity_tmdb`, `entity_tags`, `catalog_import.movies`, `catalog_import.people`.
+
+**Первичная раскладка (миллион строк)** — построчное удаление упирается в FK-каскады и триггер
+счётчиков на каждый титр со случайным чтением диска (на dev ~32 строки/с, ~9 ч). Поэтому:
+`nexus archive build FILE --fresh --defer-delete` (архив и `archived_tmdb`, строки остаются, поиск не
+перестраивается) → `scripts/archive-purge.sql` (одна транзакция: `session_replication_role =
+replica` — нужен суперпользователь, `LOCK … EXCLUSIVE` на `entities`/`people` — чтение идёт,
+set-based удаление детей, `entities`, людей без работ, пересчёт `person_credit_counts` и
+`tags.entities_count` как в миграции `entity_active`, проверка всех FK на `entities`/`people` —
+висячие → ROLLBACK; повторный запуск ничего не находит) → `VACUUM FULL` → перестройка поиска
+(`POST /admin/search/reindex?force=true` или перезапуск). Тест — `deferred_delete_and_purge_script`.
+
+**Повторная сборка** (новые popularity после «Обновить рейтинги»): `dump` + `build` без `--fresh` —
+фильмы архива участвуют в Top-K наравне, поднявшиеся возвращаются в PostgreSQL «скелетом».
+Ограничения: возвращённый сборкой или промоушеном фильм — без описания, постера, титров и жанров
+(обогащение из TMDB — `TODO` в `archive::promote`); «Пересобрать активные» работает только по
+горячему слою.
+
+**Первая раскладка dev (2026-10-13/14).** Бэкап до неё — `pg_dump`
+`/home/dev/backups/nexus_db_before_archive_2026-10-13.dump` (973 МБ). Дамп: 1 192 695 фильмов TMDB
+(121 357 с русским названием, 1 071 338 без), 117 МБ. Сборка `--fresh --defer-delete` — ~27 мин
+(debug-сборка, память контейнера ≤ 580 МБ вместе с сервером): горячий слой 100 000 (41 595 включены из
+скрытых), архив 1 092 695 документов, 189 МБ. `archive-purge.sql` — 16 мин: удалено 1 070 695 строк
+`entities` и 1 741 522 человека без работ; осталось 103 383 сущности (100 000 + 3 383 сидов,
+ручных и не из TMDB), активных 100 046, с русским названием 90 401; пользовательские данные —
+ни одной исключённой. `VACUUM FULL` — 2 мин: база 7,7 ГБ → 1,0 ГБ. Meilisearch — 98 467 документов
+(видимые: невышедшие TMDB скрыты `VISIBLE`).
+
+**Вторая раскладка dev (2026-10-14).** Удалены 3 369 сущностей без TMDB (сиды, сериалы, книги,
+игры, фильмы только из Wikidata) и 2 405 людей без работ; 14 «ручных» фильмов TMDB («Интерстеллар»,
+«Властелин колец», …) — `active_manual = false`, обычные фильмы. Затем `dump` + `build --ru 1000000
+--foreign 500 --defer-delete`: горячий слой 121 871 (121 371 с русским названием, 31 357 вернулись
+из архива «скелетом»), архив 1 070 838; `archive-purge.sql` удалил 9 500 иностранных и 38 780 людей
+(25 с). Бэкап до неё — `/home/dev/backups/nexus_db_before_seed_purge_2026-10-14.dump`.
+
+Тесты: `app/tests/archive.rs` — `build_splits_hot_layer_and_archive`,
+`archive_search_validates_query`, `promote_moves_film_from_archive_to_catalog`,
+`deferred_delete_and_purge_script`; Top-K и разбор
+дампа — модульные тесты `archive::pipeline`.
+
+**Зависимости архива:**
+
+| Что | Где | Назначение |
+|---|---|---|
+| Холодный архив | `tantivy` 0.26 (`mmap`, `lz4-compression`, без zstd) + `csv`; каталог `ARCHIVE_DIR` (`Config::archive_dir`, dev/prod — том `archivedata` в `/var/lib/nexus/archive`; не задан — эндпоинты архива 503) | `catalog::archive`: индекс, поиск, промоушен, `nexus archive dump\|build` |
+| `InterestDirectory::entities_in_use` (реализует `social`) | `shared::directory`, `state.interests` | какие сущности нужны пользователям (интересы, рецензии, коллекции, отметки, реакции, темы форума) — их сборка архива не удаляет |
+
 ## Эндпоинты
 
 Все пути — от `/api/v1/catalog`. В Swagger (http://localhost/docs) каталог — отдельная вкладка:
@@ -441,6 +618,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/people/{slug}` | Человек и его работы в активных сущностях, новые сверху. Из PostgreSQL. Все работы скрыты — 404; админу — 200 со всеми работами |
 | GET | `/tags` | Все теги с `kind` и `entities_count` (активных сущностей), без пагинации (тегов немного); `?kind=genre\|tag` — только жанры или только теги |
 | GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `entities_count`; нет — 404 |
+| GET | `/archive/search` | Поиск по холодному архиву (Tantivy): `q` (1–200 символов, все слова в `title` или `orig_title`; синтаксис Tantivy разбирается снисходительно), `limit` 1–20 (20) → `{"items": [ArchiveDoc]}`: `slug`, `title`, `original_title`, `kind`, `tmdb_id`, `release_date`, `popularity`. 400 — пустой/длинный `q`, `limit` вне диапазона; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/search` | Поиск по видимым через Meilisearch: `q`, фильтры `kind`, `tag`, `year`. По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb (без значения — в конце); другое значение — 400 |
 
 **`related`** в карточке — одна лента для карусели: `[{...EntitySummary, "relation": "prequel"|"sequel"|"remake"}, ...]`, хронологически по `release_date` (без даты — в конце, затем `position`, затем заголовок), пусто — `[]`. Сиквелы, ремейки и приквелы идут **в одной полосе**, тип связи — у каждой карточки. Связи — в самой карточке, а не отдельным запросом: карточка — статика фронтенда, они попадают в HTML.
@@ -490,6 +668,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | POST | `/admin/search/reindex/stream` | То же потоком `text/event-stream` ([«Перестройка поиска»](#перестройка-поиска-)) |
 | POST | `/admin/tmdb/stats/stream` | «Обновить рейтинги»: дампы TMDB (popularity) и IMDb (рейтинг) → `entity_stats`, пересчёт балла, перестройка поиска; потоком; `done.stats`. `409` — уже идёт долгая операция ([«Сортировка и активные»](#сортировка-и-активные-)) |
 | POST | `/admin/tmdb/active/stream` | «Пересобрать активные»: `?count=` (80000, 0–1000000, иначе 400) вышедших по баллу + все «Скоро премьера»; потоком; `done.active`. `409` — как выше |
+| POST | `/admin/archive/promote/{slug}` | Вернуть фильм из архива: вставка в `entities` (`title`, `original_title`, `release_date`, `active`, `active_manual`), `entity_tmdb`, `entity_stats.tmdb_popularity`, удаление из `archived_tmdb`; затем `delete_term` + `commit` в Tantivy, публикация (Meilisearch, ISR) → 201, карточка. 404 — нет в архиве (и неверный slug); 409 — slug или TMDB id уже в каталоге, писатель архива занят сборкой (в БД ничего не пишется); 503 — архив недоступен |
 | GET | `/admin/ranking` | Настройки балла и окна «Скоро премьера» |
 | POST | `/admin/ranking/preview` | Топ по формуле с настройками из тела (`?limit=` 1–200, 50), без записи → `[RankPreviewRow]`; неверные настройки — 400 |
 | PUT | `/admin/ranking/stream` | Сохранить настройки и применить потоком: `rank`, перестройка поиска. 400 / 409 |
@@ -542,33 +721,13 @@ dev.twitch.tv/console (IGDB принадлежит Twitch). Без ключа и
   отчёта «Проверить глазами». Тесты фильтра — на настоящих выдачах Rutube, включая его прошлые
   ошибки (трейлер игры вместо фильма, мод, ремастер, фильм целиком).
 
-## Мини-дамп
+## Мини-дамп — удалён
 
-`seeds/catalog.sql` (загружает `make seed`): 46 сущностей всех четырёх типов, 38 людей, 18 тегов,
-связи: `dune-1984` ↔ `dune-2021` (ремейк), сиквелы «Дюны», «Властелина колец» (с «Хоббитом» 2012
-приквелом), «Бегущего по лезвию», S.T.A.L.K.E.R. и «Метро».
-Теги-жанры (`sci-fi`, `drama`, `space-opera`, `horror`, …) размечены `kind = genre`, `based-on-book`,
-`open-world`, `classic`, `philosophy` — теги. Подобраны франшизы, где одно произведение есть в нескольких типах: «Дюна» (книги и три фильма),
-«Ведьмак» (книга, сериал, игра), Средиземье, Кинг, «Пикник на обочине» → «Сталкер» (фильм и игры),
-«Метро 2033», «Одни из нас» и др. Повторная загрузка безопасна (`ON CONFLICT DO NOTHING`).
-
-**Производство, награды, факты** (`studios`, `awards`, `trivia`) — у `dune-2021`; награда — у
-«Ведьмака 3».
-
-**Медиа** — у «Дюны», «Ведьмака» и Средиземья: постеры (TMDB), обложки книг (Open Library), игра
-(Steam) и трейлеры: сначала YouTube с канала правообладателя, затем Rutube — для стран, где YouTube
-заблокирован. Официальных каналов на Rutube нет, там загрузки сторонних каналов: для прода их
-нужно заменить официальными (российский дистрибьютор) — достаточно поменять id. Фронтенд
-проверяет, какой источник доступен зрителю, и показывает первый доступный; нет ни одного —
-только постер. Это ссылки на CDN, файлы не хранятся (своего
-хранилища пока нет). Пишутся отдельным `UPDATE` по slug, поэтому повторный `make seed` дополняет и
-уже загруженную базу. У фильмов без трейлера (`dune-1984`, `lotr-two-towers-2002`) — только постер;
-у остальных сущностей нет и постера — фронтенд рисует заглушку. В проде TMDB требует указать
-источник (атрибуцию) на сайте.
-
-Тест `seed_catalog_is_valid` загружает дамп в чистую БД и проверяет, что вся `metadata` проходит
-валидацию API и уже нормализована. Связи в дампе пишутся через подзапросы по slug, поэтому
-опечатка в slug роняет загрузку, а не теряет строку молча.
+До 2026-10-14 `seeds/catalog.sql` (46 сущностей всех типов, люди, теги) грузил `make seed`. По
+решению пользователя сиды каталога удалены вместе с файлом и тестом `seed_catalog_is_valid`:
+каталог — только фильмы TMDB ([«Полные данные TMDB»](#полные-данные-tmdb-)), `make seed` грузит
+лишь тестовых пользователей (`seeds/dev.sql`). Тестам данные дают фикстуры
+`app/tests/fixtures/catalog.sql`.
 
 ## Каталог фильмов из TMDB + Wikidata (основной путь)
 
@@ -842,11 +1001,15 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
 | `search.rs` | Индекс `entities`, `update_index`, перестройка с версиями (в т.ч. по расписанию), `GET /search` |
 | `tmdb.rs` | Операции админки: «Обновить рейтинги» (дампы TMDB и IMDb), «Пересобрать активные» |
+| `archive/index.rs` | Индекс Tantivy архива: схема, открытие по каталогу, поиск, `get`, `upsert`/`delete`, писатель 50 МБ |
+| `archive/pipeline.rs` | `dump` (TSV из БД и архива), `build` (Top-K, маршрутизация, удаление из PostgreSQL) |
+| `archive/mod.rs` | `GET /archive/search`, `POST /admin/archive/promote/{slug}`, `archive::open` |
 | `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
 | `publish.rs` | Публикация правки: `Touched`, поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |
 | `admin/` | Админские эндпоинты (`relations.rs` — связанные произведения) |
 
-Тесты — `app/tests/catalog.rs` (данные — `app/tests/fixtures/catalog.sql`). Тесты поиска ходят в
+Тесты — `app/tests/catalog.rs` (данные — `app/tests/fixtures/catalog.sql`), архив —
+`app/tests/archive.rs` (свой каталог индекса на тест). CLI `nexus archive` — `app/src/main.rs`. Тесты поиска ходят в
 настоящий Meilisearch из `make up` (в CI — сервис в `ci.yml`), у каждого теста свой префикс
 индексов. Остальные тесты идут с выключенным поиском. Живые проверки — `http/catalog.http`.

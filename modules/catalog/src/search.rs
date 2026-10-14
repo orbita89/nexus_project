@@ -1,8 +1,8 @@
 //! Поиск по каталогу через Meilisearch.
 //!
 //! Источник правды — PostgreSQL, индекс `entities` производный и нужен только для поиска:
-//! карточки (`GET /entities/{slug}`, `GET /people/{slug}`) читаются из БД. В документе пока
-//! остаётся и полная карточка `card`, её никто не читает.
+//! карточки (`GET /entities/{slug}`, `GET /people/{slug}`) читаются из БД. Документ компактный
+//! ([`SearchDoc`]): без карточки, описания и участников.
 //!
 //! После каждой записи в админке затронутые сущности переотправляются в индекс
 //! ([`update_index`] из [`crate::publish::run`]) с ожиданием применения. Ошибка Meilisearch
@@ -23,12 +23,11 @@
 //! Перестройка одна за раз: в процессе — набор занятых индексов, между инстансами — блокировка
 //! в Redis. Правки во время перестройки пишутся и в теневой индекс (в пределах инстанса).
 
-use crate::entities::{check_year, details};
+use crate::entities::check_year;
 use crate::jobs::{self, DoneEvent, JobEvent, Reporter, Step, StepStatus};
 use crate::models::{
-    page_bounds, Entity, EntityDetail, EntityKind, EntitySummary, Page, ReindexQuery,
-    ReindexResult, ReleaseStatus, SearchQuery, SearchSort, ENTITY_COLUMNS, ENTITY_STATS_JOIN,
-    VISIBLE,
+    page_bounds, Entity, EntityKind, EntitySummary, Page, ReindexQuery, ReindexResult,
+    ReleaseStatus, SearchQuery, SearchSort, ENTITY_COLUMNS, ENTITY_STATS_JOIN, VISIBLE,
 };
 use crate::publish::Touched;
 use crate::validate;
@@ -67,7 +66,11 @@ const RUNNING_LOCK_RENEW: Duration = Duration::from_secs(30);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Документ индекса: поля для отображения в выдаче, для поиска и карточка.
+/// Документ индекса — компактный (решение 2026-10-14): то, по чему ищут (`title`,
+/// `original_title`, `studio`), что показывает выдача (`EntitySummary`: `slug`, постер, дата,
+/// статус выхода, рейтинг IMDb), фильтры (`kind`, `tags`, `year`, `slug`) и сортировки. Карточки,
+/// описания, имён участников и названий тегов в индексе нет: карточка читается из БД, а полный
+/// состав (миллионы титров) делал перестройку в разы дольше.
 #[derive(Debug, Serialize)]
 struct SearchDoc {
     id: Uuid,
@@ -75,17 +78,14 @@ struct SearchDoc {
     slug: String,
     title: String,
     original_title: Option<String>,
-    description: Option<String>,
     release_date: Option<NaiveDate>,
     cover_url: Option<String>,
     /// Для фильтра `year = 2021`.
     year: Option<i32>,
+    /// Первая студия из `metadata.studios`: поиск («dreamworks»).
+    studio: Option<String>,
     /// Slug'и тегов: фильтр.
     tags: Vec<String>,
-    /// Названия тегов: поиск (в порядке slug'ов).
-    tag_names: Vec<String>,
-    /// Имена участников: поиск («вильнёв» находит его фильмы).
-    people: Vec<String>,
     /// Статистика (`entity_stats`): сортировки `recommended` (`rank_score`), `trending`
     /// (`popularity`), `top_rated` (`quality`); рейтинг IMDb и статус выхода — для выдачи.
     rank_score: Option<f64>,
@@ -94,47 +94,32 @@ struct SearchDoc {
     imdb_rating: Option<f64>,
     imdb_votes: Option<i32>,
     release_status: ReleaseStatus,
-    /// Карточка целиком. Никем не читается (карточка — из БД и статики), пока остаётся в
-    /// документе. Не ищется и не отдаётся поиском.
-    card: EntityDetail,
 }
 
-impl From<EntityDetail> for SearchDoc {
-    fn from(card: EntityDetail) -> Self {
-        let entity = &card.entity;
-        let mut tags: Vec<(String, String)> = card
-            .tags
-            .iter()
-            .map(|tag| (tag.slug.clone(), tag.name.clone()))
-            .collect();
-        tags.sort_unstable();
-        let mut people: Vec<String> = card
-            .credits
-            .iter()
-            .map(|credit| credit.person.full_name.clone())
-            .collect();
-        people.sort_unstable();
-        people.dedup();
+impl SearchDoc {
+    fn new(entity: Entity, tags: Vec<String>) -> Self {
+        let studio = entity.metadata["studios"]
+            .as_array()
+            .and_then(|studios| studios.first())
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         Self {
             id: entity.id,
             kind: entity.kind,
-            slug: entity.slug.clone(),
-            title: entity.title.clone(),
-            original_title: entity.original_title.clone(),
-            description: entity.description.clone(),
-            release_date: entity.release_date,
-            cover_url: entity.cover_url.clone(),
             year: entity.release_date.map(|date| date.year()),
+            slug: entity.slug,
+            title: entity.title,
+            original_title: entity.original_title,
+            release_date: entity.release_date,
+            cover_url: entity.cover_url,
+            studio,
+            tags,
             rank_score: entity.rank_score,
             popularity: entity.tmdb_popularity,
             quality: entity.quality,
             imdb_rating: entity.imdb_rating,
             imdb_votes: entity.imdb_votes,
             release_status: entity.release_status,
-            tag_names: tags.iter().map(|(_, name)| name.clone()).collect(),
-            tags: tags.into_iter().map(|(slug, _)| slug).collect(),
-            people,
-            card,
         }
     }
 }
@@ -142,18 +127,33 @@ impl From<EntityDetail> for SearchDoc {
 fn entity_settings() -> Value {
     json!({
         // Порядок задаёт вес: совпадение в названии важнее, чем в описании.
-        "searchableAttributes": ["title", "original_title", "people", "tag_names", "description"],
+        "searchableAttributes": ["title", "original_title", "studio"],
         "filterableAttributes": ["kind", "tags", "year", "slug"],
         "sortableAttributes": ["rank_score", "popularity", "quality"],
     })
 }
 
-/// Документы пачки сущностей: два запроса на карточки, без запроса на каждую.
+/// Документы пачки сущностей: строки уже прочитаны, теги — одним запросом на пачку.
 async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchDoc>, BoxError> {
-    let cards = details(db, entities, false)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(cards.into_iter().map(SearchDoc::from).collect())
+    let ids: Vec<Uuid> = entities.iter().map(|e| e.id).collect();
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT et.entity_id, t.slug FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+         WHERE et.entity_id = ANY($1) ORDER BY t.slug",
+    )
+    .bind(&ids)
+    .fetch_all(db)
+    .await?;
+    let mut tags: HashMap<Uuid, Vec<String>> = HashMap::new();
+    for (id, slug) in rows {
+        tags.entry(id).or_default().push(slug);
+    }
+    Ok(entities
+        .into_iter()
+        .map(|entity| {
+            let tags = tags.remove(&entity.id).unwrap_or_default();
+            SearchDoc::new(entity, tags)
+        })
+        .collect())
 }
 
 /// Переотправляет затронутое в индекс (и в теневой, если идёт перестройка) и ждёт применения;

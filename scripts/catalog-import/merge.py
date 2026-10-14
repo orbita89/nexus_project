@@ -20,6 +20,9 @@ TMDB), фото — TMDB, затем Commons, дата рождения и bio �
 и жанров). Поле обновляется, только если оно пустое или в нём всё ещё записанное скриптом.
 Готовые строки (сиды, админка) — только заполнение пустых полей, титры и жанры не трогаются.
 
+Фильмы холодного архива (`archived_tmdb`, `nexus archive build`) пропускаются: их строки удалены
+из PostgreSQL намеренно, вернуть фильм — промоушен из архива в админке.
+
 Запуск: DATABASE_URL=postgres://... python3 merge.py [--tmdb-limit N]; затем
 scripts/reindex-search.sh. Перезапуск безопасен: повторное слияние ничего не меняет.
 """
@@ -372,6 +375,7 @@ class Stats:
     adopted: int = 0
     unchanged: int = 0
     conflicts: int = 0
+    archived: int = 0
     people_created: int = 0
     people_updated: int = 0
     credits_replaced: int = 0
@@ -820,6 +824,12 @@ async def replace_credits_and_tags(conn, pairs, person_ids: dict, tags: dict, st
 async def merge_batch(conn, films: list[MFilm], tags: dict, by_title: dict, done: set,
                       done_people: set, stats: Stats):
     async with conn.transaction():
+        archived = {r["tmdb_id"] for r in await conn.fetch(
+            "SELECT tmdb_id FROM archived_tmdb WHERE tmdb_id = ANY($1::int[])",
+            [f.tmdb_id for f in films if f.tmdb_id])}
+        if archived:  # в холодном архиве: в PostgreSQL не возвращаются
+            stats.archived += sum(1 for f in films if f.tmdb_id in archived)
+            films = [f for f in films if f.tmdb_id not in archived]
         pairs = []
         for f, l in await resolve_films(conn, films, by_title, stats):
             if l["entity_id"] in done:  # уже слита в этом прогоне (TMDB и запись Wikidata)
@@ -935,11 +945,11 @@ async def run(args):
             if stats.films % (args.batch_size * 20) < len(batch):
                 log.info("merge: %d films (%.0f/s; python %.0fs, db %.0fs) | created %d, "
                          "updated %d, unchanged %d, "
-                         "adopted %d, conflicts %d | people +%d ~%d | credits %d, tags %d",
+                         "adopted %d, conflicts %d, archived %d | people +%d ~%d | credits %d, tags %d",
                          stats.films, stats.films / (time.monotonic() - started),
                          timing["build"], timing["db"], stats.created,
                          stats.updated, stats.unchanged, stats.adopted, stats.conflicts,
-                         stats.people_created, stats.people_updated, stats.credits_replaced,
+                         stats.archived, stats.people_created, stats.people_updated, stats.credits_replaced,
                          stats.tags_replaced)
 
         # 1. Все фильмы TMDB (с данными Wikidata, если есть пара), 2. фильмы только из Wikidata.
@@ -974,8 +984,9 @@ async def run(args):
     finally:
         await conn.close()
     log.info("done: %d films (no title: %d) | created %d, updated %d, unchanged %d, adopted %d, "
-             "conflicts %d | people +%d ~%d | credits %d, tags %d", stats.films, skipped,
+             "conflicts %d, archived %d | people +%d ~%d | credits %d, tags %d", stats.films, skipped,
              stats.created, stats.updated, stats.unchanged, stats.adopted, stats.conflicts,
+             stats.archived,
              stats.people_created, stats.people_updated, stats.credits_replaced, stats.tags_replaced)
     log.info(NEXT)
 

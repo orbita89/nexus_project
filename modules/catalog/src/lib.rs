@@ -1,9 +1,10 @@
 //! catalog — контентное ядро: фильмы, сериалы, книги, игры (таблица `entities`), люди, теги
-//! и поиск через Meilisearch. Монтируется под `/api/v1/catalog`.
+//! и поиск через Meilisearch; холодный архив фильмов — Tantivy (`archive`). Монтируется под `/api/v1/catalog`.
 //!
 //! Чтение — без авторизации, запись — `/admin/...`, только роль admin.
 
 pub mod admin;
+pub mod archive;
 pub mod directory;
 pub mod entities;
 pub mod jobs;
@@ -32,6 +33,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(tags::list))
         .routes(routes!(tags::get))
         .routes(routes!(search::search))
+        .routes(routes!(archive::search))
         .routes(routes!(admin::entities::list, admin::entities::create))
         .routes(routes!(admin::entities::update, admin::entities::delete))
         .routes(routes!(admin::entities::update_stream))
@@ -51,4 +53,5 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(ranking::get))
         .routes(routes!(ranking::preview))
         .routes(routes!(ranking::save_stream))
+        .routes(routes!(archive::promote))
 }
