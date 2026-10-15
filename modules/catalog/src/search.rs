@@ -152,7 +152,45 @@ fn entity_settings() -> Value {
         "sortableAttributes": ["rank_score", "popularity", "quality", "release_ts", "title"],
         // Подсказки студий без запроса — самые частые.
         "faceting": { "sortFacetValuesBy": { "studios": "count" } },
+        "pagination": { "maxTotalHits": MAX_TOTAL_HITS },
     })
+}
+
+/// Потолок счёта и листания Meilisearch (по умолчанию 1000) — с запасом на рост горячего слоя.
+pub(crate) const MAX_TOTAL_HITS: u32 = 500_000;
+
+/// Поиск с точным числом совпадений. Точный `totalHits` Meilisearch отдаёт только в режиме
+/// `page` + `hitsPerPage` (`estimatedTotalHits` при `offset`/`limit` — оценка). `offset`, кратный
+/// `limit`, — одна страница; иначе выдача по `offset`/`limit` и параллельно счёт с
+/// `hitsPerPage: 0`. Возвращает ответ Meilisearch (`hits`) и точное число.
+pub(crate) async fn search_exact(
+    search: &Search,
+    path: &str,
+    mut body: Value,
+    limit: i64,
+    offset: i64,
+) -> Result<(Value, i64), SearchError> {
+    if offset % limit == 0 {
+        body["page"] = json!(offset / limit + 1);
+        body["hitsPerPage"] = json!(limit);
+        let response = search.call(Method::POST, path, Some(&body)).await?;
+        let total = response["totalHits"].as_i64().unwrap_or(0);
+        return Ok((response, total));
+    }
+    let mut count = body.clone();
+    count["page"] = json!(1);
+    count["hitsPerPage"] = json!(0);
+    count["attributesToRetrieve"] = json!([]);
+    if let Some(map) = count.as_object_mut() {
+        map.remove("sort");
+    }
+    body["offset"] = json!(offset);
+    body["limit"] = json!(limit);
+    let (response, count) = tokio::try_join!(
+        search.call(Method::POST, path, Some(&body)),
+        search.call(Method::POST, path, Some(&count)),
+    )?;
+    Ok((response, count["totalHits"].as_i64().unwrap_or(0)))
 }
 
 /// Документы пачки сущностей: строки уже прочитаны, теги — одним запросом на пачку.
@@ -878,7 +916,7 @@ pub(crate) fn unavailable() -> AppError {
     get, path = "/search", tag = "catalog",
     params(SearchQuery),
     responses(
-        (status = 200, description = "Страница результатов. `total` — оценка", body = Page<EntitySummary>),
+        (status = 200, description = "Страница результатов. `total` — всего найдено (точно)", body = Page<EntitySummary>),
         (status = 400, description = "Неверный фильтр", body = ErrorBody),
         (status = 503, description = "Meilisearch недоступен; `person_filter_unavailable` — фильтр по людям ещё не готов", body = ErrorBody),
     )
@@ -907,8 +945,6 @@ pub async fn search(
     let mut body = json!({
         "q": query.q.as_deref().unwrap_or_default().trim(),
         "filter": if filters.is_empty() { Value::Null } else { filters.join(" AND ").into() },
-        "limit": limit,
-        "offset": offset,
         "attributesToRetrieve":
             ["id", "kind", "slug", "title", "original_title", "release_date", "cover_url",
              "release_status", "imdb_rating", "imdb_votes"],
@@ -918,10 +954,10 @@ pub async fn search(
     }
 
     let path = format!("/indexes/{}/search", state.search.index(INDEX));
-    let response = match state.search.call(Method::POST, &path, Some(&body)).await {
-        Ok(response) => response,
+    let (response, total) = match search_exact(&state.search, &path, body, limit, offset).await {
+        Ok(found) => found,
         // Индекс ещё не построен — искать не в чем.
-        Err(error) if error.code() == Some("index_not_found") => json!({ "hits": [] }),
+        Err(error) if error.code() == Some("index_not_found") => (json!({ "hits": [] }), 0),
         Err(SearchError::Disabled) => return Err(unavailable()),
         Err(error) => {
             tracing::warn!(%error, "search request failed");
@@ -930,7 +966,6 @@ pub async fn search(
     };
     let items: Vec<EntitySummary> = serde_json::from_value(response["hits"].clone())
         .map_err(|e| AppError::Internal(format!("unexpected search hits: {e}")))?;
-    let total = response["estimatedTotalHits"].as_i64().unwrap_or(0);
 
     Ok(Json(Page {
         items,

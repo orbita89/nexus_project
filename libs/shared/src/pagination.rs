@@ -7,7 +7,7 @@ use utoipa::ToSchema;
 #[derive(Debug, Serialize, ToSchema)]
 pub struct Page<T> {
     pub items: Vec<T>,
-    /// Всего записей под фильтром (в поиске — оценка Meilisearch).
+    /// Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).
     #[schema(example = 137)]
     pub total: i64,
     #[schema(example = 20)]

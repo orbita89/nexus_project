@@ -15,7 +15,9 @@
 use crate::jobs::{Reporter, Step};
 use crate::models::{page_bounds, Page, PeopleSearchQuery, PersonHit};
 use crate::people::PUBLIC_PERSON;
-use crate::search::{shadow_of, unavailable, upsert_and_delete, BoxError};
+use crate::search::{
+    search_exact, shadow_of, unavailable, upsert_and_delete, BoxError, MAX_TOTAL_HITS,
+};
 use crate::validate;
 use axum::extract::State;
 use axum::http::Method;
@@ -129,6 +131,7 @@ pub(crate) fn settings() -> Value {
         // Известность — после всех правил качества совпадения: «Брэд» → сначала Брэд Питт,
         // но точное совпадение имени важнее славы. Без запроса — по известности.
         "rankingRules": ["words", "typo", "proximity", "attribute", "sort", "exactness", "fame:desc"],
+        "pagination": { "maxTotalHits": MAX_TOTAL_HITS },
     })
 }
 
@@ -226,7 +229,7 @@ pub(crate) async fn update_index(state: &AppState, people: &[Uuid]) -> Result<()
     get, operation_id = "search_people", path = "/search/people", tag = "catalog",
     params(PeopleSearchQuery),
     responses(
-        (status = 200, description = "Страница людей. `total` — оценка", body = Page<PersonHit>),
+        (status = 200, description = "Страница людей. `total` — всего найдено (точно)", body = Page<PersonHit>),
         (status = 400, description = "Длинный `q` или неверный `known_for`", body = ErrorBody),
         (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
     )
@@ -254,15 +257,13 @@ pub async fn search(
     let body = json!({
         "q": q,
         "filter": filter,
-        "limit": limit,
-        "offset": offset,
         "attributesToRetrieve":
             ["id", "slug", "full_name", "original_name", "birth_date", "photo_url", "known_for"],
     });
     let path = format!("/indexes/{}/search", state.search.index(INDEX));
-    let response = match state.search.call(Method::POST, &path, Some(&body)).await {
-        Ok(response) => response,
-        Err(error) if error.code() == Some("index_not_found") => json!({ "hits": [] }),
+    let (response, total) = match search_exact(&state.search, &path, body, limit, offset).await {
+        Ok(found) => found,
+        Err(error) if error.code() == Some("index_not_found") => (json!({ "hits": [] }), 0),
         Err(SearchError::Disabled) => return Err(unavailable()),
         Err(error) => {
             tracing::warn!(%error, "people search request failed");
@@ -271,7 +272,6 @@ pub async fn search(
     };
     let items: Vec<PersonHit> = serde_json::from_value(response["hits"].clone())
         .map_err(|e| AppError::Internal(format!("unexpected people hits: {e}")))?;
-    let total = response["estimatedTotalHits"].as_i64().unwrap_or(0);
     Ok(Json(Page {
         items,
         total,

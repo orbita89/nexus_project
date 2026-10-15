@@ -1086,6 +1086,17 @@ async fn search_after_reindex(pool: PgPool) {
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
     assert_eq!(page["limit"], 1);
     assert_eq!(page["offset"], 1);
+    // total точный (page/hitsPerPage) и при offset, не кратном limit (отдельный счёт).
+    assert_eq!(page["total"], 3, "{page}");
+    let page = ctx.get_ok("/search?q=dune&limit=2&offset=1").await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 2, "{page}");
+    assert_eq!(page["total"], 3, "{page}");
+    let page = ctx.get_ok("/search?q=dune&limit=2&offset=2").await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 1, "{page}");
+    assert_eq!(page["total"], 3, "{page}");
+    let page = ctx.get_ok("/search?q=dune&offset=5000").await;
+    assert_eq!(page["items"], json!([]));
+    assert_eq!(page["total"], 3, "{page}");
 
     // slug тега подставляется в фильтр Meilisearch, поэтому проверяется.
     let response = ctx.get("/search?tag=x%22%20OR%20kind%20%3D%20book").await;

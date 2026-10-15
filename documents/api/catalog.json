@@ -2751,7 +2751,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Страница результатов. `total` — оценка",
+            "description": "Страница результатов. `total` — всего найдено (точно)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2833,7 +2833,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Страница людей. `total` — оценка",
+            "description": "Страница людей. `total` — всего найдено (точно)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4259,7 +4259,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
             "example": 137
           }
         }
@@ -4351,7 +4351,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
             "example": 137
           }
         }
@@ -4450,7 +4450,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
             "example": 137
           }
         }
@@ -4532,7 +4532,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
             "example": 137
           }
         }
@@ -4599,7 +4599,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — оценка Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
             "example": 137
           }
         }
