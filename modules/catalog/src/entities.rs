@@ -99,21 +99,56 @@ pub(crate) async fn list_page(
     } else {
         ""
     };
+    // Студия: фильмы с её названием в `metadata.studios` (GIN по `metadata`). Неизвестная — пусто.
+    let studio = match &query.studio {
+        Some(slug) => {
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT name FROM studios WHERE slug = $1")
+                    .bind(slug)
+                    .fetch_optional(db)
+                    .await?;
+            match name {
+                Some(name) => Some(crate::studios::metadata_filter(&name)),
+                None => {
+                    return Ok(Page {
+                        items: Vec::new(),
+                        total: 0,
+                        limit,
+                        offset,
+                    })
+                }
+            }
+        }
+        None => None,
+    };
+    // Параметр студии — последний: в count — $6, в списке — $8 (после LIMIT/OFFSET).
+    let by_studio = |n: u8| match studio {
+        Some(_) => format!(" AND e.metadata @> ${n}"),
+        None => String::new(),
+    };
     // VISIBLE начинается с `e.active`: планировщик берёт частичный индекс `WHERE active`.
-    let filter = if active == Some(true) {
-        format!("{LIST_FILTER} AND {VISIBLE}{released}{by_sort}")
-    } else {
-        format!("{LIST_FILTER}{by_sort}")
+    let filter = |n: u8| {
+        if active == Some(true) {
+            format!(
+                "{LIST_FILTER}{} AND {VISIBLE}{released}{by_sort}",
+                by_studio(n)
+            )
+        } else {
+            format!("{LIST_FILTER}{}{by_sort}", by_studio(n))
+        }
     };
 
-    let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) {filter}"))
+    let count_sql = format!("SELECT count(*) {}", filter(6));
+    let mut count = sqlx::query_scalar(&count_sql)
         .bind(query.kind)
         .bind(&query.tag)
         .bind(query.year)
         .bind(&pattern)
-        .bind(active)
-        .fetch_one(db)
-        .await?;
+        .bind(active);
+    if let Some(studio) = &studio {
+        count = count.bind(studio);
+    }
+    let total: i64 = count.fetch_one(db).await?;
     let order = match sort {
         EntitySort::Recommended => {
             // Без балла (нет IMDb или мало голосов) — по известности на TMDB, а не по дате.
@@ -135,20 +170,24 @@ pub(crate) async fn list_page(
         }
         EntitySort::Title => "e.title, e.release_date DESC NULLS LAST, e.id",
     };
-    let items = sqlx::query_as(&format!(
-        "SELECT {ENTITY_SUMMARY_COLUMNS}, e.active, e.active_manual, {VISIBLE} AS visible {filter}
+    let sql = format!(
+        "SELECT {ENTITY_SUMMARY_COLUMNS}, e.active, e.active_manual, {VISIBLE} AS visible {}
          ORDER BY {order}
-         LIMIT $6 OFFSET $7"
-    ))
-    .bind(query.kind)
-    .bind(&query.tag)
-    .bind(query.year)
-    .bind(&pattern)
-    .bind(active)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(db)
-    .await?;
+         LIMIT $6 OFFSET $7",
+        filter(8)
+    );
+    let mut items = sqlx::query_as(&sql)
+        .bind(query.kind)
+        .bind(&query.tag)
+        .bind(query.year)
+        .bind(&pattern)
+        .bind(active)
+        .bind(limit)
+        .bind(offset);
+    if let Some(studio) = &studio {
+        items = items.bind(studio);
+    }
+    let items = items.fetch_all(db).await?;
 
     Ok(Page {
         items,
@@ -330,9 +369,18 @@ pub(crate) async fn details(
         credits_by.entry(entity_id).or_default().push(row.into());
     }
     let mut related_by = related(db, &ids, with_inactive).await?;
+    let names: Vec<String> = entities
+        .iter()
+        .flat_map(|e| crate::studios::names_of(&e.metadata))
+        .collect();
+    let studios = crate::studios::refs(db, &names).await?;
     Ok(entities
         .into_iter()
         .map(|entity| EntityDetail {
+            studios: crate::studios::names_of(&entity.metadata)
+                .iter()
+                .filter_map(|name| studios.get(name).cloned())
+                .collect(),
             tags: tags_by.remove(&entity.id).unwrap_or_default(),
             credits: credits_by.remove(&entity.id).unwrap_or_default(),
             related: related_by.remove(&entity.id).unwrap_or_default(),

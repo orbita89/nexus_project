@@ -228,6 +228,15 @@
             }
           },
           {
+            "name": "studio",
+            "in": "query",
+            "description": "Slug студии.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "q",
             "in": "query",
             "description": "Подстрока в названии или оригинальном названии, без учёта регистра.",
@@ -2320,6 +2329,16 @@
             "example": 2021
           },
           {
+            "name": "studio",
+            "in": "query",
+            "description": "Slug студии (`GET /studios/{slug}`): её фильмы. Неизвестный slug — пустой список.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "mosfilm"
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "1–100, по умолчанию 20.",
@@ -2910,6 +2929,49 @@
           },
           "503": {
             "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/studios/{slug}": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Страница студии: название, логотип, страна, штаб-квартира, сайт, описание, материнская\nкомпания и число фильмов. Список фильмов — `GET /entities?studio=<slug>` (сортировки и\nпагинация как у каталога). Описание, штаб-квартира и сайт подтягиваются из TMDB при первом\nоткрытии и сохраняются; TMDB не ответил — страница без них (попробуется в следующий раз).",
+        "operationId": "get_studio",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug студии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "warner-bros-pictures"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Студия",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StudioDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой студии",
             "content": {
               "application/json": {
                 "schema": {
@@ -3694,6 +3756,7 @@
           {
             "type": "object",
             "required": [
+              "studios",
               "tags",
               "credits",
               "related"
@@ -3710,6 +3773,13 @@
                 "items": {
                   "$ref": "#/components/schemas/RelatedWork"
                 }
+              },
+              "studios": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/StudioRef"
+                },
+                "description": "Студии из `metadata.studios` в том же порядке, со ссылкой на страницу (`/studios/{slug}`).\nНазвания, для которых студии ещё нет (появится при синхронизации), пропускаются."
               },
               "tags": {
                 "type": "array",
@@ -5286,6 +5356,77 @@
           "failed"
         ]
       },
+      "StudioDetail": {
+        "type": "object",
+        "description": "Страница студии. Фильмы — `GET /entities?studio=<slug>`.",
+        "required": [
+          "slug",
+          "name",
+          "entities_count"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Описание из TMDB (обычно по-английски, у многих студий его нет)."
+          },
+          "entities_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Видимых вышедших сущностей студии (как в `GET /entities?studio=`).",
+            "example": 1343
+          },
+          "headquarters": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Burbank, California, United States"
+          },
+          "homepage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "https://www.warnerbros.com"
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "example": "Warner Bros. Pictures"
+          },
+          "origin_country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Страна (ISO 3166-1 alpha-2).",
+            "example": "US"
+          },
+          "parent": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StudioRef",
+                "description": "Материнская компания, если она тоже есть в каталоге."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "warner-bros-pictures"
+          }
+        }
+      },
       "StudioHit": {
         "type": "object",
         "description": "Студия в подсказках: название (значение для `studio`) и сколько сущностей в индексе.",
@@ -5301,6 +5442,30 @@
           "name": {
             "type": "string",
             "example": "Warner Bros. Pictures"
+          }
+        }
+      },
+      "StudioRef": {
+        "type": "object",
+        "description": "Студия в карточке фильма: ссылка на её страницу.",
+        "required": [
+          "slug",
+          "name"
+        ],
+        "properties": {
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "example": "Warner Bros. Pictures"
+          },
+          "slug": {
+            "type": "string",
+            "example": "warner-bros-pictures"
           }
         }
       },

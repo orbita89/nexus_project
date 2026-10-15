@@ -45,6 +45,7 @@ pub async fn list(
         kind: query.kind,
         tag: query.tag,
         year: query.year,
+        studio: query.studio,
         q: None,
         limit: query.limit,
         offset: query.offset,

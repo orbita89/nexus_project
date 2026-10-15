@@ -216,6 +216,9 @@ pub async fn promote(
         ))?;
     tx.commit().await?;
     remove_from_archive(&archive, writer, &slug).await;
+    if let Err(error) = crate::studios::sync(&state.db, Some(&[id])).await {
+        tracing::warn!(%error, "studios sync after promote failed");
+    }
 
     publish::run(
         &state,
@@ -412,6 +415,10 @@ async fn restore_locked(
         Err(error) => return Err(error.into()),
     };
     tx.commit().await?;
+    // Студии фильма — до карточки: в ней ссылки на их страницы.
+    if let Err(error) = crate::studios::sync(&state.db, Some(&[id])).await {
+        tracing::warn!(%error, "studios sync after restore failed");
+    }
 
     // Документ архива — если писатель свободен (идёт сборка — уберёт она).
     let writer = {

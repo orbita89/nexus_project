@@ -118,15 +118,29 @@ fn client() -> &'static reqwest::Client {
 
 /// Полный ответ TMDB по фильму; `None` — фильма в TMDB нет (404).
 pub async fn fetch_movie(config: &Config, tmdb_id: i32) -> Result<Option<Value>, TmdbError> {
-    let key = config.tmdb_api_key.as_deref().ok_or(TmdbError::Disabled)?;
-    let request = client()
-        .get(format!("{}/movie/{tmdb_id}", config.tmdb_api_url))
-        .query(&[
+    tmdb_get(
+        config,
+        &format!("/movie/{tmdb_id}"),
+        &[
             ("language", "ru-RU"),
             ("append_to_response", MOVIE_APPEND),
             ("include_image_language", IMAGE_LANGUAGES),
             ("include_video_language", IMAGE_LANGUAGES),
-        ]);
+        ],
+    )
+    .await
+}
+
+/// `GET {TMDB_API_URL}{path}` с ключом: JSON ответа, `None` — 404.
+pub(crate) async fn tmdb_get(
+    config: &Config,
+    path: &str,
+    params: &[(&str, &str)],
+) -> Result<Option<Value>, TmdbError> {
+    let key = config.tmdb_api_key.as_deref().ok_or(TmdbError::Disabled)?;
+    let request = client()
+        .get(format!("{}{path}", config.tmdb_api_url))
+        .query(params);
     // Read Access Token (v4) — JWT, заголовком; API key (v3) — параметром.
     let request = if key.starts_with("eyJ") {
         request.bearer_auth(key)

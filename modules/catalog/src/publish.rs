@@ -104,10 +104,22 @@ impl Touched {
             .bind(&self.people)
             .fetch_all(db)
             .await?;
+        // Страницы студий сущностей: в их списке фильмов меняется карточка.
+        let studios: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT st.slug FROM entities e,
+                    jsonb_array_elements_text(CASE jsonb_typeof(e.metadata -> 'studios')
+                        WHEN 'array' THEN e.metadata -> 'studios' ELSE '[]' END) s
+             JOIN studios st ON st.name = s
+             WHERE e.id = ANY($1)",
+        )
+        .bind(&self.entities)
+        .fetch_all(db)
+        .await?;
         Ok(entities
             .iter()
             .map(|(kind, slug)| entity_path(*kind, slug))
             .chain(people.iter().map(|slug| person_path(slug)))
+            .chain(studios.iter().map(|slug| studio_path(slug)))
             .collect())
     }
 }
@@ -120,6 +132,11 @@ pub fn entity_path(kind: EntityKind, slug: &str) -> String {
 /// Страница человека на фронтенде.
 pub fn person_path(slug: &str) -> String {
     format!("/people/{slug}")
+}
+
+/// Страница студии на фронтенде.
+pub fn studio_path(slug: &str) -> String {
+    format!("/studios/{slug}")
 }
 
 fn merge(a: &[Uuid], b: Vec<Uuid>) -> Vec<Uuid> {
@@ -145,6 +162,12 @@ pub async fn run(state: &AppState, touched: Touched, report: &Reporter) -> bool 
         return true;
     }
     let mut ok = true;
+    // Новые названия студий в `metadata` — страницы студий (до ссылок в карточках и ISR).
+    if !touched.entities.is_empty() {
+        if let Err(error) = crate::studios::sync(&state.db, Some(&touched.entities)).await {
+            tracing::warn!(%error, "studios sync after write failed");
+        }
+    }
 
     let started = report.start(Step::Search);
     if !state.search.is_enabled() {

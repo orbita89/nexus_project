@@ -16,6 +16,7 @@ pub mod people_search;
 pub mod publish;
 pub mod ranking;
 pub mod search;
+pub mod studios;
 pub mod tags;
 pub mod tmdb;
 mod validate;
@@ -31,6 +32,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(entities::similar))
         .routes(routes!(people::list))
         .routes(routes!(people::get))
+        .routes(routes!(studios::get))
         .routes(routes!(tags::list))
         .routes(routes!(tags::get))
         .routes(routes!(search::search))

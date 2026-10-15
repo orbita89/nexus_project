@@ -143,6 +143,26 @@ TMDB с русским названием (121 371) и 500 самых попул
 `/people` и `/people/{slug}` показывают только таких (админу карточка открыта всегда),
 фильмография — только активные сущности.
 
+### `studios` ✅ — студии
+
+Миграция `20261024100000_studios.sql`. Страница студии ([«Студии»](#студии-)). Фильмы студии —
+по названию в `entities.metadata.studios` (GIN `entities_metadata_gin`), таблицы связей нет.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK, default `uuidv7()` | |
+| `slug` | `text` | NOT NULL, UNIQUE | URL: `warner-bros-pictures` (транслит названия, `enrich::slugify`; занят — `-<tmdb_id>`, затем `-2`, `-3`…; пустой — `studio-<tmdb_id>`) |
+| `name` | `text` | NOT NULL, UNIQUE | Как в `metadata.studios` (TMDB отдаёт по-английски: `Mosfilm`) |
+| `tmdb_id` | `integer` | UNIQUE | Компания TMDB (из `production_companies` сырья); одна компания под двумя названиями — у первого |
+| `logo_url` | `text` | | `https://image.tmdb.org/t/p/w300…` |
+| `origin_country` | `text` | | ISO 3166-1 alpha-2 |
+| `headquarters`, `homepage`, `description` | `text` | | Из `GET /3/company/{id}` при первом открытии страницы |
+| `parent_tmdb_id` | `integer` | | Материнская компания (страница — если она тоже студия каталога) |
+| `details_fetched_at` | `timestamptz` | | Когда спросили TMDB (и при 404); NULL — спросить при открытии |
+| `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
+
+Dev (2026-10-15): 53 125 названий студий в `metadata.studios`, 53 962 компании в сырье.
+
 ### `catalog_import.people` ✅ — связь людей с TMDB и Wikidata
 
 Таблица импорта (`merge.py`, `STATE_SCHEMA`): `person_id` (PK, FK → `people`, CASCADE), `tmdb_id`
@@ -447,6 +467,37 @@ curl -s 'localhost:7700/tasks?limit=10' -H "$KEY" | jq                        # 
 Если индекс разошёлся с БД — перестроить: `scripts/reindex-search.sh` или
 `POST /admin/search/reindex` в Swagger.
 
+## Студии ✅
+
+Решение пользователя (2026-10-15): клик по студии в карточке фильма открывает страницу студии —
+краткая информация и список её фильмов. Код — `studios.rs`.
+
+- **Какие у фильма студии** — по-прежнему `entities.metadata.studios` (TMDB, админка, поиск
+  `studio` в Meilisearch). Карточка (`EntityDetail.studios`) отдаёт их в том же порядке как
+  `[{slug, name, logo_url}]` — ссылки на `/studios/{slug}`; названия без строки в `studios`
+  пропускаются.
+- **Синхронизация** `studios::sync(db, None | Some(ids))`: новые названия из `metadata.studios`
+  (`NOT EXISTS` по `name`) → TMDB id, логотип и страна из `entity_tmdb_data.production_companies`
+  (`metadata -> 'studios' ?| names`, только фильмы с этими названиями) → slug → вставка пачками по
+  5000 (`ON CONFLICT DO NOTHING`). Полная — в начале шага `fill` перестройки поиска (первая на dev
+  — 53 тыс. студий, ~1 мин из-за сырья; дальше — только новые названия), точечная — в
+  `publish::run` для затронутых сущностей и при возврате фильма из архива (до карточки).
+  Студии без фильмов не удаляются.
+- **Страница** `GET /studios/{slug}` → `StudioDetail`: `slug`, `name`, `logo_url`,
+  `origin_country`, `headquarters`, `homepage`, `description`, `parent` (`StudioRef` материнской,
+  если она есть в каталоге), `entities_count` (видимые вышедшие, как список). Нет
+  `details_fetched_at` и есть `tmdb_id` — `GET {TMDB_API_URL}/company/{id}` (`enrich::tmdb_get`,
+  таймаут 8 с): поля сохраняются (пустые не затирают старые), 404 — запоминается; нет ключа или TMDB
+  не ответил — страница из того, что есть, попытка при следующем открытии.
+- **Фильмы студии** — `GET /entities?studio=<slug>` (и `/admin/entities?studio=`): фильтр
+  `e.metadata @> {"studios": [name]}` вдобавок к остальным, все сортировки и пагинация; неизвестный
+  slug — пустая страница.
+- **ISR**: пути затронутых сущностей включают `/studios/{slug}` их студий (`publish::studio_path`).
+
+Тест — `app/tests/studios.rs` (`studio_pages_and_their_films`: синхронизация, ссылки в карточке,
+фильтр и сортировка, страница без ключа и с подставным TMDB — один запрос на студию, 404, новая
+студия с кириллицей после правки в админке).
+
 ## Карточки ✅
 
 `GET /entities/{slug}` и `GET /people/{slug}` читают PostgreSQL: без кэша, без Redis и без
@@ -465,7 +516,8 @@ Redis только для блокировок перестройки.
 2. **isr** — `POST {ISR_URL}/_isr/revalidate`, `Authorization: Bearer {ISR_SECRET}`,
    тело `{"paths": ["/films/dune-2021", "/people/denis-villeneuve"]}`, пачками по 100 путей.
    Пути — старые и новые адреса затронутых сущностей (`/films|series|books|games/{slug}`, как
-   `KINDS` фронтенда) и людей (`/people/{slug}`).
+   `KINDS` фронтенда), людей (`/people/{slug}`) и студий этих сущностей (`/studios/{slug}`). Перед
+   шагами — `studios::sync` затронутых сущностей (новые студии из `metadata`).
 
 Ошибка шага запись не отменяет и следующий шаг не останавливает: warning в лог. Meilisearch
 выключен или не заданы `ISR_URL`/`ISR_SECRET` — шаг пропускается (`skipped`).
@@ -806,8 +858,9 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 
 | Метод | Путь | Что делает |
 |---|---|---|
-| GET | `/entities` | Список видимых (без поиска по названию: `q` → 400 `use_search`, искать — `GET /search`). Фильтры: `kind`, `tag` (slug), `year`. `sort`: `recommended` (по умолчанию, балл), `trending`, `top_rated`, `new` (только вышедшие), `soon`, `popular` (наши оценки), `rating`, `title` ([«Сортировка и активные»](#сортировка-и-активные-)). В элементах — `release_status`, `imdb_rating`, `imdb_votes` |
-| GET | `/entities/{slug}` | Карточка: все поля (с `active`), теги, участники в порядке титров (`position`), `related` (активные). Из PostgreSQL. Скрытая — 404; с токеном админа — 200 (и скрытые связанные); неверный токен — 401 |
+| GET | `/entities` | Список видимых (без поиска по названию: `q` → 400 `use_search`, искать — `GET /search`). Фильтры: `kind`, `tag` (slug), `year`, `studio` (slug студии: `metadata.studios` содержит её название; неизвестный — пусто). `sort`: `recommended` (по умолчанию, балл), `trending`, `top_rated`, `new` (только вышедшие), `soon`, `popular` (наши оценки), `rating`, `title` ([«Сортировка и активные»](#сортировка-и-активные-)). В элементах — `release_status`, `imdb_rating`, `imdb_votes` |
+| GET | `/studios/{slug}` | Страница студии ([«Студии»](#студии-)): `slug`, `name`, `logo_url`, `origin_country`, `headquarters`, `homepage`, `description`, `parent` (`{slug, name, logo_url}` или `null`), `entities_count`. Данные компании — из TMDB при первом открытии. Фильмы — `GET /entities?studio={slug}`. 404 — нет студии |
+| GET | `/entities/{slug}` | Карточка: все поля (с `active`), `studios` (`[{slug, name, logo_url}]` по порядку `metadata.studios`), теги, участники в порядке титров (`position`), `related` (активные). Из PostgreSQL. Скрытая — 404; с токеном админа — 200 (и скрытые связанные); неверный токен — 401 |
 | GET | `/entities/{slug}/similar` | Похожие активные: `?limit=` 1–24 (по умолчанию 12) → `Page<EntitySummary>` ([«Похожие»](#похожие-)); у скрытой — 404 |
 | GET | `/people` | Список публичных людей по алфавиту (с активной работой или без работ), `q` — подстрока в имени |
 | GET | `/people/{slug}` | Человек и его работы в активных сущностях, новые сверху. Из PostgreSQL. Все работы скрыты — 404; админу — 200 со всеми работами |
@@ -1223,9 +1276,10 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `validate.rs` | Проверка slug, строк, URL, ролей; UNIQUE → 409 |
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
 | `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), `GET /search` (фильтры — `filters_of`), `GET /search/studios` |
+| `studios.rs` | Студии: `sync` (из `metadata.studios` и сырья TMDB), `refs` (ссылки в карточке), `GET /studios/{slug}` (данные компании из TMDB при первом открытии), `metadata_filter` для `GET /entities?studio=` |
 | `people_search.rs` | Индекс `people` (`PersonDoc`, `settings`, `fill`, `update_index`), известность `refresh_fame` → `person_stats`, `GET /search/people` |
 | `tmdb.rs` | Операции админки: «Обновить рейтинги» (дампы TMDB и IMDb), «Пересобрать активные» |
-| `archive/enrich.rs` | Полные данные TMDB: `fetch_movie`, `film_fields`, `film_credits`, `slugify`, `insert_film` (фильм, статистика, сырьё, жанры, люди, титры) |
+| `archive/enrich.rs` | Полные данные TMDB: `tmdb_get` (общий запрос с ключом; и для студий), `fetch_movie`, `film_fields`, `film_credits`, `slugify`, `insert_film` (фильм, статистика, сырьё, жанры, люди, титры) |
 | `archive/index.rs` | Индекс Tantivy архива: схема (с `cover_url`), открытие по каталогу (и старой схемы), `recreate`, поиск с `offset` и `Count`, `get`, `upsert`/`delete`, писатель 50 МБ |
 | `archive/pipeline.rs` | `dump` (TSV из БД и архива, с `cover_url`), `build` (Top-K без `archived_tmdb.manual`, маршрутизация, удаление из PostgreSQL; `--fresh` — `recreate`), `delete_entities` (и для ручного переноса) |
 | `archive/mod.rs` | `GET /archive/search`, `GET /archive/entities/{slug}`, `POST /archive/entities/{slug}/restore` (лимит, `IN_FLIGHT`), `POST /admin/archive/promote/{slug}`, `POST /admin/archive/demote`, `archive::open` |

@@ -189,6 +189,9 @@ pub const ENTITY_STATS_JOIN: &str = "LEFT JOIN entity_stats es ON es.entity_id =
 pub struct EntityDetail {
     #[serde(flatten)]
     pub entity: Entity,
+    /// Студии из `metadata.studios` в том же порядке, со ссылкой на страницу (`/studios/{slug}`).
+    /// Названия, для которых студии ещё нет (появится при синхронизации), пропускаются.
+    pub studios: Vec<crate::studios::StudioRef>,
     pub tags: Vec<Tag>,
     pub credits: Vec<EntityCredit>,
     pub related: Vec<RelatedWork>,
@@ -557,6 +560,9 @@ pub struct ListEntitiesQuery {
     /// Год выхода.
     #[param(example = 2021)]
     pub year: Option<i32>,
+    /// Slug студии (`GET /studios/{slug}`): её фильмы. Неизвестный slug — пустой список.
+    #[param(example = "mosfilm")]
+    pub studio: Option<String>,
     /// Не поддерживается: поиск по названию — только `GET /search` (Meilisearch), здесь — 400
     /// `use_search`.
     #[param(ignore)]
@@ -577,6 +583,8 @@ pub struct AdminListEntitiesQuery {
     /// Slug тега.
     pub tag: Option<String>,
     pub year: Option<i32>,
+    /// Slug студии.
+    pub studio: Option<String>,
     /// Подстрока в названии или оригинальном названии, без учёта регистра.
     pub q: Option<String>,
     /// `true` — только активные, `false` — только скрытые; не передан — все.
