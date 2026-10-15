@@ -696,11 +696,11 @@ pub struct SearchQuery {
     /// Студия — точное название (без учёта регистра); подсказки — `GET /search/studios`.
     #[param(example = "Warner Bros. Pictures")]
     pub studio: Option<String>,
-    /// Slug человека: фильмы с его участием. **Заглушка:** людей в индексе пока нет — 503
-    /// `person_filter_unavailable`.
+    /// Slug человека: сущности с его участием (в любой роли).
     #[param(example = "christopher-nolan")]
     pub person: Option<String>,
-    /// Роль человека из `person`: `actor`, `director`, `producer`, `writer`, ... Без `person` — 400.
+    /// Роль человека из `person` в этой сущности: `actor`, `director`, `producer`, `writer`, ...
+    /// Без `person` — 400.
     #[param(example = "director")]
     pub role: Option<String>,
     /// 1–100, по умолчанию 20.

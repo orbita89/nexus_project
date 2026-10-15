@@ -2626,7 +2626,7 @@
           "catalog"
         ],
         "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры. Весь\nпоиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).",
-        "description": "Фильтры (через AND): `kind`, `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра). `person` / `role` — заглушка:\nлюдей в индексе пока нет, ответ 503 `person_filter_unavailable`.\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
+        "description": "Фильтры (через AND): `kind`, `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
         "operationId": "search",
         "parameters": [
           {
@@ -2711,7 +2711,7 @@
           {
             "name": "person",
             "in": "query",
-            "description": "Slug человека: фильмы с его участием. **Заглушка:** людей в индексе пока нет — 503\n`person_filter_unavailable`.",
+            "description": "Slug человека: сущности с его участием (в любой роли).",
             "required": false,
             "schema": {
               "type": "string"
@@ -2721,7 +2721,7 @@
           {
             "name": "role",
             "in": "query",
-            "description": "Роль человека из `person`: `actor`, `director`, `producer`, `writer`, ... Без `person` — 400.",
+            "description": "Роль человека из `person` в этой сущности: `actor`, `director`, `producer`, `writer`, ...\nБез `person` — 400.",
             "required": false,
             "schema": {
               "type": "string"
@@ -2771,7 +2771,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен; `person_filter_unavailable` — фильтр по людям ещё не готов",
+            "description": "Meilisearch недоступен",
             "content": {
               "application/json": {
                 "schema": {

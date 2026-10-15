@@ -108,10 +108,21 @@ struct SearchDoc {
     /// `rating` (средняя; без оценок — `null`, в конце).
     nexus_ratings_count: i64,
     nexus_rating_avg: Option<f64>,
+    /// Участники из титров (`entity_credits`): slug'и всех людей — фильтр `person`, и пары
+    /// `"роль:slug"` (`"director:christopher-nolan"`) — фильтр `person` + `role`.
+    people: Vec<String>,
+    credits: Vec<String>,
+}
+
+/// Участники сущности для документа.
+#[derive(Default)]
+struct Cast {
+    people: Vec<String>,
+    credits: Vec<String>,
 }
 
 impl SearchDoc {
-    fn new(entity: Entity, tags: Vec<String>, ratings: Option<RatingStats>) -> Self {
+    fn new(entity: Entity, tags: Vec<String>, ratings: Option<RatingStats>, cast: Cast) -> Self {
         let ratings = ratings.unwrap_or(RatingStats {
             average: None,
             count: 0,
@@ -146,6 +157,8 @@ impl SearchDoc {
             release_status: entity.release_status,
             nexus_ratings_count: ratings.count,
             nexus_rating_avg: ratings.average,
+            people: cast.people,
+            credits: cast.credits,
         }
     }
 }
@@ -159,7 +172,9 @@ fn entity_settings() -> Value {
     json!({
         // Порядок задаёт вес: совпадение в названии важнее, чем в студии.
         "searchableAttributes": ["title", "original_title", "studios"],
-        "filterableAttributes": ["kind", "tags", "year", "slug", "studios", "release_ts"],
+        "filterableAttributes": [
+            "kind", "tags", "year", "slug", "studios", "release_ts", "people", "credits",
+        ],
         "sortableAttributes": [
             "rank_score", "popularity", "quality", "release_ts", "title",
             "nexus_ratings_count", "nexus_rating_avg",
@@ -207,7 +222,8 @@ pub(crate) async fn search_exact(
     Ok((response, count["totalHits"].as_i64().unwrap_or(0)))
 }
 
-/// Документы пачки сущностей: строки уже прочитаны, теги и оценки Nexus — по запросу на пачку.
+/// Документы пачки сущностей: строки уже прочитаны, теги, оценки Nexus и участники — по
+/// запросу на пачку.
 async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchDoc>, BoxError> {
     let ids: Vec<Uuid> = entities.iter().map(|e| e.id).collect();
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
@@ -231,12 +247,31 @@ async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchD
         .into_iter()
         .map(|(id, average, count)| (id, RatingStats { average, count }))
         .collect();
+    // Сортировка — чтобы дубли (человек в двух ролях, актёр в двух ролях персонажей) шли
+    // подряд и снимались `dedup`.
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT DISTINCT ec.entity_id, p.slug, ec.role
+         FROM entity_credits ec JOIN people p ON p.id = ec.person_id
+         WHERE ec.entity_id = ANY($1) ORDER BY ec.entity_id, p.slug, ec.role",
+    )
+    .bind(&ids)
+    .fetch_all(db)
+    .await?;
+    let mut casts: HashMap<Uuid, Cast> = HashMap::new();
+    for (id, slug, role) in rows {
+        let cast = casts.entry(id).or_default();
+        cast.credits.push(format!("{role}:{slug}"));
+        if cast.people.last() != Some(&slug) {
+            cast.people.push(slug);
+        }
+    }
     Ok(entities
         .into_iter()
         .map(|entity| {
             let tags = tags.remove(&entity.id).unwrap_or_default();
             let ratings = ratings.remove(&entity.id);
-            SearchDoc::new(entity, tags, ratings)
+            let cast = casts.remove(&entity.id).unwrap_or_default();
+            SearchDoc::new(entity, tags, ratings, cast)
         })
         .collect())
 }
@@ -983,8 +1018,8 @@ pub(crate) fn unavailable() -> AppError {
 /// поиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).
 ///
 /// Фильтры (через AND): `kind`, `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон
-/// включительно), `studio` (точное название, без учёта регистра). `person` / `role` — заглушка:
-/// людей в индексе пока нет, ответ 503 `person_filter_unavailable`.
+/// включительно), `studio` (точное название, без учёта регистра), `person` (slug участника) и
+/// `role` (его роль в этой сущности; без `person` — 400).
 ///
 /// Сортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу
 /// «Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только
@@ -997,7 +1032,7 @@ pub(crate) fn unavailable() -> AppError {
     responses(
         (status = 200, description = "Страница результатов. `total` — всего найдено (точно)", body = Page<EntitySummary>),
         (status = 400, description = "Неверный фильтр", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен; `person_filter_unavailable` — фильтр по людям ещё не готов", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
     )
 )]
 pub async fn search(
@@ -1118,16 +1153,15 @@ fn filters_of(query: &SearchQuery) -> AppResult<Vec<String>> {
             return Err(AppError::BadRequest("role requires person".into()));
         }
         (Some(person), role) => {
+            // Проверенные slug (a-z, 0-9, `-`) и роль (a-z, `_`) безопасно подставлять в строку.
             validate::slug("person", person)?;
-            if let Some(role) = role {
-                validate::role(role)?;
+            match role {
+                Some(role) => {
+                    let role = validate::role(role)?;
+                    filters.push(format!("credits = \"{role}:{person}\""));
+                }
+                None => filters.push(format!("people = \"{person}\"")),
             }
-            // Заглушка: участников в документе нет (компактный индекс). Когда появятся — здесь
-            // фильтр по ним.
-            return Err(
-                AppError::Unavailable("search by people is not available yet".into())
-                    .with_code("person_filter_unavailable"),
-            );
         }
         (None, None) => {}
     }
@@ -1325,11 +1359,14 @@ mod tests {
             let error = filters_of(&query(bad.clone())).unwrap_err();
             assert_eq!(error.code(), "validation", "{bad}");
         }
-        let error = filters_of(&query(
-            json!({ "person": "christopher-nolan", "role": "director" }),
-        ))
-        .unwrap_err();
-        assert_eq!(error.code(), "person_filter_unavailable");
+        assert_eq!(
+            ok(json!({ "person": "christopher-nolan" })),
+            [r#"people = "christopher-nolan""#]
+        );
+        assert_eq!(
+            ok(json!({ "person": "christopher-nolan", "role": "director" })),
+            [r#"credits = "director:christopher-nolan""#]
+        );
     }
 
     #[test]

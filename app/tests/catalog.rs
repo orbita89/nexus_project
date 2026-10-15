@@ -1189,12 +1189,31 @@ async fn search_filters_and_sorts(pool: PgPool) {
     let studios = ctx.get_ok("/search/studios?kind=game").await;
     assert_eq!(studios, json!([{ "name": "CD Projekt Red", "count": 1 }]));
 
-    // Люди — заглушка: в индексе их пока нет.
-    let response = ctx
-        .get("/search?person=denis-villeneuve&role=director")
+    // Люди: `person` — в любой роли, `person` + `role` — именно в этой.
+    let sorted = |page: &Value| {
+        let mut slugs: Vec<String> = slugs(page).into_iter().map(str::to_owned).collect();
+        slugs.sort();
+        slugs
+    };
+    let page = ctx.get_ok("/search?person=denis-villeneuve").await;
+    assert_eq!(sorted(&page), ["dune-2021", "dune-part-two-2024"], "{page}");
+    assert_eq!(page["total"], 2);
+    let page = ctx
+        .get_ok("/search?person=denis-villeneuve&role=director")
         .await;
-    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(response.json()["code"], "person_filter_unavailable");
+    assert_eq!(sorted(&page), ["dune-2021", "dune-part-two-2024"], "{page}");
+    let page = ctx
+        .get_ok("/search?person=denis-villeneuve&role=actor")
+        .await;
+    assert_eq!(page["items"], json!([]), "{page}");
+    let page = ctx
+        .get_ok("/search?person=timothee-chalamet&role=actor&q=dune")
+        .await;
+    assert_eq!(slugs(&page), ["dune-2021"], "{page}");
+    assert_eq!(
+        ctx.get_ok("/search?person=nobody").await["items"],
+        json!([])
+    );
 
     for bad in [
         "/search?year=2001&year_from=2000",
