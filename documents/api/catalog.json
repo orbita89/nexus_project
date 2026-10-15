@@ -5124,7 +5124,9 @@
           "top_rated",
           "new",
           "soon",
-          "title"
+          "title",
+          "popular",
+          "rating"
         ]
       },
       "SeriesMetadata": {

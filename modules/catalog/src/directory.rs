@@ -108,10 +108,15 @@ impl EntityRatings for PgEntityRatings {
     async fn replace_all(&self, stats: &[(Uuid, RatingStats)]) -> AppResult<()> {
         let mut tx = self.db.begin().await?;
         let ids: Vec<Uuid> = stats.iter().map(|(id, _)| *id).collect();
-        sqlx::query("DELETE FROM entity_ratings WHERE NOT (entity_id = ANY($1))")
-            .bind(&ids)
-            .execute(&mut *tx)
-            .await?;
+        // Обнулить, а не удалить: новое `updated_at` переносит обнуление в индекс поиска
+        // (`search::sync_ratings`). Для сортировок нулевая сводка — то же, что её отсутствие.
+        sqlx::query(
+            "UPDATE entity_ratings SET average = NULL, count = 0, updated_at = now()
+             WHERE NOT (entity_id = ANY($1)) AND (count > 0 OR average IS NOT NULL)",
+        )
+        .bind(&ids)
+        .execute(&mut *tx)
+        .await?;
         upsert(&mut *tx, stats).await?;
         tx.commit().await?;
         Ok(())

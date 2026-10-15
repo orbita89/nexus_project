@@ -3002,3 +3002,55 @@ async fn active_rebuild_by_count_keeps_soon_and_manual(pool: PgPool) {
     assert_eq!(done_of(&events)["active"]["activated"], 1);
     ctx.get_ok("/entities/dune-part-two-2024").await;
 }
+
+/// Оценки Nexus в индексе: сводки от `social` (`EntityRatings`) доезжают проходом
+/// `sync_ratings`; `sort=popular` — по числу оценок, `rating` — по средней, без оценок в конце.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn search_sorts_by_nexus_ratings(pool: PgPool) {
+    use shared::directory::RatingStats;
+    let ctx = Ctx::new(pool).await;
+    let stats = |average: f64, count: i64| RatingStats {
+        average: Some(average),
+        count,
+    };
+    let dune: uuid::Uuid = ctx.entity_id("dune-2021").await.parse().unwrap();
+    let part_two: uuid::Uuid = ctx.entity_id("dune-part-two-2024").await.parse().unwrap();
+    let novel: uuid::Uuid = ctx.entity_id("dune-novel").await.parse().unwrap();
+    ctx.state
+        .ratings
+        .set(&[(dune, stats(7.0, 3)), (part_two, stats(9.0, 1))])
+        .await
+        .unwrap();
+    let (since, count) = catalog::search::sync_ratings(&ctx.state, None)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+
+    let page = ctx.get_ok("/search?q=dune&sort=popular").await;
+    assert_eq!(
+        slugs(&page),
+        ["dune-2021", "dune-part-two-2024", "dune-novel"],
+        "{page}"
+    );
+    let page = ctx.get_ok("/search?q=dune&sort=rating").await;
+    assert_eq!(
+        slugs(&page),
+        ["dune-part-two-2024", "dune-2021", "dune-novel"],
+        "{page}"
+    );
+
+    // Полная замена (старт приложения): прежние сводки обнуляются и тоже доезжают до индекса.
+    ctx.state
+        .ratings
+        .replace_all(&[(novel, stats(5.0, 2))])
+        .await
+        .unwrap();
+    let (_, count) = catalog::search::sync_ratings(&ctx.state, Some(since))
+        .await
+        .unwrap();
+    assert_eq!(count, 3);
+    for sort in ["popular", "rating"] {
+        let page = ctx.get_ok(&format!("/search?q=dune&sort={sort}")).await;
+        assert_eq!(slugs(&page)[0], "dune-novel", "{sort}: {page}");
+    }
+}

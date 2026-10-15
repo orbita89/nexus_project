@@ -40,9 +40,10 @@ use axum::extract::State;
 use axum::http::Method;
 use axum::response::Response;
 use axum::Json;
-use chrono::{Datelike, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
+use shared::directory::RatingStats;
 use shared::error::ErrorBody;
 use shared::extract::Query;
 use shared::search::{Search, SearchError};
@@ -103,10 +104,18 @@ struct SearchDoc {
     imdb_rating: Option<f64>,
     imdb_votes: Option<i32>,
     release_status: ReleaseStatus,
+    /// Оценки Nexus (`entity_ratings`, сводки от `social`): сортировки `popular` (число) и
+    /// `rating` (средняя; без оценок — `null`, в конце).
+    nexus_ratings_count: i64,
+    nexus_rating_avg: Option<f64>,
 }
 
 impl SearchDoc {
-    fn new(entity: Entity, tags: Vec<String>) -> Self {
+    fn new(entity: Entity, tags: Vec<String>, ratings: Option<RatingStats>) -> Self {
+        let ratings = ratings.unwrap_or(RatingStats {
+            average: None,
+            count: 0,
+        });
         let studios = entity.metadata["studios"]
             .as_array()
             .map(|studios| {
@@ -135,6 +144,8 @@ impl SearchDoc {
             imdb_rating: entity.imdb_rating,
             imdb_votes: entity.imdb_votes,
             release_status: entity.release_status,
+            nexus_ratings_count: ratings.count,
+            nexus_rating_avg: ratings.average,
         }
     }
 }
@@ -149,7 +160,10 @@ fn entity_settings() -> Value {
         // Порядок задаёт вес: совпадение в названии важнее, чем в студии.
         "searchableAttributes": ["title", "original_title", "studios"],
         "filterableAttributes": ["kind", "tags", "year", "slug", "studios", "release_ts"],
-        "sortableAttributes": ["rank_score", "popularity", "quality", "release_ts", "title"],
+        "sortableAttributes": [
+            "rank_score", "popularity", "quality", "release_ts", "title",
+            "nexus_ratings_count", "nexus_rating_avg",
+        ],
         // Подсказки студий без запроса — самые частые.
         "faceting": { "sortFacetValuesBy": { "studios": "count" } },
         "pagination": { "maxTotalHits": MAX_TOTAL_HITS },
@@ -193,7 +207,7 @@ pub(crate) async fn search_exact(
     Ok((response, count["totalHits"].as_i64().unwrap_or(0)))
 }
 
-/// Документы пачки сущностей: строки уже прочитаны, теги — одним запросом на пачку.
+/// Документы пачки сущностей: строки уже прочитаны, теги и оценки Nexus — по запросу на пачку.
 async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchDoc>, BoxError> {
     let ids: Vec<Uuid> = entities.iter().map(|e| e.id).collect();
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
@@ -207,11 +221,22 @@ async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchD
     for (id, slug) in rows {
         tags.entry(id).or_default().push(slug);
     }
+    let rows: Vec<(Uuid, Option<f64>, i64)> = sqlx::query_as(
+        "SELECT entity_id, average, count FROM entity_ratings WHERE entity_id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(db)
+    .await?;
+    let mut ratings: HashMap<Uuid, RatingStats> = rows
+        .into_iter()
+        .map(|(id, average, count)| (id, RatingStats { average, count }))
+        .collect();
     Ok(entities
         .into_iter()
         .map(|entity| {
             let tags = tags.remove(&entity.id).unwrap_or_default();
-            SearchDoc::new(entity, tags)
+            let ratings = ratings.remove(&entity.id);
+            SearchDoc::new(entity, tags, ratings)
         })
         .collect())
 }
@@ -896,6 +921,60 @@ async fn run_reindex(state: &AppState, reason: &str) {
     }
 }
 
+/// Как часто оценки Nexus доезжают до индекса ([`spawn_ratings_sync`]).
+const RATINGS_SYNC_INTERVAL: Duration = Duration::from_secs(60);
+/// Нахлёст окна: сводка, записанная транзакцией, начатой до прошлого прохода, не теряется.
+const RATINGS_SYNC_OVERLAP_SECS: i64 = 60;
+
+/// Оценки Nexus в индексе: раз в [`RATINGS_SYNC_INTERVAL`] переотправляет документы сущностей,
+/// чьи сводки (`entity_ratings.updated_at`) изменились с прошлого прохода; первый проход — все
+/// сводки. Оценки пишет `social` через `EntityRatings` (после каждой рецензии и при старте),
+/// модулю `social` о поиске знать не нужно. Повтор безопасен: документы строятся целиком из БД.
+pub fn spawn_ratings_sync(state: AppState) {
+    if !state.search.is_enabled() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut since = None;
+        loop {
+            tokio::time::sleep(RATINGS_SYNC_INTERVAL).await;
+            match sync_ratings(&state, since).await {
+                Ok((next, count)) => {
+                    since = Some(next);
+                    if count > 0 {
+                        tracing::info!(entities = count, "nexus ratings synced to search");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "nexus ratings search sync failed"),
+            }
+        }
+    });
+}
+
+/// Один проход [`spawn_ratings_sync`]: сводки, изменённые после `since` (`None` — все), → индекс.
+/// Возвращает начало следующего окна и число переотправленных сущностей.
+pub async fn sync_ratings(
+    state: &AppState,
+    since: Option<DateTime<Utc>>,
+) -> Result<(DateTime<Utc>, usize), BoxError> {
+    let next: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+        .fetch_one(&state.db)
+        .await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT entity_id FROM entity_ratings WHERE $1::timestamptz IS NULL OR updated_at > $1",
+    )
+    .bind(since)
+    .fetch_all(&state.db)
+    .await?;
+    for chunk in ids.chunks(1000) {
+        update_entities(state, &Touched::entities(chunk)).await?;
+    }
+    Ok((
+        next - chrono::Duration::seconds(RATINGS_SYNC_OVERLAP_SECS),
+        ids.len(),
+    ))
+}
+
 pub(crate) fn unavailable() -> AppError {
     AppError::Unavailable("search is temporarily unavailable".into())
 }
@@ -940,6 +1019,8 @@ pub async fn search(
             Some("release_ts:asc")
         }
         Some(SearchSort::Title) => Some("title:asc"),
+        Some(SearchSort::Popular) => Some("nexus_ratings_count:desc"),
+        Some(SearchSort::Rating) => Some("nexus_rating_avg:desc"),
         None => None,
     };
     let mut body = json!({
@@ -950,7 +1031,14 @@ pub async fn search(
              "release_status", "imdb_rating", "imdb_votes"],
     });
     if let Some(sort) = sort {
-        body["sort"] = json!([sort]);
+        // Как в `GET /entities`: при равной средней — больше оценок, затем новее.
+        body["sort"] = match query.sort {
+            Some(SearchSort::Popular) => json!([sort, "release_ts:desc"]),
+            Some(SearchSort::Rating) => {
+                json!([sort, "nexus_ratings_count:desc", "release_ts:desc"])
+            }
+            _ => json!([sort]),
+        };
     }
 
     let path = format!("/indexes/{}/search", state.search.index(INDEX));
