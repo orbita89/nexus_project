@@ -1089,9 +1089,7 @@ pub async fn search(
     let mut body = json!({
         "q": query.q.as_deref().unwrap_or_default().trim(),
         "filter": if filters.is_empty() { Value::Null } else { filters.join(" AND ").into() },
-        "attributesToRetrieve":
-            ["id", "kind", "slug", "title", "original_title", "release_date", "cover_url",
-             "release_status", "imdb_rating", "imdb_votes"],
+        "attributesToRetrieve": SUMMARY_FIELDS,
     });
     if let Some(sort) = sort {
         // Как в `GET /entities`: при равной средней — больше оценок, затем новее.
@@ -1124,6 +1122,63 @@ pub async fn search(
         limit,
         offset,
     }))
+}
+
+/// Поля выдачи (`EntitySummary`) из документа индекса.
+const SUMMARY_FIELDS: [&str; 10] = [
+    "id",
+    "kind",
+    "slug",
+    "title",
+    "original_title",
+    "release_date",
+    "cover_url",
+    "release_status",
+    "imdb_rating",
+    "imdb_votes",
+];
+
+/// Похожие для `GET /entities/{slug}/similar`: видимые того же типа, у которых есть хотя бы один из
+/// тегов `tags`, кроме `exclude` (сама сущность и связанные); сверху — по баллу «Рекомендуемые»,
+/// затем новее. Теги и исключения — slug'и (проверены форматом БД, экранируются как строки).
+pub(crate) async fn similar(
+    state: &AppState,
+    kind: EntityKind,
+    tags: &[String],
+    exclude: &[String],
+    limit: i64,
+) -> AppResult<(Vec<EntitySummary>, i64)> {
+    let quoted = |values: &[String]| {
+        values
+            .iter()
+            .map(|value| filter_string(value))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let body = json!({
+        "q": "",
+        "filter": format!(
+            "kind = {} AND tags IN [{}] AND slug NOT IN [{}]",
+            kind.as_str(),
+            quoted(tags),
+            quoted(exclude)
+        ),
+        "sort": ["rank_score:desc", "release_ts:desc"],
+        "attributesToRetrieve": SUMMARY_FIELDS,
+    });
+    let path = format!("/indexes/{}/search", state.search.index(INDEX));
+    let (response, total) = match search_exact(&state.search, &path, body, limit, 0).await {
+        Ok(found) => found,
+        Err(error) if error.code() == Some("index_not_found") => (json!({ "hits": [] }), 0),
+        Err(SearchError::Disabled) => return Err(unavailable()),
+        Err(error) => {
+            tracing::warn!(%error, "similar search failed");
+            return Err(unavailable());
+        }
+    };
+    let items = serde_json::from_value(response["hits"].clone())
+        .map_err(|e| AppError::Internal(format!("unexpected search hits: {e}")))?;
+    Ok((items, total))
 }
 
 /// Длина значения фильтра `studio` и запроса подсказок.

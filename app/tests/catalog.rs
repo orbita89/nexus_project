@@ -2322,41 +2322,31 @@ async fn similar_entities_by_shared_tags(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let ctx = Ctx::without_search(pool);
+    // Фильмы вставлены в обход API — в индекс их кладёт перестройка.
+    let ctx = Ctx::new(pool).await;
 
-    // Тот же тип (книга с тегом sci-fi не попадает), больше общих тегов — выше, затем новее.
+    // Тот же тип (книга с тегом sci-fi не попадает), хотя бы один общий тег; число общих тегов
+    // не важно: по баллу «Рекомендуемые», у всех его нет — новее сверху.
     let page = ctx.get_ok("/entities/dune-2021/similar").await;
     assert_eq!(
         slugs(&page),
         [
-            "two-tags",
             "dune-part-two-2024",
             "one-tag-new",
+            "two-tags",
             "one-tag-old"
-        ]
+        ],
+        "{page}"
     );
     assert_eq!(page["total"], 4);
     assert_eq!(page["limit"], 12);
 
-    // Общий жанр весит вдвое: жанр «Космическая опера» поднимает «новый» над тегом sci-fi.
-    sqlx::query("UPDATE tags SET kind = 'genre' WHERE slug = 'space-opera'")
-        .execute(&ctx.state.db)
-        .await
-        .unwrap();
+    // Балл «Рекомендуемые» решает порядок.
+    set_stats(&ctx, "one-tag-old", json!({ "rank_score": 0.9 })).await;
+    let (status, body) = ctx.reindex("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     let page = ctx.get_ok("/entities/dune-2021/similar").await;
-    assert_eq!(
-        slugs(&page),
-        [
-            "two-tags",
-            "one-tag-new",
-            "dune-part-two-2024",
-            "one-tag-old"
-        ]
-    );
-    sqlx::query("UPDATE tags SET kind = 'tag' WHERE slug = 'space-opera'")
-        .execute(&ctx.state.db)
-        .await
-        .unwrap();
+    assert_eq!(slugs(&page)[0], "one-tag-old", "{page}");
 
     // Связанные (сиквел) уже на карточке — из похожих уходят.
     let first = ctx.entity_id("dune-2021").await;
@@ -2370,7 +2360,7 @@ async fn similar_entities_by_shared_tags(pool: PgPool) {
         .await;
     assert_eq!(status, StatusCode::OK);
     let page = ctx.get_ok("/entities/dune-2021/similar?limit=2").await;
-    assert_eq!(slugs(&page), ["two-tags", "one-tag-new"]);
+    assert_eq!(slugs(&page), ["one-tag-old", "one-tag-new"], "{page}");
     assert_eq!(page["total"], 3);
     assert_eq!(page["limit"], 2);
 
@@ -2441,7 +2431,7 @@ fn tag_count(tags: &Value, slug: &str) -> i64 {
 /// и 200 админу; включили — всё вернулось.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn inactive_entity_is_hidden_from_public_reads(pool: PgPool) {
-    let ctx = Ctx::without_search(pool);
+    let ctx = Ctx::new(pool).await;
     assert_eq!(tag_count(&ctx.get_ok("/tags").await, "sci-fi"), 3);
     set_active(&ctx, "dune-part-two-2024", false).await;
 

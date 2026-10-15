@@ -2,9 +2,9 @@
 
 use crate::models::{
     page_bounds, AdminEntitySummary, Entity, EntityCredit, EntityCreditRow, EntityDetail,
-    EntitySort, EntitySummary, ListEntitiesQuery, Page, RelatedWork, RelationKind, SimilarQuery,
-    Tag, ENTITY_COLUMNS, ENTITY_STATS_JOIN, ENTITY_SUMMARY_COLUMNS, TAG_COLUMNS, TAG_ORDER,
-    VISIBLE,
+    EntityKind, EntitySort, EntitySummary, ListEntitiesQuery, Page, RelatedWork, RelationKind,
+    SimilarQuery, Tag, ENTITY_COLUMNS, ENTITY_STATS_JOIN, ENTITY_SUMMARY_COLUMNS, TAG_COLUMNS,
+    TAG_ORDER, VISIBLE,
 };
 use axum::extract::State;
 use axum::Json;
@@ -232,11 +232,9 @@ pub async fn get(
     Ok(Json(detail(&state.db, entity, admin).await?))
 }
 
-/// Похожие на сущность: тот же тип, больше общих тегов — выше (жанр весит вдвое), при равенстве —
-/// новее. Только видимые; у невидимой — 404. Без самой
-/// сущности и её связанных (они и так на карточке). Нет тегов — пустая страница.
-///
-/// Первая версия без ML: один запрос с подсчётом пересечения тегов по `entity_tags (tag_id)`.
+/// Похожие на сущность: того же типа, с хотя бы одним из её тегов (Meilisearch), сверху — по
+/// баллу «Рекомендуемые», затем новее. Только видимые; у невидимой — 404. Без самой сущности и её
+/// связанных (они и так на карточке). Нет тегов — пустая страница.
 #[utoipa::path(
     get, operation_id = "list_similar_entities", path = "/entities/{slug}/similar", tag = "catalog",
     params(
@@ -244,9 +242,10 @@ pub async fn get(
         SimilarQuery,
     ),
     responses(
-        (status = 200, description = "Похожие, самые похожие сверху", body = Page<EntitySummary>),
+        (status = 200, description = "Похожие, `total` — всего подходящих", body = Page<EntitySummary>),
         (status = 400, description = "Неверный параметр", body = ErrorBody),
         (status = 404, description = "Не найдена", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
     )
 )]
 pub async fn similar(
@@ -254,50 +253,43 @@ pub async fn similar(
     Path(slug): Path<String>,
     Query(query): Query<SimilarQuery>,
 ) -> AppResult<Json<Page<EntitySummary>>> {
-    #[derive(sqlx::FromRow)]
-    struct Similar {
-        total: i64,
-        #[sqlx(flatten)]
-        entity: EntitySummary,
-    }
-
     let limit = query.limit.unwrap_or(12).clamp(1, 24);
-    let id: Option<Uuid> = sqlx::query_scalar(&format!(
-        "SELECT e.id FROM entities e WHERE e.slug = $1 AND {VISIBLE}"
+    let found: Option<(Uuid, EntityKind)> = sqlx::query_as(&format!(
+        "SELECT e.id, e.kind FROM entities e WHERE e.slug = $1 AND {VISIBLE}"
     ))
     .bind(&slug)
     .fetch_optional(&state.db)
     .await?;
-    let id = id.ok_or(AppError::NotFound)?;
-    let rows: Vec<Similar> = sqlx::query_as(&format!(
-        "WITH scored AS (
-             SELECT other.entity_id, sum(CASE WHEN t.kind = 'genre' THEN 2 ELSE 1 END) AS score
-             FROM entity_tags mine
-             JOIN tags t ON t.id = mine.tag_id
-             JOIN entity_tags other ON other.tag_id = mine.tag_id AND other.entity_id <> mine.entity_id
-             WHERE mine.entity_id = $1
-             GROUP BY other.entity_id
-         )
-         SELECT count(*) OVER () AS total, {ENTITY_SUMMARY_COLUMNS}
-         FROM scored s JOIN entities e ON e.id = s.entity_id
-         WHERE e.kind = (SELECT kind FROM entities WHERE id = $1)
-           AND {VISIBLE}
-           AND NOT EXISTS (SELECT 1 FROM entity_relations r
-                           WHERE (r.from_id = $1 AND r.to_id = e.id)
-                              OR (r.to_id = $1 AND r.from_id = e.id))
-         ORDER BY s.score DESC, e.release_date DESC NULLS LAST, e.id
-         LIMIT $2"
-    ))
+    let (id, kind) = found.ok_or(AppError::NotFound)?;
+    let tags: Vec<String> = sqlx::query_scalar(
+        "SELECT t.slug FROM entity_tags et JOIN tags t ON t.id = et.tag_id WHERE et.entity_id = $1",
+    )
     .bind(id)
-    .bind(limit)
     .fetch_all(&state.db)
     .await?;
-
-    Ok(Json(Page {
-        total: rows.first().map_or(0, |row| row.total),
-        items: rows.into_iter().map(|row| row.entity).collect(),
+    let empty = Page {
+        items: Vec::new(),
+        total: 0,
         limit,
         offset: 0,
+    };
+    if tags.is_empty() {
+        return Ok(Json(empty));
+    }
+    let mut exclude: Vec<String> = sqlx::query_scalar(
+        "SELECT e.slug FROM entity_relations r JOIN entities e
+             ON e.id = CASE WHEN r.from_id = $1 THEN r.to_id ELSE r.from_id END
+         WHERE r.from_id = $1 OR r.to_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    exclude.push(slug);
+    let (items, total) = crate::search::similar(&state, kind, &tags, &exclude, limit).await?;
+    Ok(Json(Page {
+        items,
+        total,
+        ..empty
     }))
 }
 
