@@ -1179,15 +1179,31 @@ async fn search_filters_and_sorts(pool: PgPool) {
 
     // Подсказки студий: по части названия, без запроса — самые частые.
     let studios = ctx.get_ok("/search/studios?q=warn").await;
+    assert_eq!(studios.as_array().unwrap().len(), 1, "{studios}");
+    assert_eq!(studios[0]["name"], "Warner Bros. Pictures");
+    assert_eq!(studios[0]["count"], 2);
+    // slug — страница студии (строку создала перестройка), он же — фильтр `studio_slug`.
+    let slug = studios[0]["slug"].as_str().expect("studio slug").to_owned();
+    let studio = ctx.get_ok(&format!("/studios/{slug}")).await;
+    assert_eq!(studio["name"], "Warner Bros. Pictures");
+    let page = ctx
+        .get_ok(&format!("/search?studio_slug={slug}&sort=new"))
+        .await;
+    assert_eq!(slugs(&page), ["dune-part-two-2024", "dune-2021"], "{page}");
+    assert_eq!(page["total"], 2);
+    let page = ctx.get_ok("/search?studio_slug=no-such-studio").await;
+    assert_eq!(page["items"], json!([]));
     assert_eq!(
-        studios,
-        json!([{ "name": "Warner Bros. Pictures", "count": 2 }])
+        ctx.get("/search?studio_slug=Bad%20Slug").await.status,
+        StatusCode::BAD_REQUEST
     );
     let studios = ctx.get_ok("/search/studios?limit=1").await;
     assert_eq!(studios.as_array().unwrap().len(), 1, "{studios}");
     assert_eq!(studios[0]["count"], 2, "{studios}");
     let studios = ctx.get_ok("/search/studios?kind=game").await;
-    assert_eq!(studios, json!([{ "name": "CD Projekt Red", "count": 1 }]));
+    assert_eq!(studios[0]["name"], "CD Projekt Red", "{studios}");
+    assert_eq!(studios[0]["count"], 1);
+    assert!(studios[0]["slug"].is_string(), "{studios}");
 
     // Люди: `person` — в любой роли, `person` + `role` — именно в этой.
     let sorted = |page: &Value| {

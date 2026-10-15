@@ -657,6 +657,9 @@ pub struct PersonHit {
 pub struct StudioHit {
     #[schema(example = "Warner Bros. Pictures")]
     pub name: String,
+    /// Slug страницы студии (`GET /studios/{slug}`); `null` — страницы у студии ещё нет.
+    #[schema(example = "warner-bros-pictures")]
+    pub slug: Option<String>,
     pub count: i64,
 }
 
@@ -696,6 +699,10 @@ pub struct SearchQuery {
     /// Студия — точное название (без учёта регистра); подсказки — `GET /search/studios`.
     #[param(example = "Warner Bros. Pictures")]
     pub studio: Option<String>,
+    /// Slug студии (`GET /studios/{slug}`): её фильмы, без запроса названия. Неизвестный slug —
+    /// пустая выдача.
+    #[param(example = "warner-bros-pictures")]
+    pub studio_slug: Option<String>,
     /// Slug человека: сущности с его участием (в любой роли).
     #[param(example = "christopher-nolan")]
     pub person: Option<String>,

@@ -112,6 +112,9 @@ struct SearchDoc {
     /// `"роль:slug"` (`"director:christopher-nolan"`) — фильтр `person` + `role`.
     people: Vec<String>,
     credits: Vec<String>,
+    /// Slug'и страниц студий из `studios` (по названиям `metadata.studios`): фильтр
+    /// `studio_slug`. Студии без строки в `studios` здесь нет.
+    studio_slugs: Vec<String>,
 }
 
 /// Участники сущности для документа.
@@ -122,12 +125,18 @@ struct Cast {
 }
 
 impl SearchDoc {
-    fn new(entity: Entity, tags: Vec<String>, ratings: Option<RatingStats>, cast: Cast) -> Self {
+    fn new(
+        entity: Entity,
+        tags: Vec<String>,
+        ratings: Option<RatingStats>,
+        cast: Cast,
+        studio_slugs: &HashMap<String, String>,
+    ) -> Self {
         let ratings = ratings.unwrap_or(RatingStats {
             average: None,
             count: 0,
         });
-        let studios = entity.metadata["studios"]
+        let studios: Vec<String> = entity.metadata["studios"]
             .as_array()
             .map(|studios| {
                 studios
@@ -137,6 +146,10 @@ impl SearchDoc {
                     .collect()
             })
             .unwrap_or_default();
+        let studio_slugs = studios
+            .iter()
+            .filter_map(|name| studio_slugs.get(name).cloned())
+            .collect();
         Self {
             id: entity.id,
             kind: entity.kind,
@@ -159,6 +172,7 @@ impl SearchDoc {
             nexus_rating_avg: ratings.average,
             people: cast.people,
             credits: cast.credits,
+            studio_slugs,
         }
     }
 }
@@ -174,6 +188,7 @@ fn entity_settings() -> Value {
         "searchableAttributes": ["title", "original_title", "studios"],
         "filterableAttributes": [
             "kind", "tags", "year", "slug", "studios", "release_ts", "people", "credits",
+            "studio_slugs",
         ],
         "sortableAttributes": [
             "rank_score", "popularity", "quality", "release_ts", "title",
@@ -222,8 +237,8 @@ pub(crate) async fn search_exact(
     Ok((response, count["totalHits"].as_i64().unwrap_or(0)))
 }
 
-/// Документы пачки сущностей: строки уже прочитаны, теги, оценки Nexus и участники — по
-/// запросу на пачку.
+/// Документы пачки сущностей: строки уже прочитаны, теги, оценки Nexus, участники и slug'и
+/// студий — по запросу на пачку.
 async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchDoc>, BoxError> {
     let ids: Vec<Uuid> = entities.iter().map(|e| e.id).collect();
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
@@ -257,6 +272,19 @@ async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchD
     .bind(&ids)
     .fetch_all(db)
     .await?;
+    let names: Vec<String> = entities
+        .iter()
+        .flat_map(|entity| crate::studios::names_of(&entity.metadata))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let studio_slugs: HashMap<String, String> =
+        sqlx::query_as("SELECT name, slug FROM studios WHERE name = ANY($1)")
+            .bind(&names)
+            .fetch_all(db)
+            .await?
+            .into_iter()
+            .collect();
     let mut casts: HashMap<Uuid, Cast> = HashMap::new();
     for (id, slug, role) in rows {
         let cast = casts.entry(id).or_default();
@@ -271,7 +299,7 @@ async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchD
             let tags = tags.remove(&entity.id).unwrap_or_default();
             let ratings = ratings.remove(&entity.id);
             let cast = casts.remove(&entity.id).unwrap_or_default();
-            SearchDoc::new(entity, tags, ratings, cast)
+            SearchDoc::new(entity, tags, ratings, cast, &studio_slugs)
         })
         .collect())
 }
@@ -1148,6 +1176,11 @@ fn filters_of(query: &SearchQuery) -> AppResult<Vec<String>> {
         }
         filters.push(format!("studios = {}", filter_string(studio)));
     }
+    if let Some(studio) = &query.studio_slug {
+        // Проверенный slug безопасно подставлять в строку фильтра.
+        validate::slug("studio_slug", studio)?;
+        filters.push(format!("studio_slugs = \"{studio}\""));
+    }
     match (&query.person, &query.role) {
         (None, Some(_)) => {
             return Err(AppError::BadRequest("role requires person".into()));
@@ -1210,18 +1243,23 @@ pub async fn studios(
             return Err(unavailable());
         }
     };
-    let hits = response["facetHits"]
+    let hits: Vec<(String, i64)> = response["facetHits"]
         .as_array()
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .take(limit)
+        .filter_map(|hit| Some((hit["value"].as_str()?.to_string(), hit["count"].as_i64()?)))
+        .collect();
+    // Slug'и страниц студий — одним запросом на ответ.
+    let names: Vec<String> = hits.iter().map(|(name, _)| name.clone()).collect();
+    let refs = crate::studios::refs(&state.db, &names).await?;
     Ok(Json(
         hits.into_iter()
-            .take(limit)
-            .filter_map(|hit| {
-                Some(StudioHit {
-                    name: hit["value"].as_str()?.to_string(),
-                    count: hit["count"].as_i64()?,
-                })
+            .map(|(name, count)| StudioHit {
+                slug: refs.get(&name).map(|r| r.slug.clone()),
+                name,
+                count,
             })
             .collect(),
     ))

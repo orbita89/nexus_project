@@ -2709,6 +2709,16 @@
             "example": "Warner Bros. Pictures"
           },
           {
+            "name": "studio_slug",
+            "in": "query",
+            "description": "Slug студии (`GET /studios/{slug}`): её фильмы, без запроса названия. Неизвестный slug —\nпустая выдача.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "warner-bros-pictures"
+          },
+          {
             "name": "person",
             "in": "query",
             "description": "Slug человека: сущности с его участием (в любой роли).",
@@ -5444,6 +5454,14 @@
           "name": {
             "type": "string",
             "example": "Warner Bros. Pictures"
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Slug страницы студии (`GET /studios/{slug}`); `null` — страницы у студии ещё нет.",
+            "example": "warner-bros-pictures"
           }
         }
       },

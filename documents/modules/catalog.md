@@ -349,6 +349,7 @@ Tantivy, [«Холодный архив»](#холодный-архив-)); зд
 | `year` | `year = 2001` | 1–9998; вместе с `year_from`/`year_to` — 400 |
 | `year_from`, `year_to` | `year 2000 TO 2010` (включительно), одна граница — `year >= …` / `year <= …` | 1–9998; `from > to` — 400 |
 | `studio` | `studios = "<название>"` — точное, без учёта регистра (так сравнивает Meilisearch), любая из студий | 1–200 символов после trim; `\` и `"` экранируются |
+| `studio_slug` | `studio_slugs = "<slug>"` — студия по slug страницы `/studios/{slug}` (2026-10-15); неизвестный — пусто | slug, иначе 400 |
 | `person` | `people = "<slug>"` — человек в титрах в любой роли (2026-10-15) | slug, иначе 400 |
 | `person` + `role` | `credits = "<role>:<slug>"` — человек именно в этой роли | `person` — slug, `role` — `a-z`/`_`; `role` без `person` — 400 |
 
@@ -359,12 +360,9 @@ Tantivy, [«Холодный архив»](#холодный-архив-)); зд
 
 **Подсказки студий** `GET /search/studios?q=&kind=&limit=` — facet search Meilisearch
 (`POST /indexes/entities/facet-search`, `facetName: studios`): по части названия с опечатками, без
-`q` — самые частые (`faceting.sortFacetValuesBy.studios = count`). Ответ `[{name, count}]`, `name` —
-значение для `studio`.
-
-**Фильтр по людям (план):** добавить в документ участников (например `credits: ["director:<slug>",
-"actor:<slug>"]`, filterable) и заменить заглушку в `filters_of` на `credits = "<role>:<slug>"`
-(без роли — поле `people`). Перестройка станет дольше (2,75 млн титров) — нужен замер.
+`q` — самые частые (`faceting.sortFacetValuesBy.studios = count`). Ответ `[{name, slug, count}]`,
+`name` — значение для `studio`, `slug` — страница студии и значение для `studio_slug` (из `studios`
+одним запросом на ответ, `studios::refs`; `null` — строки студии ещё нет, 2026-10-15).
 
 Источник правды — PostgreSQL, индекс производный:
 
@@ -411,11 +409,14 @@ Meilisearch считал и листал только 1000: `total` был 1000,
 `popularity`, `quality` (сортировки), `imdb_rating`, `imdb_votes`, `release_status` (выдача),
 `nexus_ratings_count`, `nexus_rating_avg` (оценки Nexus из `entity_ratings`; без оценок — `0` и
 `null`; сортировки `popular`/`rating`, 2026-10-15), `people`, `credits` (участники, фильтр
-`person`/`role`, 2026-10-15).
+`person`/`role`, 2026-10-15), `studio_slugs` (slug'и строк `studios` по названиям
+`metadata.studios`, одним запросом на пачку; фильтр `studio_slug`, 2026-10-15; slug студии не
+меняется, а `studios::sync` идёт до документов — в перестройке перед `fill`, в `publish::run` перед
+индексом).
 Настройки (`entity_settings`): `searchableAttributes` — `title`, `original_title`, `studios`;
 `filterableAttributes` — `kind`, `tags`, `year`, `slug`, `studios`, `release_ts`;
 `sortableAttributes` — `rank_score`, `popularity`, `quality`, `release_ts`, `title`,
-`nexus_ratings_count`, `nexus_rating_avg`; в `filterableAttributes` также `people`, `credits`;
+`nexus_ratings_count`, `nexus_rating_avg`; в `filterableAttributes` также `people`, `credits`, `studio_slugs`;
 `faceting.sortFacetValuesBy` — `studios: count`; `pagination.maxTotalHits` — 500000. Настройки ставятся на теневой индекс при
 перестройке: после выкладки фильтры `studio`/диапазон/`new` работают, когда пройдёт перестройка
 (при старте — в фоне). Карточки (`card`), описания,
@@ -500,6 +501,8 @@ curl -s 'localhost:7700/tasks?limit=10' -H "$KEY" | jq                        # 
   `details_fetched_at` и есть `tmdb_id` — `GET {TMDB_API_URL}/company/{id}` (`enrich::tmdb_get`,
   таймаут 8 с): поля сохраняются (пустые не затирают старые), 404 — запоминается; нет ключа или TMDB
   не ответил — страница из того, что есть, попытка при следующем открытии.
+- **Фильмы студии в поиске** — `GET /search?studio_slug=<slug>` (один запрос со страницы студии,
+  без запроса названия), подсказки `GET /search/studios` отдают `slug` (2026-10-15).
 - **Фильмы студии** — `GET /entities?studio=<slug>` (и `/admin/entities?studio=`): фильтр
   `e.metadata @> {"studios": [name]}` вдобавок к остальным, все сортировки и пагинация; неизвестный
   slug — пустая страница.
@@ -884,9 +887,9 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/archive/search` | Поиск по холодному архиву (Tantivy): `q` (1–200 символов, все слова в `title` или `orig_title`; синтаксис Tantivy разбирается снисходительно), `limit` 1–20 (20), `offset` 0–1000 (0) → `Page<ArchiveDoc>` `{items, total, limit, offset}` (`total` — всего найдено, `Count`); `ArchiveDoc`: `slug`, `title`, `original_title`, `kind`, `tmdb_id`, `release_date`, `popularity`, `cover_url` (`null` — нет постера). Публичный. На сайте — второй блок выдачи после `GET /search` (чекбокс «Архив», по умолчанию включён). 400 — пустой/длинный `q`, `limit`/`offset` вне диапазона; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/entities/{slug}` | Фильм из архива для его страницы (только чтение): `ArchiveDoc` (название, оригинальное название, дата, постер). Публичный. 404 — нет в архиве или неверный slug (фильм мог вернуться на сайт — `GET /entities/{slug}`); 503 — архив недоступен |
 | POST | `/archive/entities/{slug}/restore` | Открыли архивную страницу — вернуть фильм на сайт со всеми данными TMDB ([«Возврат из архива открытием страницы»](#возврат-из-архива-открытием-страницы-)) → 201 `EntityDetail`; уже на сайте → 200 `EntityDetail`. Публичный. 404 — нет ни в архиве, ни на сайте; 409 `kept_in_archive` (убран админом) / `not_restorable` (не фильм TMDB); 429 — лимит `ARCHIVE_RESTORE_PER_HOUR` (`Retry-After`); 503 `restore_unavailable` (нет ключа TMDB, лимит 0) / `tmdb_unavailable` (TMDB не ответил; фильм в архиве) / архив недоступен |
-| GET | `/search` | Весь поиск сайта, Meilisearch, по видимым: `q` (название, оригинальное, студии; пустой — все), фильтры `kind`, `tag`, `year` (ровно) или `year_from`/`year_to` (диапазон включительно), `studio` (точное название, без учёта регистра), `person` (slug, в любой роли) и `person`+`role` (в этой роли) ([«Поиск»](#поиск)). По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb; `new` (вышедшие, новые сверху), `soon` (будущие, ближайшие сверху), `title` (без значения — в конце), `popular` (больше оценок Nexus, затем новее), `rating` (средняя оценка Nexus, затем число оценок, затем новее; без оценок — в конце; оценки доезжают до индекса за ~1 мин); другое значение — 400. `total` — точное число совпадений (до 500000), листается весь результат. 400 — `year` вместе с диапазоном, `year_from > year_to`, год вне 1–9998, пустая/длинная (>200) студия, `role` без `person`, неверный slug тега/человека |
+| GET | `/search` | Весь поиск сайта, Meilisearch, по видимым: `q` (название, оригинальное, студии; пустой — все), фильтры `kind`, `tag`, `year` (ровно) или `year_from`/`year_to` (диапазон включительно), `studio` (точное название, без учёта регистра), `studio_slug` (slug студии), `person` (slug, в любой роли) и `person`+`role` (в этой роли) ([«Поиск»](#поиск)). По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb; `new` (вышедшие, новые сверху), `soon` (будущие, ближайшие сверху), `title` (без значения — в конце), `popular` (больше оценок Nexus, затем новее), `rating` (средняя оценка Nexus, затем число оценок, затем новее; без оценок — в конце; оценки доезжают до индекса за ~1 мин); другое значение — 400. `total` — точное число совпадений (до 500000), листается весь результат. 400 — `year` вместе с диапазоном, `year_from > year_to`, год вне 1–9998, пустая/длинная (>200) студия, `role` без `person`, неверный slug тега/человека |
 | GET | `/search/people` | Поиск людей, Meilisearch, индекс `people` ([«Поиск людей»](#поиск-людей-)): `q` (имя по-русски или латиницей, опечатки, начало слова; до 300 символов; пустой — самые известные), `known_for` (основная роль: `actor`, `director`, …), `limit` 1–100 (20), `offset` → `Page<PersonHit>` (`total` точный): `id`, `slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `known_for`. Ранжирование — качество совпадения, затем известность (`person_stats.fame`). 400 — длинный `q`, `known_for` не `a-z`/`_`; 503 — Meilisearch недоступен; индекса нет — пустая страница |
-| GET | `/search/studios` | Подсказки для фильтра `studio` (facet search Meilisearch): `q` — часть названия, опечатки допустимы (пустой — самые частые), `kind`, `limit` 1–50 (10) → `[{"name", "count"}]`. 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` |
+| GET | `/search/studios` | Подсказки для фильтра `studio` (facet search Meilisearch): `q` — часть названия, опечатки допустимы (пустой — самые частые), `kind`, `limit` 1–50 (10) → `[{"name", "slug", "count"}]` (`slug` — страница студии, значение для `studio_slug`; `null` — страницы нет). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` |
 
 **`related`** в карточке — одна лента для карусели: `[{...EntitySummary, "relation": "prequel"|"sequel"|"remake"}, ...]`, хронологически по `release_date` (без даты — в конце, затем `position`, затем заголовок), пусто — `[]`. Сиквелы, ремейки и приквелы идут **в одной полосе**, тип связи — у каждой карточки. Связи — в самой карточке, а не отдельным запросом: карточка — статика фронтенда, они попадают в HTML.
 
