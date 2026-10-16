@@ -123,6 +123,36 @@ pub struct BookMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = json!(["Пустыню снимали в Иордании и ОАЭ."]))]
     pub trivia: Option<Vec<String>>,
+    /// Источник LibGen: пишет `nexus books import` (`catalog::books`). Сохранение без поля его
+    /// удаляет — повторный импорт тогда создаст книгу заново.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub libgen: Option<LibgenSource>,
+}
+
+/// Файлы книги в LibGen (форматы, сканы) и ключ произведения, по которому импорт их объединяет.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LibgenSource {
+    /// Нормализованные название и авторы: `мастер и маргарита|булгаков михаил афанасьевич`.
+    /// 1–1000 символов.
+    pub work: String,
+    /// 1–200 файлов, md5 без повторов.
+    pub files: Vec<LibgenFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LibgenFile {
+    /// md5 файла, 32 hex в нижнем регистре.
+    #[schema(example = "0123456789abcdef0123456789abcdef")]
+    pub md5: String,
+    /// `fb2`, `epub`, `pdf`, `djvu`…: до 20 символов.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "fb2")]
+    pub extension: Option<String>,
+    /// `ID` строки дампа LibGen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
 }
 
 /// Поля игры.
@@ -320,6 +350,7 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             m.publisher = text("publisher", m.publisher, MAX_TEXT)?;
             m.awards = awards(m.awards)?;
             m.trivia = trivia(m.trivia)?;
+            m.libgen = m.libgen.map(libgen).transpose()?;
             to_value(m)
         }
         EntityKind::Game => {
@@ -432,6 +463,43 @@ fn awards(values: Option<Vec<Award>>) -> AppResult<Option<Vec<Award>>> {
             ..award
         })
     })
+}
+
+/// Пределы `metadata.libgen`: столько файлов у книги и длина ключа произведения.
+pub const MAX_LIBGEN_FILES: usize = 200;
+const MAX_LIBGEN_WORK: usize = 1000;
+
+fn libgen(source: LibgenSource) -> AppResult<LibgenSource> {
+    let work = item("libgen.work", source.work, MAX_LIBGEN_WORK)?;
+    if source.files.is_empty() || source.files.len() > MAX_LIBGEN_FILES {
+        return Err(bad(format!(
+            "metadata.libgen.files must have 1-{MAX_LIBGEN_FILES} items"
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for file in &source.files {
+        let md5_ok = file.md5.len() == 32
+            && file
+                .md5
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !md5_ok {
+            return Err(bad(
+                "metadata.libgen.files: md5 must be 32 lowercase hex chars",
+            ));
+        }
+        if !seen.insert(file.md5.as_str()) {
+            return Err(bad("metadata.libgen.files: duplicate md5"));
+        }
+        if file
+            .extension
+            .as_ref()
+            .is_some_and(|e| e.is_empty() || e.chars().count() > 20)
+        {
+            return Err(bad("metadata.libgen.files: extension must be 1-20 chars"));
+        }
+    }
+    Ok(LibgenSource { work, ..source })
 }
 
 fn countries(values: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> {
@@ -731,5 +799,18 @@ mod tests {
         assert_eq!(ok("080442957x").unwrap(), json!({ "isbn": "080442957X" }));
         assert!(ok("9780441013594").is_err());
         assert!(ok("12345").is_err());
+    }
+
+    #[test]
+    fn book_libgen_source_is_checked() {
+        let book = |libgen: Value| validate(EntityKind::Book, json!({ "libgen": libgen }));
+        let md5 = "0123456789abcdef0123456789abcdef";
+        let ok = json!({ "work": "w", "files": [{ "md5": md5, "extension": "fb2", "id": 1 }] });
+        assert_eq!(book(ok.clone()).unwrap(), json!({ "libgen": ok }));
+        assert!(book(json!({ "work": "w", "files": [] })).is_err());
+        assert!(book(json!({ "work": "", "files": [{ "md5": md5 }] })).is_err());
+        assert!(book(json!({ "work": "w", "files": [{ "md5": md5.to_uppercase() }] })).is_err());
+        assert!(book(json!({ "work": "w", "files": [{ "md5": md5 }, { "md5": md5 }] })).is_err());
+        assert!(book(json!({ "work": "w", "files": [{ "md5": md5, "url": "x" }] })).is_err());
     }
 }

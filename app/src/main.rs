@@ -1,6 +1,7 @@
 //! Точка входа: конфиг, логирование, БД, миграции, фоновые задачи, HTTP-сервер.
 //! `nexus media fill|check` — разовая команда вместо сервера: постеры и трейлеры каталога.
 //! `nexus archive dump|build` — горячий слой каталога и холодный архив (`catalog::archive`).
+//! `nexus books import` — метаданные русских книг из SQL-дампа LibGen (`catalog::books`).
 
 use shared::mail::Mailer;
 use shared::{db, telemetry, AppState, Config};
@@ -36,6 +37,13 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!(e))?;
         print!("{report}");
         // Повторное удаление карточек из Redis (см. shared::cache) — до выхода процесса.
+        state.cache.wait_pending().await;
+        return Ok(());
+    }
+
+    if args.first().map(String::as_str) == Some("books") {
+        let options = books_options(&args[1..]).map_err(anyhow::Error::msg)?;
+        run_books(&state, &options).await?;
         state.cache.wait_pending().await;
         return Ok(());
     }
@@ -130,6 +138,59 @@ fn archive_command(args: &[String]) -> Result<ArchiveCommand, String> {
         }
         _ => Err(ARCHIVE_USAGE.into()),
     }
+}
+
+const BOOKS_USAGE: &str = "usage: nexus books import --dump FILE.sql[.gz] [--table updated|fiction] [--batch-size N] [--limit N]";
+
+/// Аргументы `nexus books import ...`.
+fn books_options(args: &[String]) -> Result<catalog::books::ImportOptions, String> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let ["import", rest @ ..] = &args[..] else {
+        return Err(BOOKS_USAGE.into());
+    };
+    let mut dump = None;
+    let mut options = catalog::books::ImportOptions::new(std::path::PathBuf::new());
+    let mut rest = rest.iter();
+    let number = |value: Option<&&str>| -> Result<usize, String> {
+        value
+            .and_then(|v| v.parse().ok())
+            .filter(|n| *n > 0)
+            .ok_or_else(|| BOOKS_USAGE.to_string())
+    };
+    while let Some(arg) = rest.next() {
+        match *arg {
+            "--dump" => dump = Some(rest.next().ok_or(BOOKS_USAGE)?.into()),
+            "--table" => options.table = rest.next().ok_or(BOOKS_USAGE)?.to_string(),
+            "--batch-size" => options.batch_size = number(rest.next())?,
+            "--limit" => options.limit = Some(number(rest.next())? as u64),
+            _ => return Err(BOOKS_USAGE.into()),
+        }
+    }
+    options.dump = dump.ok_or(BOOKS_USAGE)?;
+    Ok(options)
+}
+
+/// Импорт книг, затем перестройка поиска (новые книги и авторы — в Meilisearch).
+async fn run_books(
+    state: &AppState,
+    options: &catalog::books::ImportOptions,
+) -> anyhow::Result<()> {
+    let report = catalog::books::import(state, options)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    print!("{report}");
+    if state.search.is_enabled() && report.books_created > 0 {
+        let options = catalog::search::ReindexOptions {
+            force: false,
+            revalidate: true,
+        };
+        let reporter = catalog::jobs::Reporter::silent();
+        let result = catalog::search::reindex(state, options, &reporter)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("search reindexed: {result:?}");
+    }
+    Ok(())
 }
 
 /// `dump` — дамп из БД и архива; `build` — горячий слой и архив из дампа, затем перестройка

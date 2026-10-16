@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod archive;
+pub mod books;
 pub mod directory;
 pub mod entities;
 pub mod jobs;

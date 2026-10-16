@@ -81,6 +81,7 @@ TMDB с русским названием (121 371) и 500 самых попул
 | `book` | `isbn` | ISBN-10 или ISBN-13 с проверкой контрольной цифры, хранится без дефисов |
 | | `pages` | целое 1–100000 |
 | | `publisher` | строка до 200 символов |
+| | `libgen` | источник LibGen (пишет `nexus books import`): `{"work": "мастер и маргарита\|булгаков михаил афанасьевич", "files": [{"md5": "<32 hex, нижний регистр>", "extension": "fb2", "id": 1}]}`. `work` 1–1000 символов (ключ произведения), `files` 1–200 (`MAX_LIBGEN_FILES`) без повторов md5, `extension` 1–20 символов, `id` — `ID` строки дампа. Сохранение `metadata` без `libgen` его удаляет — повторный импорт создаст книгу заново |
 | `game` | `platforms` | до 30 строк по 50 символов: `["pc", "ps5", "switch"]` |
 | | `developer`, `publisher` | строки до 200 символов |
 | | `trailers` | как у `movie` |
@@ -329,6 +330,19 @@ Tantivy, [«Холодный архив»](#холодный-архив-)); зд
 поверх строки сборки); удаляют промоушен и сборка (фильм вернулся в горячий слой; `manual` сборка не
 возвращает). `merge.py` пропускает фильмы с этими id (в логе — `archived`).
 
+### Книги из LibGen — без своих таблиц ✅
+
+Миграция `20261026100000_books_libgen.sql` — только индексы. Книга — строка `entities`
+(`kind = 'book'`), источник — `metadata.libgen` (см. поля `metadata` выше), авторы — `people` +
+`entity_credits` (`role = 'author'`). Пишет `nexus books import` ([«Книги из LibGen»](#книги-из-libgen-)).
+Сами файлы книг не хранятся, ссылок на скачивание нет.
+
+| Индекс | Определение | Зачем |
+|---|---|---|
+| `entities_libgen_md5_idx` | GIN `jsonb_path_query_array(metadata, '$.libgen.files[*].md5')` WHERE `kind = 'book'` | известные md5 пачки: `... ?| $md5s` |
+| `entities_libgen_work_idx` | `(metadata #>> '{libgen,work}')` WHERE `kind = 'book' AND metadata ? 'libgen'` | другой файл того же произведения находит книгу |
+| `people_name_key_idx` | `(replace(lower(full_name), 'ё', 'е'))` | автор из дампа находит человека, уже записанного автором (`entity_credits.role = 'author'`) |
+
 </tables>
 
 <deps>
@@ -345,6 +359,7 @@ Tantivy, [«Холодный архив»](#холодный-архив-)); зд
 | TMDB API (возврат из архива) | `reqwest`; `TMDB_API_KEY` (v3 — параметром, v4 JWT — заголовком), `TMDB_API_URL` (по умолчанию `https://api.themoviedb.org/3`, в тестах — подставной сервер), `ARCHIVE_RESTORE_PER_HOUR` (300; `governor`); `unicode-normalization` — slug людей | `archive::enrich`: полные данные фильма при `restore` и `promote` |
 | Холодный архив | `tantivy` 0.26 (`mmap`, `lz4-compression`, без zstd) + `csv`; каталог `ARCHIVE_DIR` (`Config::archive_dir`, dev/prod — том `archivedata` в `/var/lib/nexus/archive`; не задан — эндпоинты архива 503) | `catalog::archive`: индекс, поиск, страница фильма, промоушен, `nexus archive dump\|build` |
 | `InterestDirectory::entities_in_use` (реализует `social`) | `shared::directory`, `state.interests` | какие сущности нужны пользователям (интересы, рецензии, коллекции, отметки, реакции, темы форума) — их сборка архива не удаляет |
+| Дамп LibGen | локальный файл (`flate2` для `.gz`); обложки — `https://libgen.is/covers/` (`books::COVERS`) | `nexus books import` |
 | Блокировки перестройки | Redis (`shared::cache`): `nexus:v1:catalog:reindex-running`, `nexus:v1:catalog:reindex-lock` | «одна перестройка за раз» между инстансами |
 
 </deps>
@@ -883,6 +898,42 @@ Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `cov
 дампа — модульные тесты `archive::pipeline`; индекс старой схемы и `recreate` —
 `archive::index::legacy_index_is_read_and_recreated`.
 
+## Книги из LibGen ✅
+
+`nexus books import --dump FILE.sql[.gz] [--table updated|fiction] [--batch-size 2000] [--limit N]`
+(`catalog::books`, CLI — `app/src/main.rs`; dev: `docker exec nexus-app cargo run -q -p nexus -- books import ...`).
+Метаданные русских книг из официального SQL-дампа LibGen (`libgen.sql` → таблица `updated`,
+`fiction.sql` → `fiction`); файлы не скачиваются.
+
+- Чтение потоковое (`books::dump::Statements`: операторы по `;` вне строк и комментариев, в памяти
+  один `INSERT`), `.gz` — `MultiGzDecoder`; разбор файла — в `spawn_blocking`, запись — пачками,
+  каждая в своей транзакции (прерванный импорт продолжается повторным запуском).
+- Колонки — по `CREATE TABLE` из дампа или списку колонок `INSERT`; без них — порядок `updated`
+  (`books::UPDATED_COLUMNS`). Обязательные: `Title`, `Language`, `MD5`.
+- Отбор: `Language` содержит `ru`/`rus`/`Russian`/`Русский` (и в списке `Russian, English`),
+  `Visible` пустой, md5 — 32 hex, название непустое. `--limit` — по отобранным строкам.
+- Книга (`entities`, `kind = 'book'`, `active = true`): `title` (≤ 300), `release_date` = 1 января
+  года (первые 4 цифры `Year`, 1000–2100, иначе `NULL`), `cover_url` = `https://libgen.is/covers/`
+  + `Coverurl` (абсолютный URL — как есть), `metadata` через `metadata::validate` (`pages` — ведущие
+  цифры `Pages`, `publisher`, `isbn` — первый корректный из `Identifier`; невалидное отбрасывается).
+  slug — `slugify(title)` (≤ 80), занят — `-<fnv8(work_key)>`, без букв — `book-<hash>`.
+- Всё о книге — в `entities`: md5, формат и `ID` файла — `metadata.libgen.files`, ключ произведения
+  (нормализованные название и авторы, `Book::work_key`) — `metadata.libgen.work`. Файлы одного
+  произведения — одна книга; карточку задаёт первый файл, следующие (в том числе при повторном
+  импорте) дописываются в `files` (до 200). Известные md5 пропускаются; остальные поля созданной
+  карточки импорт не меняет.
+- Авторы — `people` (`full_name`, slug как у книги, без букв — `author-<hash>`) + `entity_credits`
+  (`role = 'author'`, `position` — порядок в `Author`, до 5). `Author` делится по `,`/`;`;
+  «Фамилия, Имя Отчество» и «Фамилия, И.О.» — один автор. Тот же автор в следующих книгах —
+  человек с тем же именем (`replace(lower(full_name), 'ё', 'е')`), уже записанный автором
+  (`role = 'author'`); актёры и режиссёры TMDB с таким именем не подхватываются.
+- Событий нет (как у `nexus archive`). Если поиск включён и книги созданы — `search::reindex`
+  (`force: false`, `revalidate: true`): книги и авторы попадают в Meilisearch.
+- Отчёт: строки дампа, русские, известные, книги, файлы, люди, титры.
+
+Тесты: `app/tests/books.rs` — `imports_russian_books_with_authors_and_is_idempotent`,
+`limit_and_dump_without_schema`; разбор дампа и полей — модульные тесты `books::dump`, `books`.
+
 </logic>
 
 <endpoints>
@@ -1315,7 +1366,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `lib.rs` | Роутер |
 | `models.rs` | `EntityKind`, DTO; `Page<T>` реэкспортируется из `shared::pagination` |
 | `directory.rs` | `PgEntityDirectory`: справочник сущностей для других модулей (`shared::directory::EntityDirectory`) |
-| `metadata.rs` | Схемы `metadata` по типам и их проверка |
+| `metadata.rs` | Схемы `metadata` по типам и их проверка (у книг — `LibgenSource`, `LibgenFile`) |
 | `validate.rs` | Проверка slug, строк, URL, ролей; UNIQUE → 409 |
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
 | `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), `GET /search` (фильтры — `filters_of`), `GET /search/studios` |
@@ -1326,6 +1377,8 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `archive/index.rs` | Индекс Tantivy архива: схема (с `cover_url`), открытие по каталогу (и старой схемы), `recreate`, поиск с `offset` и `Count`, `get`, `upsert`/`delete`, писатель 50 МБ |
 | `archive/pipeline.rs` | `dump` (TSV из БД и архива, с `cover_url`), `build` (Top-K без `archived_tmdb.manual`, маршрутизация, удаление из PostgreSQL; `--fresh` — `recreate`), `delete_entities` (и для ручного переноса) |
 | `archive/mod.rs` | `GET /archive/search`, `GET /archive/entities/{slug}`, `POST /archive/entities/{slug}/restore` (лимит, `IN_FLIGHT`), `POST /admin/archive/promote/{slug}`, `POST /admin/archive/demote`, `archive::open` |
+| `books/mod.rs` | `nexus books import`: отбор русских строк, `Book`, `work_key`, авторы, запись пачками (`entities` с `metadata.libgen`, `people`, `entity_credits`) |
+| `books/dump.rs` | Потоковый разбор дампа MySQL: `Statements`, `create_table`, `insert` |
 | `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
 | `publish.rs` | Публикация правки: `Touched`, поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |
@@ -1333,7 +1386,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `media/` | `nexus media` (`media/pick.rs` — фильтр Rutube) |
 
 Тесты — `app/tests/catalog.rs` (данные — `app/tests/fixtures/catalog.sql`), архив —
-`app/tests/archive.rs` (свой каталог индекса на тест). CLI `nexus archive` — `app/src/main.rs`. Тесты поиска ходят в
+`app/tests/archive.rs` (свой каталог индекса на тест). CLI `nexus archive` и `nexus books` — `app/src/main.rs`, импорт книг — `app/tests/books.rs`. Тесты поиска ходят в
 настоящий Meilisearch из `make up` (в CI — сервис в `ci.yml`), у каждого теста свой префикс
 индексов. Остальные тесты идут с выключенным поиском. Живые проверки — `http/catalog.http`.
 

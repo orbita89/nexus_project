@@ -3304,6 +3304,17 @@
             "description": "ISBN-10 или ISBN-13, дефисы допустимы. Хранится без дефисов.",
             "example": "9780441013593"
           },
+          "libgen": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LibgenSource",
+                "description": "Источник LibGen: пишет `nexus books import` (`catalog::books`). Сохранение без поля его\nудаляет — повторный импорт тогда создаст книгу заново."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "pages": {
             "type": [
               "integer",
@@ -4108,6 +4119,58 @@
           }
         ],
         "description": "Событие потока."
+      },
+      "LibgenFile": {
+        "type": "object",
+        "required": [
+          "md5"
+        ],
+        "properties": {
+          "extension": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`fb2`, `epub`, `pdf`, `djvu`…: до 20 символов.",
+            "example": "fb2"
+          },
+          "id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`ID` строки дампа LibGen."
+          },
+          "md5": {
+            "type": "string",
+            "description": "md5 файла, 32 hex в нижнем регистре.",
+            "example": "0123456789abcdef0123456789abcdef"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LibgenSource": {
+        "type": "object",
+        "description": "Файлы книги в LibGen (форматы, сканы) и ключ произведения, по которому импорт их объединяет.",
+        "required": [
+          "work",
+          "files"
+        ],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LibgenFile"
+            },
+            "description": "1–200 файлов, md5 без повторов."
+          },
+          "work": {
+            "type": "string",
+            "description": "Нормализованные название и авторы: `мастер и маргарита|булгаков михаил афанасьевич`.\n1–1000 символов."
+          }
+        },
+        "additionalProperties": false
       },
       "Metadata": {
         "oneOf": [

@@ -108,20 +108,9 @@ struct SearchDoc {
     /// `rating` (средняя; без оценок — `null`, в конце).
     nexus_ratings_count: i64,
     nexus_rating_avg: Option<f64>,
-    /// Участники из титров (`entity_credits`): slug'и всех людей — фильтр `person`, и пары
-    /// `"роль:slug"` (`"director:christopher-nolan"`) — фильтр `person` + `role`.
-    people: Vec<String>,
-    credits: Vec<String>,
     /// Slug'и страниц студий из `studios` (по названиям `metadata.studios`): фильтр
     /// `studio_slug`. Студии без строки в `studios` здесь нет.
     studio_slugs: Vec<String>,
-}
-
-/// Участники сущности для документа.
-#[derive(Default)]
-struct Cast {
-    people: Vec<String>,
-    credits: Vec<String>,
 }
 
 impl SearchDoc {
@@ -129,7 +118,6 @@ impl SearchDoc {
         entity: Entity,
         tags: Vec<String>,
         ratings: Option<RatingStats>,
-        cast: Cast,
         studio_slugs: &HashMap<String, String>,
     ) -> Self {
         let ratings = ratings.unwrap_or(RatingStats {
@@ -170,8 +158,6 @@ impl SearchDoc {
             release_status: entity.release_status,
             nexus_ratings_count: ratings.count,
             nexus_rating_avg: ratings.average,
-            people: cast.people,
-            credits: cast.credits,
             studio_slugs,
         }
     }
@@ -187,8 +173,7 @@ fn entity_settings() -> Value {
         // Порядок задаёт вес: совпадение в названии важнее, чем в студии.
         "searchableAttributes": ["title", "original_title", "studios"],
         "filterableAttributes": [
-            "kind", "tags", "year", "slug", "studios", "release_ts", "people", "credits",
-            "studio_slugs",
+            "kind", "tags", "year", "slug", "studios", "release_ts", "studio_slugs",
         ],
         "sortableAttributes": [
             "rank_score", "popularity", "quality", "release_ts", "title",
@@ -237,8 +222,8 @@ pub(crate) async fn search_exact(
     Ok((response, count["totalHits"].as_i64().unwrap_or(0)))
 }
 
-/// Документы пачки сущностей: строки уже прочитаны, теги, оценки Nexus, участники и slug'и
-/// студий — по запросу на пачку.
+/// Документы пачки сущностей: строки уже прочитаны, теги, оценки Nexus и slug'и студий — по
+/// запросу на пачку. Участников в документе нет: фильтр `person` — через [`person_filter`].
 async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchDoc>, BoxError> {
     let ids: Vec<Uuid> = entities.iter().map(|e| e.id).collect();
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
@@ -262,16 +247,6 @@ async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchD
         .into_iter()
         .map(|(id, average, count)| (id, RatingStats { average, count }))
         .collect();
-    // Сортировка — чтобы дубли (человек в двух ролях, актёр в двух ролях персонажей) шли
-    // подряд и снимались `dedup`.
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT DISTINCT ec.entity_id, p.slug, ec.role
-         FROM entity_credits ec JOIN people p ON p.id = ec.person_id
-         WHERE ec.entity_id = ANY($1) ORDER BY ec.entity_id, p.slug, ec.role",
-    )
-    .bind(&ids)
-    .fetch_all(db)
-    .await?;
     let names: Vec<String> = entities
         .iter()
         .flat_map(|entity| crate::studios::names_of(&entity.metadata))
@@ -285,21 +260,12 @@ async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchD
             .await?
             .into_iter()
             .collect();
-    let mut casts: HashMap<Uuid, Cast> = HashMap::new();
-    for (id, slug, role) in rows {
-        let cast = casts.entry(id).or_default();
-        cast.credits.push(format!("{role}:{slug}"));
-        if cast.people.last() != Some(&slug) {
-            cast.people.push(slug);
-        }
-    }
     Ok(entities
         .into_iter()
         .map(|entity| {
             let tags = tags.remove(&entity.id).unwrap_or_default();
             let ratings = ratings.remove(&entity.id);
-            let cast = casts.remove(&entity.id).unwrap_or_default();
-            SearchDoc::new(entity, tags, ratings, cast, &studio_slugs)
+            SearchDoc::new(entity, tags, ratings, &studio_slugs)
         })
         .collect())
 }
@@ -1069,6 +1035,20 @@ pub async fn search(
 ) -> AppResult<Json<Page<EntitySummary>>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
     let mut filters = filters_of(&query)?;
+    if let Some(person) = &query.person {
+        match person_filter(&state.db, person, query.role.as_deref()).await? {
+            Some(filter) => filters.push(filter),
+            // Ни одной работы (или нет такого человека) — искать нечего.
+            None => {
+                return Ok(Json(Page {
+                    items: Vec::new(),
+                    total: 0,
+                    limit,
+                    offset,
+                }))
+            }
+        }
+    }
     let sort = match query.sort {
         Some(SearchSort::Recommended) => Some("rank_score:desc"),
         Some(SearchSort::Trending) => Some("popularity:desc"),
@@ -1241,19 +1221,41 @@ fn filters_of(query: &SearchQuery) -> AppResult<Vec<String>> {
             return Err(AppError::BadRequest("role requires person".into()));
         }
         (Some(person), role) => {
-            // Проверенные slug (a-z, 0-9, `-`) и роль (a-z, `_`) безопасно подставлять в строку.
+            // Сам фильтр — в [`person_filter`] (нужна БД).
             validate::slug("person", person)?;
-            match role {
-                Some(role) => {
-                    let role = validate::role(role)?;
-                    filters.push(format!("credits = \"{role}:{person}\""));
-                }
-                None => filters.push(format!("people = \"{person}\"")),
+            if let Some(role) = role {
+                validate::role(role)?;
             }
         }
         (None, None) => {}
     }
     Ok(filters)
+}
+
+/// Фильтр `person` (+ `role`): работы человека — из `entity_credits` (индекс по `person_id`), в
+/// Meilisearch — `slug IN [...]`; список, сортировка, `total` и пагинация остаются в индексе.
+/// Участников в документе нет: 2,75 млн значений фильтра делали перестройку часовой (Meilisearch
+/// не успевал индексировать пачки). `None` — работ нет. `person` и `role` уже проверены.
+async fn person_filter(
+    db: &sqlx::PgPool,
+    person: &str,
+    role: Option<&str>,
+) -> sqlx::Result<Option<String>> {
+    let slugs: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT e.slug FROM people p
+         JOIN entity_credits ec ON ec.person_id = p.id
+         JOIN entities e ON e.id = ec.entity_id
+         WHERE p.slug = $1 AND ($2::text IS NULL OR ec.role = $2) AND {VISIBLE}"
+    ))
+    .bind(person)
+    .bind(role.map(str::trim))
+    .fetch_all(db)
+    .await?;
+    if slugs.is_empty() {
+        return Ok(None);
+    }
+    let quoted: Vec<String> = slugs.iter().map(|slug| filter_string(slug)).collect();
+    Ok(Some(format!("slug IN [{}]", quoted.join(", "))))
 }
 
 /// Строка в кавычках для фильтра Meilisearch: `\` и `"` экранируются.
@@ -1452,14 +1454,8 @@ mod tests {
             let error = filters_of(&query(bad.clone())).unwrap_err();
             assert_eq!(error.code(), "validation", "{bad}");
         }
-        assert_eq!(
-            ok(json!({ "person": "christopher-nolan" })),
-            [r#"people = "christopher-nolan""#]
-        );
-        assert_eq!(
-            ok(json!({ "person": "christopher-nolan", "role": "director" })),
-            [r#"credits = "director:christopher-nolan""#]
-        );
+        // Фильтр по людям собирает `person_filter` (по БД), здесь — только проверка.
+        assert!(ok(json!({ "person": "christopher-nolan", "role": "director" })).is_empty());
     }
 
     #[test]
