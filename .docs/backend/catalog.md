@@ -930,6 +930,33 @@ Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `cov
 - Событий нет (как у `nexus archive`). Если поиск включён и книги созданы — `search::reindex`
   (`force: false`, `revalidate: true`): книги и авторы попадают в Meilisearch.
 - Отчёт: строки дампа, русские, известные, книги, файлы, люди, титры.
+- Второй источник — Google Books API: `scripts/books-import/google_books.py` (`requests`,
+  `psycopg2`; `DATABASE_URL`, `GOOGLE_BOOKS_API_KEY`). Запросы `subject:`/`inauthor:` (пример —
+  `DEFAULT_QUERIES`), `langRestrict=ru` и `volumeInfo.language == 'ru'`, страницы по 40
+  (`startIndex`), пауза `--delay`, повторы на 429/5xx. Пишет те же `entities` (`kind = 'book'`:
+  `title`, `description` без HTML, `release_date`, `cover_url` — первая настоящая обложка из
+  кандидатов: Google `books/content?vid=ISBN…&zoom=1` (быстро; только JPEG, не заглушка —
+  `GOOGLE_PLACEHOLDERS`), `imageLinks`, Open Library `/b/id/` (через archive.org, секунды),
+  Open Library `/b/isbn/…?default=false`; ни одной — `NULL`; `metadata` `isbn`/`pages`/`publisher`) и
+  авторов (`people` + `entity_credits`, поиск как выше). Без `metadata.libgen`. Дубликат — книга с
+  тем же `metadata.isbn` (`@>`, GIN `entities_metadata_gin`), в том числе из LibGen; без ISBN —
+  пропуск. Источник `--source google|openlibrary` (Open Library — без ключа: `search.json`,
+  `language=rus`, название кириллицей, ISBN сначала 978-5…, переводчики-латиница отбрасываются, если
+  есть автор кириллицей), `--limit N`. `--fix-covers` — заново выбрать обложку у записанных книг с
+  ISBN без обложки или с обложкой Open Library (найти не удалось — старая остаётся; поиск
+  Google Books API по `isbn:` с ключом; Open Library — одна попытка, 10 с).
+  `--require-cover` — книги без обложки не записываются. Ключ — `GOOGLE_BOOKS_API_KEY` из
+  окружения или строки `infra/.env`. Затем `scripts/reindex-search.sh`.
+- Обложки книг — через кэш nginx (`infra/nginx.conf`, `infra/covers_cache.conf`, том
+  `coverscache`, до 2 ГБ, 90 дней): `cover_url = {PUBLIC_URL}/covers/ol/...` →
+  `https://covers.openlibrary.org/...` (два перенаправления на archive.org проходит nginx —
+  `recursive_error_pages`), `{PUBLIC_URL}/covers/google/...` → `https://books.google.com/...`.
+  Хосты — переменными (недоступный источник не мешает старту gateway); `proxy_cache_lock`,
+  `proxy_cache_use_stale` при ошибках источника; ответ — `X-Cache-Status`, `Cache-Control:
+  public, max-age=2592000`. Скрипт проверяет кандидатов сразу через кэш (проверка = прогрев);
+  `--proxy-covers` переводит уже записанные внешние ссылки на кэш и прогревает его (замер:
+  первая загрузка 1,15 с в среднем, из кэша — 0,00 с). Ссылка абсолютная — её принимает
+  `validate::url` в админке.
 
 Тесты: `app/tests/books.rs` — `imports_russian_books_with_authors_and_is_idempotent`,
 `limit_and_dump_without_schema`; разбор дампа и полей — модульные тесты `books::dump`, `books`.

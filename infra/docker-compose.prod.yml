@@ -115,10 +115,14 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./proxy_common.conf:/etc/nginx/proxy_common.conf:ro
+      - ./covers_cache.conf:/etc/nginx/covers_cache.conf:ro
+      # Кэш обложек книг (`/covers/...`, nginx.conf).
+      - coverscache:/var/cache/nginx/covers
     depends_on:
       - app
 
 volumes:
+  coverscache:
   pgdata18:
   redisdata:
   meilidata:
