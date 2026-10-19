@@ -57,6 +57,7 @@ Restate both diffs in your final answer. Code change without the two doc updates
 - Migrations `migrations/*.sql` run at startup: NEVER edit an applied file — add a new one.
 - Conventions: PK `uuid DEFAULT uuidv7()`; `created_at`/`updated_at timestamptz` (`updated_at` via trigger `set_updated_at()`); `ON DELETE CASCADE`; public ids in URLs are slugs; counters kept by triggers or in the same transaction; partial indexes for hot lists.
 - SQL respects boundaries too: no JOIN to foreign tables.
+- Flat First (catalog): no new M2M tables for descriptive catalog data (genres, authors, countries…) — `text[]`/`jsonb` in the `entities` row; external ids → `entities.external_ids`; every catalog change bumps `entities.updated_at`. Roadmap: `.docs/backend/tantivy-roadmap.md`.
 
 ## 7. Tests, commands
 

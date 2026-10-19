@@ -10,3 +10,5 @@ Modular monolith: Rust, axum 0.8, sqlx 0.8, PostgreSQL 18. Rules: `../CLAUDE.md`
 | realtime | `/ws` | WebSocket channels, event delivery | realtime.md |
 
 Foreign reads → `shared::directory`; notifications → `shared::events::EventBus`.
+
+Future (план, не спринт): перенос каталога в Tantivy и правило Flat First — `tantivy-roadmap.md`.
