@@ -16,13 +16,13 @@
 //!
 //! `fresh` — архив пересоздаётся пустым в текущей схеме ([`Archive::recreate`]).
 //!
-//! `defer_delete` (первичная раскладка): строки не удаляются, только `archived_tmdb`; удаление —
-//! `scripts/archive-purge.sql`.
+//! `defer_delete` (первичная раскладка): строки PostgreSQL, ушедшие в архив, не удаляются;
+//! удаление — `scripts/archive-purge.sql` по списку `nexus archive ids`.
 //!
 //! Не трогаются: `active_manual` (сиды, ручные правки), сущности без TMDB (их нет в дампе) и
 //! сущности с пользовательскими данными (`InterestDirectory::entities_in_use`). Перенесённые в
-//! архив вручную (`archived_tmdb.manual`, `POST /admin/archive/demote`) в горячий слой не
-//! попадают.
+//! архив вручную (поле `manual` документа, `POST /admin/archive/demote`) в горячий слой не
+//! попадают и при пересборке архива флаг сохраняют.
 
 use super::index::{Archive, ArchiveDoc, ArchiveError};
 use crate::models::EntityKind;
@@ -78,7 +78,7 @@ struct Row {
 }
 
 impl Row {
-    fn doc(&self) -> ArchiveDoc {
+    fn doc(&self, manual: &HashSet<i32>) -> ArchiveDoc {
         ArchiveDoc {
             slug: self.slug.clone(),
             title: self.title.clone(),
@@ -88,6 +88,7 @@ impl Row {
             release_date: self.release_date,
             popularity: self.popularity,
             cover_url: self.cover_url.clone(),
+            manual: self.tmdb_id.is_some_and(|id| manual.contains(&id)),
         }
     }
 }
@@ -200,12 +201,11 @@ pub async fn dump(
 
     let mut rows = sqlx::query_as::<_, DbRow>(
         "SELECT e.slug, e.title, e.original_title, e.kind,
-                COALESCE(s.tmdb_popularity, 0) AS popularity, t.tmdb_id, e.release_date,
-                e.cover_url
+                COALESCE(s.tmdb_popularity, 0) AS popularity,
+                (e.external_ids ->> 'tmdb')::int AS tmdb_id, e.release_date, e.cover_url
          FROM entities e
-         JOIN entity_tmdb t ON t.entity_id = e.id
          LEFT JOIN entity_stats s ON s.entity_id = e.id
-         WHERE NOT e.active_manual",
+         WHERE e.external_ids ? 'tmdb' AND NOT e.active_manual",
     )
     .fetch(&state.db);
     let mut batch = Vec::with_capacity(BATCH);
@@ -429,8 +429,7 @@ pub struct BuildOptions {
     pub foreign: usize,
     /// Пересоздать архив пустым в текущей схеме (иначе документы заменяются по slug).
     pub fresh: bool,
-    /// Не удалять из PostgreSQL ушедшие в архив строки, только записать их TMDB id в
-    /// `archived_tmdb`: первичная раскладка миллиона строк построчно (FK-каскады, триггеры
+    /// Не удалять из PostgreSQL ушедшие в архив строки: первичная раскладка миллиона строк построчно (FK-каскады, триггеры
     /// счётчиков) идёт часами, её доделывает `scripts/archive-purge.sql` одним проходом.
     pub defer_delete: bool,
 }
@@ -556,10 +555,7 @@ fn route(
 /// Строки PostgreSQL, ожидающие коммита архива перед удалением.
 #[derive(Default)]
 struct Pending {
-    /// Строки PostgreSQL и их TMDB id.
-    rows: Vec<(Uuid, Option<i32>)>,
-    /// TMDB id документов, которых в PostgreSQL не было.
-    tmdb_ids: Vec<i32>,
+    rows: Vec<Uuid>,
 }
 
 /// Собирает горячий слой и архив из дампа `path`.
@@ -571,14 +567,17 @@ pub async fn build(
 ) -> Result<BuildReport, BoxError> {
     let mut report = BuildReport::default();
 
-    // Проход 1.
-    let manual: HashSet<i32> = sqlx::query_scalar("SELECT tmdb_id FROM archived_tmdb WHERE manual")
-        .fetch_all(&state.db)
-        .await?
-        .into_iter()
-        .collect();
+    // Проход 1. Перенесённые вручную — из архива до `fresh`: флаг переживает пересоздание.
+    let manual: Arc<HashSet<i32>> = {
+        let archive = archive.clone();
+        Arc::new(
+            tokio::task::spawn_blocking(move || archive.tmdb_ids())
+                .await??
+                .1,
+        )
+    };
     let (elite, invalid, kept_cold) = {
-        let path = path.to_path_buf();
+        let (path, manual) = (path.to_path_buf(), manual.clone());
         tokio::task::spawn_blocking(move || elite(&path, options.ru, options.foreign, &manual))
             .await??
     };
@@ -618,7 +617,7 @@ pub async fn build(
                     .await?;
                 }
                 Batch::Cold(rows) => {
-                    let docs = route_cold(state, rows, &mut pending, &mut report).await?;
+                    let docs = route_cold(state, rows, &manual, &mut pending, &mut report).await?;
                     since_commit += docs.archive.len() as u64;
                     report.archived += docs.archive.len() as u64;
                     with_writer(&mut writer, &archive, move |archive, w| {
@@ -682,7 +681,7 @@ async fn commit(writer: &mut Option<IndexWriter>, archive: &Arc<Archive>) -> Res
 }
 
 /// Горячая пачка: существующие строки включаются, отсутствующие (вернулись из архива)
-/// вставляются с постером, связью TMDB и popularity. `active_manual` не трогается.
+/// вставляются с постером, TMDB id (`external_ids`) и popularity. `active_manual` не трогается.
 async fn upsert_hot(
     state: &AppState,
     rows: &[Row],
@@ -690,10 +689,13 @@ async fn upsert_hot(
 ) -> Result<(), BoxError> {
     let mut tx = state.db.begin().await?;
     let changed: Vec<(Uuid, String, bool)> = sqlx::query_as(
-        "INSERT INTO entities (kind, slug, title, original_title, release_date, cover_url, active)
-         SELECT u.k::entity_kind, u.s, u.t, u.o, u.d, u.c, true
-         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::date[], $6::text[])
-             AS u(k, s, t, o, d, c)
+        "INSERT INTO entities (kind, slug, title, original_title, release_date, cover_url,
+                               external_ids, active)
+         SELECT u.k::entity_kind, u.s, u.t, u.o, u.d, u.c,
+                CASE WHEN u.tm IS NULL THEN '{}' ELSE jsonb_build_object('tmdb', u.tm) END, true
+         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::date[], $6::text[],
+                     $7::int[])
+             AS u(k, s, t, o, d, c, tm)
          ON CONFLICT (slug) DO UPDATE SET active = true
              WHERE NOT entities.active AND NOT entities.active_manual
          RETURNING id, slug, (xmax = 0) AS inserted",
@@ -712,11 +714,12 @@ async fn upsert_hot(
             .map(|r| r.cover_url.as_deref())
             .collect::<Vec<_>>(),
     )
+    .bind(rows.iter().map(|r| r.tmdb_id).collect::<Vec<_>>())
     .fetch_all(&mut *tx)
     .await?;
 
     let by_slug: HashMap<&str, &Row> = rows.iter().map(|r| (r.slug.as_str(), r)).collect();
-    let (mut ids, mut tmdb_ids, mut popularity) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut ids, mut popularity) = (Vec::new(), Vec::new());
     for (id, slug, inserted) in &changed {
         if !inserted {
             report.activated += 1;
@@ -724,22 +727,13 @@ async fn upsert_hot(
         }
         report.inserted += 1;
         if let Some(row) = by_slug.get(slug.as_str()) {
-            if let Some(tmdb_id) = row.tmdb_id {
+            if row.tmdb_id.is_some() {
                 ids.push(*id);
-                tmdb_ids.push(tmdb_id);
                 popularity.push(row.popularity);
             }
         }
     }
     if !ids.is_empty() {
-        sqlx::query(
-            "INSERT INTO entity_tmdb (entity_id, tmdb_id)
-             SELECT * FROM unnest($1::uuid[], $2::int[]) ON CONFLICT DO NOTHING",
-        )
-        .bind(&ids)
-        .bind(&tmdb_ids)
-        .execute(&mut *tx)
-        .await?;
         sqlx::query(
             "INSERT INTO entity_stats (entity_id, tmdb_popularity)
              SELECT * FROM unnest($1::uuid[], $2::float8[]) ON CONFLICT DO NOTHING",
@@ -749,11 +743,6 @@ async fn upsert_hot(
         .execute(&mut *tx)
         .await?;
     }
-    let returned: Vec<i32> = rows.iter().filter_map(|r| r.tmdb_id).collect();
-    sqlx::query("DELETE FROM archived_tmdb WHERE tmdb_id = ANY($1)")
-        .bind(&returned)
-        .execute(&mut *tx)
-        .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -769,6 +758,7 @@ struct ColdDocs {
 async fn route_cold(
     state: &AppState,
     rows: Vec<Row>,
+    manual: &HashSet<i32>,
     pending: &mut Pending,
     report: &mut BuildReport,
 ) -> Result<ColdDocs, BoxError> {
@@ -800,20 +790,17 @@ async fn route_cold(
                 docs.keep.push(row.slug);
             }
             Some((id, false)) => {
-                pending.rows.push((*id, row.tmdb_id));
-                docs.archive.push(row.doc());
+                pending.rows.push(*id);
+                docs.archive.push(row.doc(manual));
             }
-            None => {
-                pending.tmdb_ids.extend(row.tmdb_id);
-                docs.archive.push(row.doc());
-            }
+            None => docs.archive.push(row.doc(manual)),
         }
     }
     Ok(docs)
 }
 
-/// Удаляет из PostgreSQL строки, уже закоммиченные в архив, пачками по [`BATCH`]; запоминает их
-/// TMDB id (импорт пропустит) и удаляет людей, у которых не осталось работ.
+/// Удаляет из PostgreSQL строки, уже закоммиченные в архив, пачками по [`BATCH`], и людей, у
+/// которых не осталось работ. Импорт их не вернёт: TMDB id есть в архиве (`nexus archive ids`).
 async fn delete_archived(
     state: &AppState,
     pending: &mut Pending,
@@ -821,41 +808,46 @@ async fn delete_archived(
     report: &mut BuildReport,
 ) -> Result<(), BoxError> {
     let pending = std::mem::take(pending);
-    for chunk in pending.tmdb_ids.chunks(BATCH) {
-        archive_tmdb_ids(&state.db, chunk).await?;
-    }
     if options.defer_delete {
-        let tmdb_ids: Vec<i32> = pending.rows.iter().filter_map(|(_, t)| *t).collect();
-        for chunk in tmdb_ids.chunks(BATCH) {
-            archive_tmdb_ids(&state.db, chunk).await?;
-        }
         report.deferred += pending.rows.len() as u64;
         return Ok(());
     }
     for chunk in pending.rows.chunks(BATCH) {
         // Повторная проверка: пока шла пачка, фильм могли добавить в коллекцию. Такой остаётся
         // и в архиве — его уберёт следующая сборка.
-        let all: Vec<Uuid> = chunk.iter().map(|(id, _)| *id).collect();
-        let in_use = state.interests.entities_in_use(&all).await?;
-        let (ids, tmdb_ids): (Vec<Uuid>, Vec<Option<i32>>) = chunk
+        let in_use = state.interests.entities_in_use(chunk).await?;
+        let ids: Vec<Uuid> = chunk
             .iter()
-            .filter(|(id, _)| !in_use.contains(id))
+            .filter(|id| !in_use.contains(id))
             .copied()
-            .unzip();
+            .collect();
         report.kept_in_use += (chunk.len() - ids.len()) as u64;
 
         let mut tx = state.db.begin().await?;
-        archive_tmdb_ids(
-            &mut *tx,
-            &tmdb_ids.into_iter().flatten().collect::<Vec<_>>(),
-        )
-        .await?;
         let (deleted, people_deleted) = delete_entities(&mut tx, &ids, false).await?;
         tx.commit().await?;
         report.deleted += deleted;
         report.people_deleted += people_deleted;
     }
     Ok(())
+}
+
+/// Пометить документы архива перенесёнными вручную (`nexus archive keep-cold`): сборка горячего
+/// слоя их не вернёт. Возвращает число помеченных (нет такого TMDB id в архиве — пропуск).
+pub fn mark_manual(archive: &Archive, tmdb_ids: &[i32]) -> Result<u64, ArchiveError> {
+    let mut writer = archive.writer()?;
+    let mut marked = 0;
+    for &tmdb_id in tmdb_ids {
+        if let Some(mut doc) = archive.by_tmdb(tmdb_id)? {
+            doc.manual = true;
+            archive.upsert(&writer, &doc)?;
+            marked += 1;
+        }
+    }
+    writer.commit()?;
+    drop(writer);
+    archive.reload()?;
+    Ok(marked)
 }
 
 /// Удаляет строки `entities`, ушедшие в архив (каскадом титры, теги, статистика, связки
@@ -888,16 +880,6 @@ pub(crate) async fn delete_entities(
     .await?
     .rows_affected();
     Ok((deleted, people_deleted))
-}
-
-async fn archive_tmdb_ids(db: impl sqlx::PgExecutor<'_>, tmdb_ids: &[i32]) -> sqlx::Result<()> {
-    sqlx::query(
-        "INSERT INTO archived_tmdb (tmdb_id) SELECT unnest($1::int[]) ON CONFLICT DO NOTHING",
-    )
-    .bind(tmdb_ids)
-    .execute(db)
-    .await?;
-    Ok(())
 }
 
 #[cfg(test)]

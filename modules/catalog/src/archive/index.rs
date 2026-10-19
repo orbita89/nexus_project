@@ -12,7 +12,7 @@
 use crate::models::EntityKind;
 use chrono::NaiveDate;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tantivy::collector::Count;
@@ -39,7 +39,7 @@ const POPULARITY: &str = "popularity";
 /// Поля схемы. `id` — slug (публичный id сущности, как в URL), `STRING`: один терм целиком,
 /// по нему точный поиск и `delete_term`. `orig_title` хранится (в ТЗ — только индекс): без него
 /// промоушен вернул бы фильм в каталог без оригинального названия. `cover_url` (постер) —
-/// последнее поле, добавлено 2026-10-14.
+/// добавлено 2026-10-14, `manual` (перенесён в архив вручную) — последнее, 2026-10-19.
 #[derive(Debug, Clone, Copy)]
 struct Fields {
     id: Field,
@@ -50,7 +50,11 @@ struct Fields {
     release_date: Field,
     popularity: Field,
     cover_url: Field,
+    manual: Field,
 }
+
+/// Поле ручного переноса в архив: его нет в индексах, собранных до 2026-10-19.
+const MANUAL: &str = "manual";
 
 /// Поле постера: его нет в индексах, собранных до 2026-10-14.
 const COVER_URL: &str = "cover_url";
@@ -68,6 +72,9 @@ fn schema() -> (Schema, Fields) {
         popularity: builder.add_f64_field(POPULARITY, STORED | FAST),
         // URL постера (как `entities.cover_url`), только хранится.
         cover_url: builder.add_text_field(COVER_URL, STORED),
+        // 1 — админ перенёс фильм в архив (`POST /admin/archive/demote`): сборка горячего слоя
+        // его не вернёт, возврат открытием страницы запрещён.
+        manual: builder.add_u64_field(MANUAL, INDEXED | STORED),
     };
     (builder.build(), fields)
 }
@@ -94,6 +101,9 @@ pub struct ArchiveDoc {
     /// Постер (TMDB `w780`, как `cover_url` карточки); нет у TMDB — `null`.
     #[schema(example = "https://image.tmdb.org/t/p/w780/kQJ1ZJ3ws3ixsNLE4d3rAc2Yh0C.jpg")]
     pub cover_url: Option<String>,
+    /// Перенесён в архив вручную (`POST /admin/archive/demote`).
+    #[serde(skip)]
+    pub manual: bool,
 }
 
 /// Ошибка индекса. `Busy` — писатель занят (идёт сборка или другой промоушен).
@@ -131,6 +141,8 @@ pub struct Archive {
     fields: Fields,
     /// Схема индекса на диске знает `cover_url` (иначе постер при записи не сохраняется).
     covers: bool,
+    /// Схема знает `manual` (иначе флаг ручного переноса не сохраняется).
+    manuals: bool,
 }
 
 /// Открытые индексы по каталогу (в тестах у каждого свой).
@@ -167,6 +179,7 @@ impl Archive {
         Ok(Self {
             dir: dir.to_path_buf(),
             covers: index.schema().get_field(COVER_URL).is_ok(),
+            manuals: index.schema().get_field(MANUAL).is_ok(),
             index,
             reader,
             fields,
@@ -206,9 +219,44 @@ impl Archive {
         Ok(archive)
     }
 
-    /// Схема индекса на диске — текущая (есть `cover_url`).
+    /// Схема индекса на диске — текущая (есть `cover_url` и `manual`).
     pub fn is_current(&self) -> bool {
-        self.covers
+        self.covers && self.manuals
+    }
+
+    /// TMDB id всех документов архива и перенесённых вручную: импорт их пропускает, сборка
+    /// горячего слоя вручную перенесённые не возвращает. Проход по хранилищу документов.
+    pub fn tmdb_ids(&self) -> Result<(HashSet<i32>, HashSet<i32>), ArchiveError> {
+        let (mut all, mut manual) = (HashSet::new(), HashSet::new());
+        let searcher = self.reader.searcher();
+        for segment in searcher.segment_readers() {
+            let store = segment.get_store_reader(1).map_err(TantivyError::from)?;
+            for doc in store.iter::<TantivyDocument>(segment.alive_bitset()) {
+                let doc = self.parse(&doc?);
+                if let Some(id) = doc.tmdb_id {
+                    all.insert(id);
+                    if doc.manual {
+                        manual.insert(id);
+                    }
+                }
+            }
+        }
+        Ok((all, manual))
+    }
+
+    /// Документ по TMDB id (первый найденный).
+    pub fn by_tmdb(&self, tmdb_id: i32) -> Result<Option<ArchiveDoc>, ArchiveError> {
+        let Ok(id) = u64::try_from(tmdb_id) else {
+            return Ok(None);
+        };
+        let searcher = self.reader.searcher();
+        let term = Term::from_field_u64(self.fields.tmdb_id, id);
+        let query = TermQuery::new(term, IndexRecordOption::Basic);
+        let top = searcher.search(&query, &TopDocs::with_limit(1).order_by_score())?;
+        match top.first() {
+            Some((_, address)) => Ok(Some(self.parse(&searcher.doc(*address)?))),
+            None => Ok(None),
+        }
     }
 
     /// Документов в архиве (без удалённых).
@@ -312,6 +360,9 @@ impl Archive {
         if let (true, Some(cover_url)) = (self.covers, &doc.cover_url) {
             document.add_text(fields.cover_url, cover_url);
         }
+        if self.manuals && doc.manual {
+            document.add_u64(fields.manual, 1);
+        }
         writer.add_document(document)?;
         Ok(())
     }
@@ -356,6 +407,10 @@ impl Archive {
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0),
             cover_url: text(fields.cover_url),
+            manual: doc
+                .get_first(fields.manual)
+                .and_then(|v| v.as_u64())
+                .is_some_and(|v| v == 1),
         }
     }
 }
@@ -388,6 +443,7 @@ mod tests {
             release_date: None,
             popularity: 1.0,
             cover_url: cover_url.map(str::to_owned),
+            manual: false,
         }
     }
 

@@ -166,7 +166,7 @@ pub async fn get(
 /// Вернуть фильм из архива на сайт. С `TMDB_API_KEY` — со всеми данными TMDB (описание,
 /// постер, титры, жанры, трейлеры; [`enrich`]), TMDB недоступен или ключа нет — «скелетом»:
 /// название, оригинальное название, дата выхода, постер. `active_manual` — сборка горячего слоя
-/// фильм не уберёт; пометка ручного переноса в архив снимается. Документ удаляется из архива,
+/// фильм не уберёт; пометка ручного переноса в архив снимается вместе с документом. Документ удаляется из архива,
 /// поиск сайта и статика обновляются.
 #[utoipa::path(
     post, operation_id = "archive_promote", path = "/admin/archive/promote/{slug}",
@@ -216,7 +216,8 @@ pub async fn promote(
         ))?;
     tx.commit().await?;
     remove_from_archive(&archive, writer, &slug).await;
-    if let Err(error) = crate::studios::sync(&state.db, Some(&[id])).await {
+    let companies = data.as_ref().map(enrich::companies).unwrap_or_default();
+    if let Err(error) = crate::studios::sync(&state.db, Some(&[id]), &companies).await {
         tracing::warn!(%error, "studios sync after promote failed");
     }
 
@@ -366,13 +367,7 @@ async fn restore_locked(
             AppError::Conflict("only TMDB films are restored".into()).with_code("not_restorable")
         );
     };
-    let manual: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM archived_tmdb WHERE tmdb_id = $1 AND manual)",
-    )
-    .bind(tmdb_id)
-    .fetch_one(&state.db)
-    .await?;
-    if manual {
+    if doc.manual {
         return Err(
             AppError::Conflict("the film was moved to the archive by an admin".into())
                 .with_code("kept_in_archive"),
@@ -416,7 +411,8 @@ async fn restore_locked(
     };
     tx.commit().await?;
     // Студии фильма — до карточки: в ней ссылки на их страницы.
-    if let Err(error) = crate::studios::sync(&state.db, Some(&[id])).await {
+    let companies = data.as_ref().map(enrich::companies).unwrap_or_default();
+    if let Err(error) = crate::studios::sync(&state.db, Some(&[id]), &companies).await {
         tracing::warn!(%error, "studios sync after restore failed");
     }
 
@@ -501,9 +497,8 @@ struct DemoteRow {
 
 /// Перенести ненужные фильмы с сайта в холодный архив: документ в Tantivy (название,
 /// оригинальное название, дата, постер, TMDB id, popularity), затем строка удаляется из
-/// PostgreSQL (каскадом титры, теги, статистика, полные данные TMDB; люди без других работ — тоже),
-/// TMDB id — в `archived_tmdb` с `manual`: сборка горячего слоя такой фильм не вернёт, импорт
-/// пропустит. Поиск сайта и статика обновляются. Вернуть — `POST /admin/archive/promote/{slug}`
+/// PostgreSQL (каскадом титры, теги, статистика; люди без других работ — тоже). Документ помечен
+/// `manual`: сборка горячего слоя такой фильм не вернёт, импорт пропустит (TMDB id есть в архиве). Поиск сайта и статика обновляются. Вернуть — `POST /admin/archive/promote/{slug}`
 /// («скелетом»: без описания, титров и жанров).
 ///
 /// Не переносятся (`skipped`): нет на сайте, без TMDB, с данными пользователей.
@@ -541,9 +536,8 @@ pub async fn demote(
 
     let rows: Vec<DemoteRow> = sqlx::query_as(
         "SELECT e.id, e.slug, e.kind, e.title, e.original_title, e.release_date, e.cover_url,
-                t.tmdb_id, s.tmdb_popularity AS popularity
+                (e.external_ids ->> 'tmdb')::int AS tmdb_id, s.tmdb_popularity AS popularity
          FROM entities e
-         LEFT JOIN entity_tmdb t ON t.entity_id = e.id
          LEFT JOIN entity_stats s ON s.entity_id = e.id
          WHERE e.slug = ANY($1)",
     )
@@ -593,6 +587,7 @@ pub async fn demote(
             release_date: row.release_date,
             popularity: row.popularity.unwrap_or(0.0),
             cover_url: row.cover_url.clone(),
+            manual: true,
         })
         .collect();
 
@@ -612,16 +607,8 @@ pub async fn demote(
         .await?
     };
 
-    let tmdb_ids: Vec<i32> = chosen.iter().filter_map(|r| r.tmdb_id).collect();
     let deleted = async {
         let mut tx = state.db.begin().await?;
-        sqlx::query(
-            "INSERT INTO archived_tmdb (tmdb_id, manual) SELECT unnest($1::int[]), true
-             ON CONFLICT (tmdb_id) DO UPDATE SET manual = true",
-        )
-        .bind(&tmdb_ids)
-        .execute(&mut *tx)
-        .await?;
         let counts = pipeline::delete_entities(&mut tx, &chosen_ids, true).await?;
         tx.commit().await?;
         Ok::<_, sqlx::Error>(counts)

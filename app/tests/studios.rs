@@ -123,23 +123,32 @@ async fn studio_pages_and_their_films(pool: PgPool) {
         r#"UPDATE entities SET metadata = metadata || '{"studios": ["Legendary Pictures", "Warner Bros. Pictures"]}'
            WHERE slug = 'dune-2021';
            UPDATE entities SET metadata = '{"studios": ["Legendary Pictures"]}' WHERE slug = 'dune-part-two-2024';
-           UPDATE entities SET metadata = '{"studios": ["HBO"]}' WHERE slug = 'no-date';
-           INSERT INTO entity_tmdb_data (entity_id, tmdb_id, data)
-           SELECT id, 438631, '{"production_companies": [
-               {"id": 923, "name": "Legendary Pictures", "logo_path": "/leg.png", "origin_country": "US"},
-               {"id": 174, "name": "Warner Bros. Pictures", "logo_path": "/wb.png", "origin_country": "US"}]}'
-           FROM entities WHERE slug = 'dune-2021';"#,
+           UPDATE entities SET metadata = '{"studios": ["HBO"]}' WHERE slug = 'no-date';"#,
     )
     .execute(&ctx.state.db)
     .await
     .unwrap();
 
+    let company = |id, name: &str, logo: &str| catalog::studios::Company {
+        name: name.into(),
+        tmdb_id: Some(id),
+        logo_path: Some(logo.into()),
+        origin_country: Some("US".into()),
+    };
+    let companies = [
+        company(923, "Legendary Pictures", "/leg.png"),
+        company(174, "Warner Bros. Pictures", "/wb.png"),
+    ];
     assert_eq!(
-        catalog::studios::sync(&ctx.state.db, None).await.unwrap(),
+        catalog::studios::sync(&ctx.state.db, None, &companies)
+            .await
+            .unwrap(),
         3
     );
     assert_eq!(
-        catalog::studios::sync(&ctx.state.db, None).await.unwrap(),
+        catalog::studios::sync(&ctx.state.db, None, &[])
+            .await
+            .unwrap(),
         0
     );
     let rows: Vec<(String, String, Option<i32>, Option<String>)> =

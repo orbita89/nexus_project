@@ -580,7 +580,7 @@ pub async fn reindex_locked(
     // 2. Все сущности пачками. Перед ними — студии для новых названий в `metadata.studios`.
     let started = report.start(Step::Fill);
     let studios_started = Instant::now();
-    match crate::studios::sync(&state.db, None).await {
+    match crate::studios::sync(&state.db, None, &[]).await {
         Ok(created) => {
             tracing::info!(created, elapsed = ?studios_started.elapsed(), "studios synced")
         }

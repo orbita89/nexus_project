@@ -1,5 +1,7 @@
 -- Массовое удаление из PostgreSQL фильмов, уже перенесённых в холодный архив
--- (`nexus archive build --defer-delete`): строки `entities`, чей TMDB id есть в `archived_tmdb`.
+-- (`nexus archive build --defer-delete`): строки `entities`, чей TMDB id есть в архиве. Список —
+-- `nexus archive ids` во временной таблице сессии `archive_ids (tmdb_id)`: её создаёт и заполняет
+-- запуск (ниже) до этого файла.
 --
 -- Зачем отдельно: построчное удаление миллиона строк — 15 FK-каскадов и триггер счётчиков на
 -- каждый из ~7 млн титров — идёт часами. Здесь всё set-based в одной транзакции: каскады и
@@ -11,8 +13,10 @@
 -- кладёт; проверка повторяется). Запись в каталог на время транзакции заблокирована
 -- (`EXCLUSIVE`), чтение идёт.
 --
--- Запуск: docker exec -i infra-postgres-1 psql -v ON_ERROR_STOP=1 -U nexus_user -d nexus_db \
---           < scripts/archive-purge.sql
+-- Запуск:
+--   { echo 'CREATE TEMP TABLE archive_ids (tmdb_id int PRIMARY KEY); COPY archive_ids FROM STDIN;'
+--     nexus archive ids; echo '\.'; cat scripts/archive-purge.sql; } |
+--   docker exec -i infra-postgres-1 psql -v ON_ERROR_STOP=1 -U nexus_user -d nexus_db
 -- Затем: VACUUM FULL (место на диске) и перестройка поиска.
 
 BEGIN;
@@ -22,9 +26,8 @@ LOCK TABLE entities, people IN EXCLUSIVE MODE;
 CREATE TEMP TABLE purge_entities ON COMMIT DROP AS
 SELECT e.id
 FROM entities e
-JOIN entity_tmdb t ON t.entity_id = e.id
-JOIN archived_tmdb a ON a.tmdb_id = t.tmdb_id
-WHERE NOT e.active_manual
+JOIN archive_ids a ON a.tmdb_id = (e.external_ids ->> 'tmdb')::int
+WHERE e.external_ids ? 'tmdb' AND NOT e.active_manual
   AND NOT EXISTS (SELECT 1 FROM user_interests x WHERE x.entity_id = e.id)
   AND NOT EXISTS (SELECT 1 FROM reviews x WHERE x.entity_id = e.id)
   AND NOT EXISTS (SELECT 1 FROM collection_items x WHERE x.entity_id = e.id)
@@ -42,7 +45,6 @@ FROM entity_credits c JOIN purge_entities d ON d.id = c.entity_id;
 DELETE FROM entity_credits x USING purge_entities d WHERE x.entity_id = d.id;
 DELETE FROM entity_tags x USING purge_entities d WHERE x.entity_id = d.id;
 DELETE FROM entity_stats x USING purge_entities d WHERE x.entity_id = d.id;
-DELETE FROM entity_tmdb x USING purge_entities d WHERE x.entity_id = d.id;
 DELETE FROM entity_ratings x USING purge_entities d WHERE x.entity_id = d.id;
 DELETE FROM entity_relations x USING purge_entities d WHERE x.from_id = d.id OR x.to_id = d.id;
 DO $$

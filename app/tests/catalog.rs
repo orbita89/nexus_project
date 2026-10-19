@@ -2583,10 +2583,11 @@ async fn set_stats(ctx: &Ctx, slug: &str, stats: Value) {
 async fn add_tmdb_movie(ctx: &Ctx, slug: &str, tmdb_id: i32, days: Option<i32>) {
     sqlx::query(
         "WITH e AS (
-             INSERT INTO entities (kind, slug, title, release_date)
-             VALUES ('movie', $1, $1, current_date + $3) RETURNING id
+             INSERT INTO entities (kind, slug, title, release_date, external_ids)
+             VALUES ('movie', $1, $1, current_date + $3, jsonb_build_object('tmdb', $2::int))
+             RETURNING id
          )
-         INSERT INTO entity_tmdb (entity_id, tmdb_id) SELECT id, $2 FROM e",
+         SELECT count(*) FROM e",
     )
     .bind(slug)
     .bind(tmdb_id)
@@ -2871,7 +2872,8 @@ impl Ctx {
 
     async fn link_tmdb(&self, slug: &str, tmdb_id: i32) {
         sqlx::query(
-            "INSERT INTO entity_tmdb (entity_id, tmdb_id) SELECT id, $2 FROM entities WHERE slug = $1",
+            "UPDATE entities SET external_ids = external_ids || jsonb_build_object('tmdb', $2::int)
+             WHERE slug = $1",
         )
         .bind(slug)
         .bind(tmdb_id)

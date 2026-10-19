@@ -130,11 +130,43 @@ impl Ctx {
         request(app, method, &format!("{CATALOG}{path}"), Some(body), token).await
     }
 
-    async fn archived_tmdb(&self) -> Vec<i32> {
-        sqlx::query_scalar("SELECT tmdb_id FROM archived_tmdb ORDER BY 1")
-            .fetch_all(&self.state.db)
+    /// TMDB id документов архива (с флагом ручного переноса — второй список).
+    fn archived_tmdb(&self) -> Vec<i32> {
+        self.archive_ids().0
+    }
+
+    /// `scripts/archive-purge.sql` со списком `nexus archive ids` в `archive_ids` (одна сессия).
+    async fn purge(&self) {
+        let mut conn = self.state.db.acquire().await.unwrap();
+        sqlx::query("CREATE TEMP TABLE archive_ids (tmdb_id int PRIMARY KEY)")
+            .execute(&mut *conn)
             .await
-            .unwrap()
+            .unwrap();
+        sqlx::query("INSERT INTO archive_ids SELECT unnest($1::int[])")
+            .bind(self.archived_tmdb())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../scripts/archive-purge.sql"))
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE archive_ids")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+
+    fn archive_ids(&self) -> (Vec<i32>, Vec<i32>) {
+        let archive = self.archive();
+        archive.reload().unwrap();
+        let (all, manual) = archive.tmdb_ids().unwrap();
+        let sorted = |set: std::collections::HashSet<i32>| {
+            let mut ids: Vec<i32> = set.into_iter().collect();
+            ids.sort_unstable();
+            ids
+        };
+        (sorted(all), sorted(manual))
     }
 
     /// Каталог: фильмы TMDB с popularity, ручной фильм, фильм в интересах пользователя и люди.
@@ -153,9 +185,10 @@ impl Ctx {
             sqlx::query(
                 "WITH e AS (
                      INSERT INTO entities (kind, slug, title, original_title, release_date,
-                                           active, active_manual)
-                     VALUES ('movie', $1, $2, $2 || ' (orig)', '2001-02-03', $5, $6) RETURNING id
-                 ), t AS (INSERT INTO entity_tmdb (entity_id, tmdb_id) SELECT id, $3 FROM e)
+                                           active, active_manual, external_ids)
+                     VALUES ('movie', $1, $2, $2 || ' (orig)', '2001-02-03', $5, $6,
+                             jsonb_build_object('tmdb', $3::int)) RETURNING id
+                 )
                  INSERT INTO entity_stats (entity_id, tmdb_popularity) SELECT id, $4 FROM e",
             )
             .bind(slug)
@@ -269,8 +302,8 @@ async fn build_splits_hot_layer_and_archive(pool: PgPool) {
         ["en-hit", "en-used", "manual-low", "ru-hit-1", "ru-new"]
     );
     let (active, tmdb_id, popularity, original): (bool, i32, f64, String) = sqlx::query_as(
-        "SELECT e.active, t.tmdb_id, s.tmdb_popularity, e.original_title FROM entities e
-         JOIN entity_tmdb t ON t.entity_id = e.id JOIN entity_stats s ON s.entity_id = e.id
+        "SELECT e.active, (e.external_ids ->> 'tmdb')::int, s.tmdb_popularity, e.original_title
+         FROM entities e JOIN entity_stats s ON s.entity_id = e.id
          WHERE e.slug = 'ru-new'",
     )
     .fetch_one(&ctx.state.db)
@@ -285,7 +318,7 @@ async fn build_splits_hot_layer_and_archive(pool: PgPool) {
         .await
         .unwrap();
     assert!(en_hit);
-    assert_eq!(ctx.archived_tmdb().await, [2, 3, 5, 9]);
+    assert_eq!(ctx.archived_tmdb(), [2, 3, 5, 9]);
     let people: Vec<String> = sqlx::query_scalar("SELECT slug FROM people ORDER BY slug")
         .fetch_all(&ctx.state.db)
         .await
@@ -393,12 +426,9 @@ async fn deferred_delete_and_purge_script(pool: PgPool) {
         (0, 3, 4)
     );
     assert_eq!(ctx.slugs().await.len(), 8, "nothing deleted yet");
-    assert_eq!(ctx.archived_tmdb().await, [2, 3, 5, 9]);
+    assert_eq!(ctx.archived_tmdb(), [2, 3, 5, 9]);
 
-    sqlx::raw_sql(include_str!("../../scripts/archive-purge.sql"))
-        .execute(&ctx.state.db)
-        .await
-        .unwrap();
+    ctx.purge().await;
     assert_eq!(
         ctx.slugs().await,
         ["en-hit", "en-used", "manual-low", "ru-hit-1", "ru-new"]
@@ -411,10 +441,7 @@ async fn deferred_delete_and_purge_script(pool: PgPool) {
     assert_eq!(ctx.counters().await, (1, 1, 1));
 
     // Повторный запуск ничего не находит.
-    sqlx::raw_sql(include_str!("../../scripts/archive-purge.sql"))
-        .execute(&ctx.state.db)
-        .await
-        .unwrap();
+    ctx.purge().await;
     assert_eq!(ctx.slugs().await.len(), 5);
 }
 
@@ -511,7 +538,7 @@ async fn promote_moves_film_from_archive_to_catalog(pool: PgPool) {
             .await
             .unwrap();
     assert!(manual, "hot-layer builds keep promoted films");
-    assert_eq!(ctx.archived_tmdb().await, [2, 5, 9]);
+    assert_eq!(ctx.archived_tmdb(), [2, 5, 9]);
     assert!(ctx.search("низкий").await.is_empty());
     assert_eq!(ctx.archive().len(), 3);
 
@@ -595,11 +622,7 @@ async fn demote_moves_films_to_archive_and_build_keeps_them_cold(pool: PgPool) {
         .await
         .unwrap();
     assert!(people.is_empty(), "'both' had no other works: {people:?}");
-    let manual: Vec<i32> =
-        sqlx::query_scalar("SELECT tmdb_id FROM archived_tmdb WHERE manual ORDER BY 1")
-            .fetch_all(&ctx.state.db)
-            .await
-            .unwrap();
+    let manual = ctx.archive_ids().1;
     assert_eq!(manual, [1, 7]);
     let page = ctx
         .send(Method::GET, "/archive/entities/ru-hit-1", None)
@@ -652,11 +675,7 @@ async fn demote_moves_films_to_archive_and_build_keeps_them_cold(pool: PgPool) {
         "{:?}",
         promoted.json()
     );
-    let manual: Vec<i32> =
-        sqlx::query_scalar("SELECT tmdb_id FROM archived_tmdb WHERE manual ORDER BY 1")
-            .fetch_all(&ctx.state.db)
-            .await
-            .unwrap();
+    let manual = ctx.archive_ids().1;
     assert_eq!(manual, [7]);
 }
 
@@ -813,13 +832,15 @@ async fn restore_on_open_brings_the_full_film_back(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(stats, (Some("tt0000003".into()), 3.5, 1200));
-    let raw: i64 = sqlx::query_scalar("SELECT count(*) FROM entity_tmdb_data WHERE tmdb_id = 3")
-        .fetch_one(&ctx.state.db)
-        .await
-        .unwrap();
-    assert_eq!(raw, 1);
+    let tmdb: Option<i32> = sqlx::query_scalar(
+        "SELECT (external_ids ->> 'tmdb')::int FROM entities WHERE slug = 'ru-low'",
+    )
+    .fetch_one(&ctx.state.db)
+    .await
+    .unwrap();
+    assert_eq!(tmdb, Some(3));
     assert!(ctx.archive().get("ru-low").unwrap().is_none());
-    assert!(!ctx.archived_tmdb().await.contains(&3));
+    assert!(!ctx.archived_tmdb().contains(&3));
     assert_eq!(
         ctx.send(Method::GET, "/entities/ru-low", None).await.status,
         StatusCode::OK

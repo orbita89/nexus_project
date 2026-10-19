@@ -164,7 +164,7 @@ pub async fn run(state: &AppState, touched: Touched, report: &Reporter) -> bool 
     let mut ok = true;
     // Новые названия студий в `metadata` — страницы студий (до ссылок в карточках и ISR).
     if !touched.entities.is_empty() {
-        if let Err(error) = crate::studios::sync(&state.db, Some(&touched.entities)).await {
+        if let Err(error) = crate::studios::sync(&state.db, Some(&touched.entities), &[]).await {
             tracing::warn!(%error, "studios sync after write failed");
         }
     }

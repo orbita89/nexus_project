@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Всё из TMDB для горячего слоя: полный ответ API по каждому фильму (и человеку) в БД.
 
-Фильмы — строки `entities` со связью `entity_tmdb` (горячий слой, ~120 тыс.; архив Tantivy не
+Фильмы — строки `entities` с `external_ids.tmdb` (горячий слой, ~120 тыс.; архив Tantivy не
 трогается). Для каждого — `GET /3/movie/{id}?language=ru-RU&append_to_response=<всё>`: титры
 целиком, возрастные рейтинги по странам, ключевые слова, переводы, альтернативные названия,
 картинки, видео, внешние id, где смотреть, рекомендации, похожие, рецензии TMDB, списки. Ответ
-целиком — в `entity_tmdb_data.data` (jsonb, lz4), затем раскладывается (TMDB — источник правды
-для горячего слоя):
+сразу раскладывается (TMDB — источник правды для горячего слоя), сырьё в БД не хранится:
 
 - `entities`: русское название (кириллицу не меняем на латиницу, если у TMDB нет перевода),
   оригинальное, описание, дата выхода, постер; `metadata` — `runtime_min`, `countries`, `studios`,
@@ -16,17 +15,21 @@
 - `entity_credits` заменяются: режиссёры, сценаристы, продюсеры, композиторы, операторы,
   монтажёры, затем **весь** актёрский состав по порядку TMDB; люди — по TMDB id
   (`catalog_import.people`), новые создаются (`slug` из имени, занят — `<slug>-<tmdb_id>`);
+- `studios`: новые компании (`production_companies`) — TMDB id, логотип, страна (названия без
+  студии потом заводит `catalog::studios::sync` без логотипа, если slug занят);
 - в конце — сиквелы по коллекциям TMDB (`belongs_to_collection`): соседние по дате выхода фильмы
   одной коллекции → `entity_relations` (`sequel`), если связи ещё нет.
 
 `--people` — второй этап: люди из титров горячего слоя, `GET /3/person/{id}?language=ru-RU&
-append_to_response=external_ids,translations,images` → `person_tmdb_data`, `people.bio`
+append_to_response=external_ids,translations,images` → `people.bio`
 (русская биография, иначе прежняя), `birth_date`, `photo_url`, `original_name` (английское имя). Фильмографию (`combined_credits`,
 ~200 КБ на человека) не берём: она дублирует титры фильмов.
 
 Пачки фильмов пишутся без построчных триггеров (`session_replication_role = replica`, нужен
 суперпользователь БД): счётчики людей и тегов пересчитываются в конце одним проходом, люди импорта
-без работ удаляются. Перезапуск продолжает: уже скачанные пропускаются (`--refresh` — заново). Ключ —
+без работ удаляются. Перезапуск продолжает: уже разложенные TMDB id пишутся в
+`~/.cache/nexus-catalog-import/tmdb_full/{movies,people}.done` и пропускаются (`--refresh` — заново).
+Сиквелы — только среди фильмов этого прогона. Ключ —
 `TMDB_API_KEY` (окружение или `infra/.env`). После — перестройка поиска
 (`POST /api/v1/catalog/admin/search/reindex?force=true` или перезапуск приложения).
 
@@ -47,7 +50,7 @@ import asyncpg
 from fetch_tmdb import env
 from import_tmdb import (POSTER, PROFILE, Fatal, Tmdb, clean, ensure_genres, movie_metadata,
                          parse_date, slugify, unique)
-from merge import STATE_SCHEMA
+from merge import CACHE, STATE_SCHEMA
 
 MOVIE_APPEND = ",".join([
     "credits", "release_dates", "keywords", "translations", "alternative_titles", "images",
@@ -193,6 +196,44 @@ async def resolve_people(conn, persons: dict[int, dict], stats: Stats) -> dict[i
     return known
 
 
+STUDIO_LOGO = "https://image.tmdb.org/t/p/w300"
+
+
+async def insert_studios(conn, batch: list[tuple[object, int, dict]]):
+    """Новые компании TMDB → `studios` (slug из названия, занят — `<slug>-<tmdb_id>`)."""
+    companies = {}
+    for _, _, d in batch:
+        for c in d.get("production_companies") or []:
+            name = (clean(c.get("name")) or "")[:120]
+            if name and isinstance(c.get("id"), int):
+                companies.setdefault(name, c)
+    if not companies:
+        return
+    names = list(companies)
+    known = {r["name"] for r in await conn.fetch(
+        "SELECT name FROM studios WHERE name = ANY($1::text[])", names)}
+    new = [n for n in names if n not in known]
+    base = {n: slugify(n) or f"studio-{companies[n]['id']}" for n in new}
+    taken = {r["slug"] for r in await conn.fetch(
+        "SELECT slug FROM studios WHERE slug = ANY($1::text[])",
+        unique(s for n in new for s in (base[n], f"{base[n]}-{companies[n]['id']}")))}
+    rows = []
+    for n in new:
+        c = companies[n]
+        slug = next((s for s in (base[n], f"{base[n]}-{c['id']}") if s not in taken), None)
+        if slug:
+            taken.add(slug)
+            logo = c.get("logo_path")
+            rows.append((n, slug, c["id"], f"{STUDIO_LOGO}{logo}" if logo else None,
+                         clean(c.get("origin_country")) or None))
+    if rows:
+        await conn.execute(
+            """INSERT INTO studios (name, slug, tmdb_id, logo_url, origin_country)
+               SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::text[])
+               ON CONFLICT DO NOTHING""",
+            *[[r[i] for r in rows] for i in range(5)])
+
+
 async def apply_movies(conn, batch: list[tuple[object, int, dict]], genres: dict, stats: Stats):
     """Пачка фильмов в одной транзакции: сырьё, поля, статистика, жанры, люди, титры."""
     async with conn.transaction():
@@ -200,12 +241,7 @@ async def apply_movies(conn, batch: list[tuple[object, int, dict]], genres: dict
         # пересчитываются в конце (FINALIZE). Нужен суперпользователь.
         await conn.execute("SET LOCAL session_replication_role = replica")
         ids = [b[0] for b in batch]
-        await conn.execute(
-            """INSERT INTO entity_tmdb_data (entity_id, tmdb_id, data)
-               SELECT * FROM unnest($1::uuid[], $2::int[], $3::jsonb[])
-               ON CONFLICT (entity_id) DO UPDATE
-               SET tmdb_id = EXCLUDED.tmdb_id, data = EXCLUDED.data, fetched_at = now()""",
-            ids, [b[1] for b in batch], [json.dumps(b[2], ensure_ascii=False) for b in batch])
+        await insert_studios(conn, batch)
 
         current = {r["id"]: r for r in await conn.fetch(
             """SELECT id, title, original_title, description, release_date, cover_url, metadata
@@ -298,10 +334,9 @@ WHERE NOT EXISTS (SELECT 1 FROM entity_credits c WHERE c.person_id = p.id)
 
 COLLECTION_RELATIONS = """
 WITH c AS (
-    SELECT d.entity_id, (d.data -> 'belongs_to_collection' ->> 'id')::int AS collection,
-           e.release_date
-    FROM entity_tmdb_data d JOIN entities e ON e.id = d.entity_id
-    WHERE d.data -> 'belongs_to_collection' ->> 'id' IS NOT NULL
+    SELECT u.entity_id, u.collection, e.release_date
+    FROM unnest($1::uuid[], $2::int[]) AS u(entity_id, collection)
+    JOIN entities e ON e.id = u.entity_id
 ), o AS (
     SELECT entity_id AS from_id,
            lead(entity_id) OVER (PARTITION BY collection
@@ -329,12 +364,6 @@ async def apply_people(conn, batch: list[tuple[object, int, dict]], stats: Stats
     async with conn.transaction():
         ids = [b[0] for b in batch]
         await conn.execute(
-            """INSERT INTO person_tmdb_data (person_id, tmdb_id, data)
-               SELECT * FROM unnest($1::uuid[], $2::int[], $3::jsonb[])
-               ON CONFLICT (person_id) DO UPDATE
-               SET tmdb_id = EXCLUDED.tmdb_id, data = EXCLUDED.data, fetched_at = now()""",
-            ids, [b[1] for b in batch], [json.dumps(b[2], ensure_ascii=False) for b in batch])
-        await conn.execute(
             """UPDATE people p SET bio = COALESCE(u.b, p.bio), birth_date = COALESCE(u.d, p.birth_date),
                       photo_url = COALESCE(u.f, p.photo_url),
                       original_name = COALESCE(NULLIF(u.o, p.full_name), p.original_name)
@@ -356,6 +385,12 @@ async def run(args):
     key = env("TMDB_API_KEY")
     if not dsn or not key:
         sys.exit("DATABASE_URL and TMDB_API_KEY are required")
+    done_file = CACHE / "tmdb_full" / ("people.done" if args.people else "movies.done")
+    done_file.parent.mkdir(parents=True, exist_ok=True)
+    if args.refresh:
+        done_file.unlink(missing_ok=True)
+    done = {int(x) for x in done_file.read_text().split()} if done_file.exists() else set()
+    collections: list[tuple[object, int]] = []
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
     async with pool.acquire() as conn:
         await conn.execute(STATE_SCHEMA)
@@ -365,17 +400,14 @@ async def run(args):
                     JOIN catalog_import.people i ON i.person_id = p.id
                     WHERE i.tmdb_id IS NOT NULL
                       AND EXISTS (SELECT 1 FROM entity_credits c WHERE c.person_id = p.id)
-                      {"" if args.refresh else
-                       "AND NOT EXISTS (SELECT 1 FROM person_tmdb_data d WHERE d.person_id = p.id)"}
                     ORDER BY i.tmdb_id""")
         else:
             todo = await conn.fetch(
-                f"""SELECT e.id, t.tmdb_id FROM entities e
-                    JOIN entity_tmdb t ON t.entity_id = e.id
+                """SELECT e.id, (e.external_ids->>'tmdb')::int AS tmdb_id FROM entities e
                     LEFT JOIN entity_stats s ON s.entity_id = e.id
-                    {"" if args.refresh else
-                     "WHERE NOT EXISTS (SELECT 1 FROM entity_tmdb_data d WHERE d.entity_id = e.id)"}
+                    WHERE e.external_ids ? 'tmdb'
                     ORDER BY s.tmdb_popularity DESC NULLS LAST""")
+    todo = [r for r in todo if r["tmdb_id"] not in done]
     if args.limit:
         todo = todo[:args.limit]
     total = len(todo)
@@ -430,6 +462,11 @@ async def run(args):
                             await apply_people(conn, batch, stats)
                         else:
                             await apply_movies(conn, batch, genres, stats)
+                            collections.extend(
+                                (eid, d["belongs_to_collection"]["id"]) for eid, _, d in batch
+                                if isinstance((d.get("belongs_to_collection") or {}).get("id"), int))
+                        with done_file.open("a") as f:
+                            f.writelines(f"{b[1]}\n" for b in batch)
                         batch = []
                     if time.monotonic() - last_log > 30 or item is None:
                         log.info(stats.line(total))
@@ -452,7 +489,8 @@ async def run(args):
             await conn.execute(FINALIZE)
             log.info("counters recomputed, orphan people removed (%.0fs)", time.monotonic() - started)
             if not stop.is_set():
-                added = await conn.execute(COLLECTION_RELATIONS)
+                added = await conn.execute(COLLECTION_RELATIONS, [c[0] for c in collections],
+                                           [c[1] for c in collections])
                 log.info("collections → sequel relations: %s", added)
     await pool.close()
     log.info("done%s: %s", " (interrupted)" if stop.is_set() else "", stats.line(total))

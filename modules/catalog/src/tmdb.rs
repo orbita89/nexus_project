@@ -6,7 +6,7 @@
 //! перестройки поиска. Одна за раз: общая блокировка с перестройкой ([`ReindexLock`]), занято —
 //! `409` до потока. В конце — перестройка поиска (если Meilisearch включён).
 //!
-//! Связь с TMDB — `entity_tmdb`, `imdb_id` — `entity_stats` (пишет импорт
+//! TMDB id — `entities.external_ids.tmdb`, `imdb_id` — `entity_stats` (пишет импорт
 //! `scripts/catalog-import/merge.py`).
 
 use crate::jobs::{self, DoneEvent, Reporter, Step, StepStatus};
@@ -312,7 +312,7 @@ async fn write_stats(
     let mut conn = db.acquire().await?;
     report.progress(Step::Stats, 0, 3);
     sqlx::query(
-        "INSERT INTO entity_stats (entity_id) SELECT entity_id FROM entity_tmdb
+        "INSERT INTO entity_stats (entity_id) SELECT id FROM entities WHERE external_ids ? 'tmdb'
          ON CONFLICT DO NOTHING",
     )
     .execute(&mut *conn)
@@ -341,8 +341,9 @@ async fn write_stats(
     }
     let tmdb = sqlx::query(
         "UPDATE entity_stats s SET tmdb_popularity = n.popularity
-         FROM entity_tmdb t JOIN tmdb_popularity n ON n.tmdb_id = t.tmdb_id
-         WHERE s.entity_id = t.entity_id AND s.tmdb_popularity IS DISTINCT FROM n.popularity",
+         FROM entities e JOIN tmdb_popularity n ON n.tmdb_id = (e.external_ids ->> 'tmdb')::int
+         WHERE e.external_ids ? 'tmdb' AND s.entity_id = e.id
+           AND s.tmdb_popularity IS DISTINCT FROM n.popularity",
     )
     .execute(&mut *conn)
     .await?
@@ -469,9 +470,8 @@ pub(crate) async fn rebuild_active(db: &PgPool, count: i64) -> Result<ActiveResu
         "WITH cand AS (
              SELECT e.id, e.release_date, st.rank_score, st.tmdb_votes, st.tmdb_popularity
              FROM entities e
-             JOIN entity_tmdb t ON t.entity_id = e.id
              LEFT JOIN entity_stats st ON st.entity_id = e.id
-             WHERE NOT e.active_manual
+             WHERE e.external_ids ? 'tmdb' AND NOT e.active_manual
          ),
          top AS (
              SELECT id FROM cand WHERE release_date <= current_date

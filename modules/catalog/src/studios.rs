@@ -5,7 +5,8 @@
 //! GIN-индексу `metadata`. Таблица `studios` — сами студии: slug для URL и данные компании TMDB.
 //!
 //! Строки создаёт [`sync`] — для новых названий из `metadata.studios`: TMDB id, логотип и страна —
-//! из сырья `entity_tmdb_data` (`production_companies`), slug — из названия. Полная — в начале
+//! из переданных компаний TMDB (ответ по фильму при возврате из архива; импорт
+//! `tmdb_full.py` пишет студии сам), иначе студия без них; slug — из названия. Полная — в начале
 //! перестройки поиска (первый раз ~1 мин на 53 тыс. студий, дальше — только новые названия),
 //! точечная — при публикации правок и возврате фильма из архива. Описание, штаб-квартира, сайт и
 //! материнская компания — `GET /3/company/{id}` при первом открытии страницы студии.
@@ -85,8 +86,12 @@ pub(crate) fn metadata_filter(name: &str) -> Value {
 }
 
 /// Создаёт студии для названий из `metadata.studios`, которых ещё нет: всех сущностей (`None`) или
-/// только `entities`. Возвращает число созданных.
-pub async fn sync(db: &PgPool, entities: Option<&[Uuid]>) -> sqlx::Result<u64> {
+/// только `entities`. Данные компании — из `companies` (по названию). Возвращает число созданных.
+pub async fn sync(
+    db: &PgPool,
+    entities: Option<&[Uuid]>,
+    companies: &[Company],
+) -> sqlx::Result<u64> {
     let scope = if entities.is_some() {
         "AND e.id = ANY($1)"
     } else {
@@ -105,23 +110,11 @@ pub async fn sync(db: &PgPool, entities: Option<&[Uuid]>) -> sqlx::Result<u64> {
         return Ok(0);
     }
 
-    // Компании TMDB с такими названиями из сырья фильмов, где они указаны.
-    let companies: Vec<Company> = sqlx::query_as(&format!(
-        "SELECT DISTINCT ON (c ->> 'name') c ->> 'name' AS name, (c ->> 'id')::int AS tmdb_id,
-                nullif(c ->> 'logo_path', '') AS logo_path,
-                nullif(c ->> 'origin_country', '') AS origin_country
-         FROM entities e
-         JOIN entity_tmdb_data d ON d.entity_id = e.id,
-              jsonb_array_elements(d.data -> 'production_companies') c
-         WHERE e.metadata -> 'studios' ?| $2 AND c ->> 'name' = ANY($2) {scope}
-         ORDER BY c ->> 'name', (c ->> 'id')::int"
-    ))
-    .bind(entities)
-    .bind(&names)
-    .fetch_all(db)
-    .await?;
-    let mut companies: HashMap<String, Company> =
-        companies.into_iter().map(|c| (c.name.clone(), c)).collect();
+    let mut companies: HashMap<String, Company> = companies
+        .iter()
+        .rev()
+        .map(|c| (c.name.clone(), c.clone()))
+        .collect();
     // TMDB id уже у другой студии (компанию переименовали) — без id.
     let ids: Vec<i32> = companies.values().filter_map(|c| c.tmdb_id).collect();
     let taken_ids: HashSet<i32> =
@@ -199,13 +192,13 @@ pub async fn sync(db: &PgPool, entities: Option<&[Uuid]>) -> sqlx::Result<u64> {
     Ok(inserted)
 }
 
-/// Компания TMDB из `production_companies` сырья фильма.
-#[derive(sqlx::FromRow)]
-struct Company {
-    name: String,
-    tmdb_id: Option<i32>,
-    logo_path: Option<String>,
-    origin_country: Option<String>,
+/// Компания TMDB из `production_companies` ответа по фильму.
+#[derive(Debug, Clone)]
+pub struct Company {
+    pub name: String,
+    pub tmdb_id: Option<i32>,
+    pub logo_path: Option<String>,
+    pub origin_country: Option<String>,
 }
 
 /// Новая студия; `base` — slug из названия до проверки занятости.

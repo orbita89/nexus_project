@@ -1,6 +1,7 @@
 //! Точка входа: конфиг, логирование, БД, миграции, фоновые задачи, HTTP-сервер.
 //! `nexus media fill|check` — разовая команда вместо сервера: постеры и трейлеры каталога.
-//! `nexus archive dump|build` — горячий слой каталога и холодный архив (`catalog::archive`).
+//! `nexus archive dump|build|ids|keep-cold` — горячий слой каталога и холодный архив
+//! (`catalog::archive`).
 //! `nexus books import` — метаданные русских книг из SQL-дампа LibGen (`catalog::books`).
 
 use shared::mail::Mailer;
@@ -102,15 +103,35 @@ fn media_options(args: &[String]) -> Result<catalog::media::Options, String> {
 }
 
 const ARCHIVE_USAGE: &str = "usage: nexus archive dump FILE.tsv\n       \
-     nexus archive build FILE.tsv [--fresh] [--defer-delete] [--ru N] [--foreign N]";
+     nexus archive build FILE.tsv [--fresh] [--defer-delete] [--ru N] [--foreign N]\n       \
+     nexus archive ids [--manual]\n       \
+     nexus archive keep-cold TMDB_ID...";
 
 enum ArchiveCommand {
     Dump(std::path::PathBuf),
     Build(std::path::PathBuf, catalog::archive::pipeline::BuildOptions),
+    /// TMDB id документов архива (с `--manual` — перенесённых вручную), по одному в строке.
+    Ids {
+        manual: bool,
+    },
+    /// Пометить документы перенесёнными вручную.
+    KeepCold(Vec<i32>),
 }
 
 /// Аргументы `nexus archive ...`.
 fn archive_command(args: &[String]) -> Result<ArchiveCommand, String> {
+    match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        ["ids"] => return Ok(ArchiveCommand::Ids { manual: false }),
+        ["ids", "--manual"] => return Ok(ArchiveCommand::Ids { manual: true }),
+        ["keep-cold", ref ids @ ..] if !ids.is_empty() => {
+            let ids = ids
+                .iter()
+                .map(|id| id.parse().map_err(|_| ARCHIVE_USAGE.to_string()))
+                .collect::<Result<_, _>>()?;
+            return Ok(ArchiveCommand::KeepCold(ids));
+        }
+        _ => {}
+    }
     let (command, file) = match args {
         [command, file, ..] => (command.as_str(), std::path::PathBuf::from(file)),
         _ => return Err(ARCHIVE_USAGE.into()),
@@ -223,6 +244,28 @@ async fn run_archive(state: &AppState, command: ArchiveCommand) -> anyhow::Resul
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 println!("search reindexed: {result:?}");
             }
+        }
+        ArchiveCommand::Ids { manual } => {
+            use std::io::Write;
+            let (all, manuals) = tokio::task::spawn_blocking(move || archive.tmdb_ids())
+                .await?
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut ids: Vec<i32> = if manual { manuals } else { all }.into_iter().collect();
+            ids.sort_unstable();
+            let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+            for id in ids {
+                writeln!(out, "{id}")?;
+            }
+            out.flush()?;
+        }
+        ArchiveCommand::KeepCold(ids) => {
+            if !archive.is_current() {
+                anyhow::bail!("archive index has no `manual` field: run `nexus archive build FILE --fresh` first");
+            }
+            let marked = tokio::task::spawn_blocking(move || pipeline::mark_manual(&archive, &ids))
+                .await?
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("marked as kept in the archive: {marked}");
         }
     }
     Ok(())

@@ -20,10 +20,12 @@ TMDB), фото — TMDB, затем Commons, дата рождения и bio �
 и жанров). Поле обновляется, только если оно пустое или в нём всё ещё записанное скриптом.
 Готовые строки (сиды, админка) — только заполнение пустых полей, титры и жанры не трогаются.
 
-Фильмы холодного архива (`archived_tmdb`, `nexus archive build`) пропускаются: их строки удалены
-из PostgreSQL намеренно, вернуть фильм — промоушен из архива в админке.
+Фильмы холодного архива (индекс Tantivy, `nexus archive build`) пропускаются: их строки удалены
+из PostgreSQL намеренно, вернуть фильм — промоушен из архива в админке. Список их TMDB id —
+`nexus archive ids` (файл `--archive-ids`, по одному id в строке); без файла скрипт запускает
+команду сам (`--archive-cmd`). TMDB id сущности — `entities.external_ids.tmdb`.
 
-Запуск: DATABASE_URL=postgres://... python3 merge.py [--tmdb-limit N]; затем
+Запуск: DATABASE_URL=postgres://... python3 merge.py [--tmdb-limit N] [--archive-ids FILE]; затем
 scripts/reindex-search.sh. Перезапуск безопасен: повторное слияние ничего не меняет.
 """
 
@@ -33,6 +35,8 @@ import hashlib
 import json
 import logging
 import re
+import shlex
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -415,7 +419,9 @@ async def update_numbers(conn, movies: Path) -> int:
         n = tmdb_numbers(t)
         if any(v is not None for v in n.values()):
             rows[t["id"]] = n
-    links = await conn.fetch("SELECT entity_id, tmdb_id FROM entity_tmdb")
+    links = await conn.fetch(
+        "SELECT id AS entity_id, (external_ids->>'tmdb')::int AS tmdb_id FROM entities "
+        "WHERE external_ids ? 'tmdb'")
     batch = [(r["entity_id"], rows[r["tmdb_id"]]) for r in links if r["tmdb_id"] in rows]
     log.info("numbers: %d linked films with TMDB numbers", len(batch))
     changed = 0
@@ -822,11 +828,9 @@ async def replace_credits_and_tags(conn, pairs, person_ids: dict, tags: dict, st
 
 
 async def merge_batch(conn, films: list[MFilm], tags: dict, by_title: dict, done: set,
-                      done_people: set, stats: Stats):
+                      done_people: set, stats: Stats, archive_ids: set[int]):
     async with conn.transaction():
-        archived = {r["tmdb_id"] for r in await conn.fetch(
-            "SELECT tmdb_id FROM archived_tmdb WHERE tmdb_id = ANY($1::int[])",
-            [f.tmdb_id for f in films if f.tmdb_id])}
+        archived = {f.tmdb_id for f in films if f.tmdb_id in archive_ids}
         if archived:  # в холодном архиве: в PostgreSQL не возвращаются
             stats.archived += sum(1 for f in films if f.tmdb_id in archived)
             films = [f for f in films if f.tmdb_id not in archived]
@@ -841,13 +845,18 @@ async def merge_batch(conn, films: list[MFilm], tags: dict, by_title: dict, done
             if isinstance(l["written"], str):
                 l["written"] = json.loads(l["written"])
         await update_films(conn, pairs, stats)
-        # Связь с TMDB — в таблице каталога (её читают операции админки); готовые строки,
+        # TMDB id — в `entities.external_ids` (его читают операции админки); готовые строки,
         # привязанные импортом (сиды, админка), — «ручные»: «Пересобрать активные» их не трогает.
+        # Уже привязанные и занятые другой сущностью id не меняются.
         tmdb_links = [(l["entity_id"], f.tmdb_id) for f, l in pairs if f.tmdb_id]
         if tmdb_links:
             await conn.execute(
-                """INSERT INTO entity_tmdb (entity_id, tmdb_id)
-                   SELECT * FROM unnest($1::uuid[], $2::int[]) ON CONFLICT DO NOTHING""",
+                """UPDATE entities e
+                   SET external_ids = e.external_ids || jsonb_build_object('tmdb', u.t)
+                   FROM unnest($1::uuid[], $2::int[]) AS u(id, t)
+                   WHERE e.id = u.id AND NOT e.external_ids ? 'tmdb'
+                     AND NOT EXISTS (SELECT 1 FROM entities o WHERE o.external_ids ? 'tmdb'
+                                     AND (o.external_ids->>'tmdb')::int = u.t)""",
                 [x[0] for x in tmdb_links], [x[1] for x in tmdb_links])
         stats_rows = [(l["entity_id"], f) for f, l in pairs if f.tmdb_id]
         if stats_rows:
@@ -928,6 +937,8 @@ async def run(args):
             log.info("migrated links of the Wikidata import: %d films, %d people",
                      await conn.fetchval("SELECT count(*) FROM catalog_import.movies"),
                      await conn.fetchval("SELECT count(*) FROM catalog_import.people"))
+        archive_ids = load_archive_ids(args)
+        log.info("archive: %d TMDB ids are skipped", len(archive_ids))
         tags = await ensure_tags(conn)
         by_title = await unlinked_by_title(conn)
         log.info("unlinked films to match by title + year: %d", len(by_title))
@@ -939,7 +950,8 @@ async def run(args):
         async def flush(batch):
             now = time.monotonic()
             timing["build"] += now - timing["mark"]
-            await merge_batch(conn, batch, tags, by_title, done_entities, done_people, stats)
+            await merge_batch(conn, batch, tags, by_title, done_entities, done_people, stats,
+                              archive_ids)
             timing["mark"] = time.monotonic()
             timing["db"] += timing["mark"] - now
             if stats.films % (args.batch_size * 20) < len(batch):
@@ -991,6 +1003,20 @@ async def run(args):
     log.info(NEXT)
 
 
+def load_archive_ids(args) -> set[int]:
+    """TMDB id холодного архива: файл `nexus archive ids` или вывод команды."""
+    if args.archive_ids:
+        text = Path(args.archive_ids).read_text()
+    else:
+        try:
+            text = subprocess.run(shlex.split(args.archive_cmd), check=True, capture_output=True,
+                                  text=True).stdout
+        except (OSError, subprocess.CalledProcessError) as e:
+            raise SystemExit(f"cannot list archive TMDB ids ({args.archive_cmd!r}: {e}); "
+                             "pass --archive-ids FILE from `nexus archive ids`")
+    return {int(line) for line in text.split() if line.strip()}
+
+
 NEXT = ("next: admin → «Обновить рейтинги» (POST /api/v1/catalog/admin/tmdb/stats/stream), then "
         "«Пересобрать активные» (.../tmdb/active/stream?count=80000): new films are hidden until "
         "then; both rebuild search")
@@ -1004,6 +1030,9 @@ def main():
     p.add_argument("--wikidata-limit", type=int, default=100_000,
                    help="must match the limit the Wikidata cache was downloaded with")
     p.add_argument("--tmdb-limit", type=int, default=0, help="only the first N cached TMDB films")
+    p.add_argument("--archive-ids", help="file with `nexus archive ids` output (cold archive)")
+    p.add_argument("--archive-cmd", default="docker exec nexus-app target/debug/nexus archive ids",
+                   help="command printing archive TMDB ids, if --archive-ids is not given")
     p.add_argument("--batch-size", type=int, default=500, help="films per DB transaction")
     p.add_argument("--numbers-only", action="store_true",
                    help="only refresh entity_stats (imdb_id, tmdb_votes, missing popularity) from "

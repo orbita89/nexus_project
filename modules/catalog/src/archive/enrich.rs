@@ -3,8 +3,8 @@
 //! Один запрос `GET /3/movie/{id}?language=ru-RU&append_to_response=<всё>` (как
 //! `scripts/catalog-import/tmdb_full.py`) и раскладка в одной транзакции с вставкой фильма:
 //! `entities` (русское название, оригинальное, описание, дата, постер, `metadata`: длительность,
-//! страны, студии, возрастной рейтинг, трейлеры), `entity_tmdb`, сырьё `entity_tmdb_data`,
-//! `entity_stats` (IMDb id, popularity, число оценок TMDB), жанры → теги `genre`, титры: режиссёры,
+//! страны, студии, возрастной рейтинг, трейлеры; `external_ids.tmdb`), компании студий
+//! (`studios`: TMDB id, логотип, страна — [`companies`]), `entity_stats` (IMDb id, popularity, число оценок TMDB), жанры → теги `genre`, титры: режиссёры,
 //! сценаристы, продюсеры, композиторы, операторы, монтажёры, затем весь актёрский состав. Люди —
 //! по TMDB id (`catalog_import.people`), новые создаются (slug из имени, занят —
 //! `<slug>-<tmdb_id>`, фото `h632`). Правила полей — те же, что в `tmdb_full.py`: импорт и
@@ -198,6 +198,23 @@ pub(crate) struct FilmFields {
     pub release_date: Option<NaiveDate>,
     pub cover_url: Option<String>,
     pub metadata: Value,
+}
+
+/// Компании TMDB фильма (`production_companies`) — для студий: TMDB id, логотип, страна.
+pub(crate) fn companies(data: &Value) -> Vec<crate::studios::Company> {
+    data["production_companies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            Some(crate::studios::Company {
+                name: truncate(clean(c.get("name"))?, MAX_STUDIO),
+                tmdb_id: c["id"].as_i64().and_then(|id| i32::try_from(id).ok()),
+                logo_path: clean(c.get("logo_path")),
+                origin_country: clean(c.get("origin_country")),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn film_fields(doc: &ArchiveDoc, data: &Value) -> FilmFields {
@@ -439,7 +456,7 @@ pub(crate) fn slugify(text: &str) -> String {
 // ---------------------------------------------------------------- запись
 
 /// Вставляет фильм архива в каталог: строка `entities` (`active`, `active_manual` — сборка
-/// горячего слоя его не уберёт), связь с TMDB, popularity; с `data` — всё из TMDB (см. описание
+/// горячего слоя его не уберёт), TMDB id (`external_ids`), popularity; с `data` — всё из TMDB (см. описание
 /// модуля). Возвращает id сущности. slug или TMDB id уже в каталоге — ошибка уникальности.
 pub(crate) async fn insert_film(
     tx: &mut sqlx::PgConnection,
@@ -459,8 +476,11 @@ pub(crate) async fn insert_film(
     };
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO entities (kind, slug, title, original_title, description, release_date,
-                               cover_url, metadata, active, active_manual)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, true) RETURNING id",
+                               cover_url, metadata, external_ids, active, active_manual)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                 CASE WHEN $9::int IS NULL THEN '{}' ELSE jsonb_build_object('tmdb', $9) END,
+                 true, true)
+         RETURNING id",
     )
     .bind(doc.kind)
     .bind(&doc.slug)
@@ -470,20 +490,10 @@ pub(crate) async fn insert_film(
     .bind(fields.release_date)
     .bind(&fields.cover_url)
     .bind(&fields.metadata)
+    .bind(doc.tmdb_id)
     .fetch_one(&mut *tx)
     .await?;
 
-    if let Some(tmdb_id) = doc.tmdb_id {
-        sqlx::query("INSERT INTO entity_tmdb (entity_id, tmdb_id) VALUES ($1, $2)")
-            .bind(id)
-            .bind(tmdb_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM archived_tmdb WHERE tmdb_id = $1")
-            .bind(tmdb_id)
-            .execute(&mut *tx)
-            .await?;
-    }
     let imdb_id = data
         .and_then(|d| clean(d.get("imdb_id")).or_else(|| clean(d["external_ids"].get("imdb_id"))));
     sqlx::query(
@@ -504,14 +514,6 @@ pub(crate) async fn insert_film(
     .await?;
 
     let Some(data) = data else { return Ok(id) };
-    if let Some(tmdb_id) = doc.tmdb_id {
-        sqlx::query("INSERT INTO entity_tmdb_data (entity_id, tmdb_id, data) VALUES ($1, $2, $3)")
-            .bind(id)
-            .bind(tmdb_id)
-            .bind(data)
-            .execute(&mut *tx)
-            .await?;
-    }
     insert_genres(tx, id, data).await?;
     insert_credits(tx, id, &film_credits(data)).await?;
     Ok(id)
@@ -709,6 +711,7 @@ mod tests {
             release_date: NaiveDate::from_ymd_opt(1971, 2, 4),
             popularity: 1.5,
             cover_url: Some("https://img.test/old.jpg".into()),
+            manual: false,
         }
     }
 

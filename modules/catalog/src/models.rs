@@ -6,14 +6,14 @@ use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-/// Видна на сайте (SQL, алиас `e`): активна и — если пришла из TMDB (`entity_tmdb`) — уже вышла
+/// Видна на сайте (SQL, алиас `e`): активна и — если пришла из TMDB (`external_ids.tmdb`) — уже вышла
 /// или выходит в ближайшие `catalog_ranking.soon_days` дней («Скоро премьера»); включённая вручную
 /// (`active_manual`) — видна всегда. Невышедшие и без даты скрываются сами, без заданий: статус
 /// считается по сегодняшней дате.
 macro_rules! visible_sql {
     () => {
         "(e.active AND (e.active_manual \
-         OR NOT EXISTS (SELECT 1 FROM entity_tmdb vt WHERE vt.entity_id = e.id) \
+         OR NOT e.external_ids ? 'tmdb' \
          OR coalesce(e.release_date <= current_date + (SELECT vr.soon_days FROM catalog_ranking vr), \
                      false)))"
     };
