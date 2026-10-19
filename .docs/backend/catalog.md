@@ -201,6 +201,8 @@ Dev (2026-10-15): 53 125 названий студий в `metadata.studios`, 53
 | `credits` | `integer` | NOT NULL, default 0 | Всего строк в `entity_credits` |
 | `active_credits` | `integer` | NOT NULL, default 0 | Из них в активных сущностях |
 
+Индекс `person_credit_counts_hidden` (`person_id`) WHERE `active_credits = 0 AND credits > 0` — частичный, на единицы скрытых людей: `NOT EXISTS` из `PUBLIC_PERSON` не читает всю таблицу (перестройка `fill_people`: было ~5 с на пачку 2000 и ~40 мин на индекс людей, стало ~50 мс на пачку; миграция `20261028100000_person_hidden_index.sql`). В `fill_people` пачка id выбирается до `LEFT JOIN person_stats` (иначе merge join читал `person_stats` с начала на каждой пачке).
+
 Миграция `20261016100000_entity_active.sql`. Держат триггеры: `entity_credits_count` (вставка,
 удаление, смена `entity_id`/`person_id` титров) и `entities_active_counts` (смена `active`,
 удаление активной сущности — её работы вычитаются до каскада). Отдельная узкая таблица, а не

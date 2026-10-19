@@ -162,9 +162,15 @@ pub(crate) async fn fill(
     let mut indexed: usize = 0;
     let mut pending: Option<(Value, usize)> = None;
     loop {
+        // Сначала пачка id, потом `person_stats`: при JOIN до LIMIT merge join читал
+        // `person_stats` с начала на каждой пачке (квадратично).
         let docs: Vec<PersonDoc> = sqlx::query_as(&format!(
-            "{DOC_SELECT} WHERE {PUBLIC_PERSON} AND ($1::uuid IS NULL OR p.id > $1)
-             ORDER BY p.id LIMIT $2"
+            "SELECT p.id, p.slug, p.full_name, p.original_name, p.birth_date,
+                    p.photo_url, ps.known_for, coalesce(ps.fame, 0) AS fame
+             FROM (SELECT * FROM people p WHERE {PUBLIC_PERSON}
+                     AND ($1::uuid IS NULL OR p.id > $1) ORDER BY p.id LIMIT $2) p
+             LEFT JOIN person_stats ps ON ps.person_id = p.id
+             ORDER BY p.id"
         ))
         .bind(after)
         .bind(BATCH as i64)

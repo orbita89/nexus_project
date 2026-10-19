@@ -61,6 +61,7 @@ Restate both diffs in your final answer. Code change without the two doc updates
 
 ## 7. Tests, commands
 
-- `make up` env · `make seed` data · `make lint` fmt+clippy · `make test` · `make boundaries` · `make ci` · `make http` live checks · `make logs`.
+- `make up` env · `make seed` data · `make lint` fmt+clippy · `make test` · `make test-fast` · `make test-one T=` · `make boundaries` · `make ci` · `make http` live checks · `make logs`.
 - Tests: unit next to code; DB via `#[sqlx::test]` (clean DB per test); HTTP via `nexus::build_app` in `app/tests/*.rs`; fixtures `app/tests/fixtures/*.sql`; fake directories `state.entities = Arc::new(Fake)`.
-- DoD: code + migration (if schema) + a test per endpoint + BOTH docs synced (rule 4) + `make lint && make boundaries && make test` green.
+- While working: run ONLY the affected suite — `make test-one T=<file> [F=<test>]` (seconds–1 min).
+- DoD: code + migration (if schema) + a test per endpoint + BOTH docs synced (rule 4) + `make lint && make boundaries` + REQUIRED tests green: `make test-one T=<suite>` for every `app/tests/<suite>.rs` touched or covering the changed module (+ `cargo test -p <module> --lib`). NEVER run full `make test` locally — the full suite runs in CI on push; run it only if the user asks.

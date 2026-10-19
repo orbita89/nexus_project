@@ -13,7 +13,7 @@ COMPOSE = docker compose -f infra/docker-compose.yml
 # Контейнер с тулчейном (сервис tools) от пользователя хоста: Rust на машине не нужен.
 TOOLS = $(COMPOSE) run --rm --user $(shell id -u):$(shell id -g) tools
 
-.PHONY: up down logs run seed media fmt lint boundaries test deny ci image http ci-docker test-docker shell
+.PHONY: up down logs run seed media fmt lint boundaries test test-fast test-one deny ci image http ci-docker test-docker shell
 
 up:          ## Поднять dev-окружение
 	$(COMPOSE) up -d --build
@@ -46,8 +46,30 @@ lint:        ## Формат + clippy
 boundaries:  ## Модули не зависят друг от друга
 	scripts/check-module-boundaries.sh
 
-test:        ## Все тесты (нужен Postgres)
-	cargo test --workspace
+# cargo-nextest и линкер mold — если установлены (быстрее прогон и линковка), иначе обычный cargo test.
+# Установка: cargo install cargo-nextest --locked; mold — пакет mold (apt) или релиз с GitHub.
+NEXTEST := $(shell cargo nextest --version >/dev/null 2>&1 && echo 1)
+MOLD := $(shell command -v mold 2>/dev/null)
+ifneq ($(MOLD),)
+export RUSTFLAGS += -C link-arg=-fuse-ld=mold
+endif
+ifeq ($(NEXTEST),1)
+CARGO_TEST = cargo nextest run --no-fail-fast
+else
+CARGO_TEST = cargo test --no-fail-fast
+endif
+# Тяжёлые наборы (Meilisearch/Redis, минуты): только в полном make test.
+HEAVY_TESTS = catalog archive auth
+
+test:        ## Все тесты (нужен Postgres) — один раз перед закрытием задачи
+	$(CARGO_TEST) --workspace
+
+test-fast:   ## Быстро во время работы: unit-тесты и HTTP-тесты без тяжёлых (catalog, archive, auth)
+	$(CARGO_TEST) --workspace --lib
+	$(CARGO_TEST) -p nexus $(foreach t,$(filter-out $(HEAVY_TESTS),$(basename $(notdir $(wildcard app/tests/*.rs)))),--test $(t))
+
+test-one:    ## Один набор/тест: make test-one T=studios [F=имя_теста]
+	$(CARGO_TEST) -p nexus --test $(T) $(F)
 
 deny:        ## Уязвимости и лицензии зависимостей
 	cargo deny check
