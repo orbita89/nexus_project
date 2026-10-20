@@ -34,6 +34,21 @@ pub async fn list_public(
     page(&state, "c.is_public", None, query).await
 }
 
+/// Особые коллекции (помечены admin) по порядку — все сразу, их немного.
+#[utoipa::path(
+    get, operation_id = "list_featured_collections", path = "/collections/featured", tag = "collections",
+    responses((status = 200, description = "Особые коллекции", body = Vec<Collection>))
+)]
+pub async fn list_featured(State(state): State<AppState>) -> AppResult<Json<Vec<Collection>>> {
+    let rows: Vec<CollectionRow> = sqlx::query_as(&format!(
+        "SELECT {COLLECTION_COLUMNS} FROM collections c WHERE c.featured_position IS NOT NULL
+         ORDER BY c.featured_position, c.created_at, c.id"
+    ))
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(refs::collections(&state, rows).await?))
+}
+
 /// Коллекции пользователя, новые сверху. Владелец видит и свои приватные. `?contains={slug}` —
 /// у каждой коллекции `contains`: есть ли в ней сущность.
 #[utoipa::path(
@@ -206,7 +221,7 @@ pub async fn create(
     request_body = UpdateCollection,
     responses(
         (status = 200, description = "Изменена", body = CollectionDetail),
-        (status = 400, description = "Неверные поля", body = ErrorBody),
+        (status = 400, description = "Неверные поля или особую коллекцию делают приватной", body = ErrorBody),
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Чужая публичная коллекция", body = ErrorBody),
         (status = 404, description = "Нет или приватная чужая", body = ErrorBody),
@@ -241,7 +256,8 @@ pub async fn update(
     .bind(description.flatten())
     .bind(req.is_public)
     .execute(&state.db)
-    .await?;
+    .await
+    .map_err(featured_must_be_public)?;
 
     let row = load(&state.db, id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(detail(&state, row).await?))
@@ -477,6 +493,16 @@ fn new_order(
         return Err(mismatch());
     }
     Ok(order)
+}
+
+/// Особая коллекция обязана быть публичной (`collections_featured_public_check`) — 400.
+pub(crate) fn featured_must_be_public(error: sqlx::Error) -> AppError {
+    match &error {
+        sqlx::Error::Database(db) if db.is_check_violation() => {
+            AppError::BadRequest("featured collection must be public".into())
+        }
+        _ => AppError::Database(error),
+    }
 }
 
 pub(crate) async fn load(db: impl PgExecutor<'_>, id: Uuid) -> AppResult<Option<CollectionRow>> {

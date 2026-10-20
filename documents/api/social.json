@@ -294,6 +294,154 @@
         ]
       }
     },
+    "/api/v1/social/admin/collections/{id}/featured": {
+      "put": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Пометить публичную коллекцию особой или поменять её порядок среди особых.",
+        "operationId": "admin_feature_collection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Можно не передавать тело: в конец",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeatureCollection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Особая",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Collection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Коллекция приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Снять с коллекции отметку «особая».",
+        "operationId": "admin_unfeature_collection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Больше не особая (повторно — тоже)"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/admin/posts/{id}": {
       "delete": {
         "tags": [
@@ -1454,6 +1602,30 @@
         ]
       }
     },
+    "/api/v1/social/collections/featured": {
+      "get": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Особые коллекции (помечены admin) по порядку — все сразу, их немного.",
+        "operationId": "list_featured_collections",
+        "responses": {
+          "200": {
+            "description": "Особые коллекции",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Collection"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/social/collections/{id}": {
       "get": {
         "tags": [
@@ -1611,7 +1783,7 @@
             }
           },
           "400": {
-            "description": "Неверные поля",
+            "description": "Неверные поля или особую коллекцию делают приватной",
             "content": {
               "application/json": {
                 "schema": {
@@ -5490,6 +5662,7 @@
           "owner",
           "title",
           "is_public",
+          "is_featured",
           "items_count",
           "preview",
           "created_at",
@@ -5513,9 +5686,21 @@
               "null"
             ]
           },
+          "featured_position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Порядок среди особых; у обычной — `null`."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "is_featured": {
+            "type": "boolean",
+            "description": "Особая коллекция (помечена admin): показывается на главной и выглядит иначе."
           },
           "is_public": {
             "type": "boolean",
@@ -5859,6 +6044,21 @@
           }
         }
       },
+      "FeatureCollection": {
+        "type": "object",
+        "description": "Пометить коллекцию особой.",
+        "properties": {
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Порядок среди особых; без него — в конец.",
+            "example": 0
+          }
+        }
+      },
       "FeedItem": {
         "type": "object",
         "description": "Запись ленты: заполнено ровно одно из `review`, `thread`, `collection` — по `type`.",
@@ -6107,6 +6307,7 @@
                 "owner",
                 "title",
                 "is_public",
+                "is_featured",
                 "items_count",
                 "preview",
                 "created_at",
@@ -6130,9 +6331,21 @@
                     "null"
                   ]
                 },
+                "featured_position": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "Порядок среди особых; у обычной — `null`."
+                },
                 "id": {
                   "type": "string",
                   "format": "uuid"
+                },
+                "is_featured": {
+                  "type": "boolean",
+                  "description": "Особая коллекция (помечена admin): показывается на главной и выглядит иначе."
                 },
                 "is_public": {
                   "type": "boolean",

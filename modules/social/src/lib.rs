@@ -65,6 +65,7 @@ pub fn router() -> OpenApiRouter<AppState> {
             collections::update,
             collections::delete
         ))
+        .routes(routes!(collections::list_featured))
         .routes(routes!(collections::list_for_user))
         .routes(routes!(collections::list_for_entity))
         .routes(routes!(collections::reorder))
@@ -107,6 +108,10 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::delete_review))
         .routes(routes!(admin::delete_review_comment))
         .routes(routes!(admin::delete_collection))
+        .routes(routes!(
+            admin::feature_collection,
+            admin::unfeature_collection
+        ))
         .routes(routes!(admin::delete_thread))
         .routes(routes!(admin::delete_post))
         .routes(routes!(admin::lock_thread, admin::unlock_thread))

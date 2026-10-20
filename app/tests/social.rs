@@ -2222,6 +2222,120 @@ async fn admin_deletes_reviews_and_collections(pool: PgPool) {
     assert_eq!(page["total"], 0);
 }
 
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn admin_features_collections(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let alice = ctx.user("alice").await;
+    let top = ctx.collection(&admin, json!({ "title": "Топ-10" })).await;
+    let best = ctx.collection(&alice, json!({ "title": "Лучшее" })).await;
+    let private = ctx
+        .collection(&alice, json!({ "title": "Позже", "is_public": false }))
+        .await;
+    let featured = |id: &str| format!("/admin/collections/{id}/featured");
+
+    assert_eq!(ctx.get_ok("/collections/featured", None).await, json!([]));
+
+    // Только admin.
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::PUT,
+        &featured(&top),
+        None,
+        None,
+    )
+    .await;
+    for method in [Method::PUT, Method::DELETE] {
+        ctx.expect(
+            StatusCode::FORBIDDEN,
+            method,
+            &featured(&top),
+            None,
+            Some(&alice),
+        )
+        .await;
+    }
+    // Приватная не может быть особой; несуществующей — 404.
+    ctx.expect(
+        StatusCode::BAD_REQUEST,
+        Method::PUT,
+        &featured(&private),
+        None,
+        Some(&admin),
+    )
+    .await;
+    let missing = featured("00000000-0000-0000-0000-000000000000");
+    for method in [Method::PUT, Method::DELETE] {
+        ctx.expect(StatusCode::NOT_FOUND, method, &missing, None, Some(&admin))
+            .await;
+    }
+
+    // Без тела — в конец; `position` задаёт порядок.
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &featured(&best),
+            None,
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["is_featured"], true);
+    assert_eq!(got["featured_position"], 0);
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &featured(&top),
+            None,
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["featured_position"], 1);
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &featured(&top),
+        Some(json!({ "position": -1 })),
+        Some(&admin),
+    )
+    .await;
+    let list = ctx.get_ok("/collections/featured", None).await;
+    assert_eq!(
+        pluck(list.as_array().unwrap(), "title"),
+        ["Топ-10", "Лучшее"]
+    );
+    let got = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(got["is_featured"], true);
+
+    // Владелец не может спрятать особую.
+    ctx.expect(
+        StatusCode::BAD_REQUEST,
+        Method::PATCH,
+        &format!("/collections/{best}"),
+        Some(json!({ "is_public": false })),
+        Some(&alice),
+    )
+    .await;
+
+    // Снять отметку; повторно — тоже 204.
+    for _ in 0..2 {
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            &featured(&top),
+            None,
+            Some(&admin),
+        )
+        .await;
+    }
+    let list = ctx.get_ok("/collections/featured", None).await;
+    assert_eq!(pluck(list.as_array().unwrap(), "title"), ["Лучшее"]);
+    let got = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(got["is_featured"], false);
+    assert_eq!(got["featured_position"], Value::Null);
+}
+
 // ---------------------------------------------------------------- границы модулей
 
 /// Справочник сущностей, отдающий для `dune-2021` своё название: видно, что social берёт

@@ -279,6 +279,10 @@ pub struct Collection {
     pub description: Option<String>,
     /// `false` — видна только владельцу.
     pub is_public: bool,
+    /// Особая коллекция (помечена admin): показывается на главной и выглядит иначе.
+    pub is_featured: bool,
+    /// Порядок среди особых; у обычной — `null`.
+    pub featured_position: Option<i32>,
     /// Сколько произведений.
     #[schema(example = 7)]
     pub items_count: i64,
@@ -298,15 +302,25 @@ pub struct CollectionRow {
     pub title: String,
     pub description: Option<String>,
     pub is_public: bool,
+    pub featured_position: Option<i32>,
     pub items_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 /// Колонки [`CollectionRow`] для `FROM collections c`.
-pub const COLLECTION_COLUMNS: &str = "c.id, c.user_id, c.title, c.description, c.is_public,
+pub const COLLECTION_COLUMNS: &str =
+    "c.id, c.user_id, c.title, c.description, c.is_public, c.featured_position,
     (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id) AS items_count,
     c.created_at, c.updated_at";
+
+/// Пометить коллекцию особой.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct FeatureCollection {
+    /// Порядок среди особых; без него — в конец.
+    #[schema(example = 0)]
+    pub position: Option<i32>,
+}
 
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]

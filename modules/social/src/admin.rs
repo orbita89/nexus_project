@@ -1,13 +1,18 @@
 //! Модерация: admin удаляет любую рецензию, комментарий к ней, коллекцию, тему и сообщение,
+//! помечает коллекции особыми,
 //! закрывает темы.
 
+use crate::collections;
 use crate::comments;
 use crate::events;
+use crate::models::{Collection, FeatureCollection};
 use crate::posts;
+use crate::refs;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::Json;
 use shared::error::ErrorBody;
-use shared::extract::Path;
+use shared::extract::{JsonBody, Path};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use uuid::Uuid;
 
@@ -87,6 +92,78 @@ pub async fn delete_collection(
             .await?;
     let owner = owner.ok_or(AppError::NotFound)?;
     tracing::info!(admin_id = %admin.id, collection_id = %id, owner_id = %owner, "collection deleted by admin");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Пометить публичную коллекцию особой или поменять её порядок среди особых.
+#[utoipa::path(
+    put, operation_id = "admin_feature_collection", path = "/admin/collections/{id}/featured",
+    tag = "social-admin",
+    security(("bearer" = [])),
+    params(("id" = Uuid, Path, description = "id коллекции")),
+    request_body(content = FeatureCollection, description = "Можно не передавать тело: в конец"),
+    responses(
+        (status = 200, description = "Особая", body = Collection),
+        (status = 400, description = "Коллекция приватная", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Не найдена", body = ErrorBody),
+    )
+)]
+pub async fn feature_collection(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<Uuid>,
+    body: Option<JsonBody<FeatureCollection>>,
+) -> AppResult<Json<Collection>> {
+    let req = body.map(|JsonBody(req)| req).unwrap_or_default();
+    let updated = sqlx::query(
+        "UPDATE collections SET featured_position = COALESCE($2, featured_position,
+             (SELECT COALESCE(max(featured_position) + 1, 0) FROM collections
+              WHERE featured_position IS NOT NULL))
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(req.position)
+    .execute(&state.db)
+    .await
+    .map_err(collections::featured_must_be_public)?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    tracing::info!(admin_id = %admin.id, collection_id = %id, "collection featured by admin");
+    let row = collections::load(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(refs::collection(&state, row).await?))
+}
+
+/// Снять с коллекции отметку «особая».
+#[utoipa::path(
+    delete, operation_id = "admin_unfeature_collection", path = "/admin/collections/{id}/featured",
+    tag = "social-admin",
+    security(("bearer" = [])),
+    params(("id" = Uuid, Path, description = "id коллекции")),
+    responses(
+        (status = 204, description = "Больше не особая (повторно — тоже)"),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Не найдена", body = ErrorBody),
+    )
+)]
+pub async fn unfeature_collection(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let updated = sqlx::query("UPDATE collections SET featured_position = NULL WHERE id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    tracing::info!(admin_id = %admin.id, collection_id = %id, "collection unfeatured by admin");
     Ok(StatusCode::NO_CONTENT)
 }
 

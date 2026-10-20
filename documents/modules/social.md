@@ -111,11 +111,14 @@
 | `title` | `text` | NOT NULL | Название |
 | `description` | `text` | | Описание |
 | `is_public` | `boolean` | NOT NULL, default `true` | Видна всем или только владельцу |
+| `featured_position` | `integer` | CHECK: `NULL` или `is_public` | Особая коллекция (помечает admin, «Топ‑10»): порядок на главной; `NULL` — обычная |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
 
 **Индексы:** по `user_id` — коллекции пользователя; частичный по `created_at` для публичных —
 лента новых коллекций; частичный (`user_id`, `created_at DESC`) для публичных — коллекции тех, на
-кого подписан, в ленте (миграция `20261011100000_social_feed.sql`).
+кого подписан, в ленте (миграция `20261011100000_social_feed.sql`); частичный
+`collections_featured_idx` (`featured_position`, `created_at`) для особых (миграция
+`20261102100000_social_featured_collections.sql`).
 
 ### `collection_items` ✅ — содержимое коллекций
 
@@ -375,9 +378,10 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | Метод | Путь | Доступ | Что делает |
 |---|---|---|---|
 | GET | `/collections` | гость | Новые публичные коллекции |
+| GET | `/collections/featured` | гость | Особые коллекции (помечены admin) по `featured_position` — массив без пагинации |
 | POST | `/collections` | user | `{"title", "description"?, "is_public"? = true}` → 201, коллекция с `items` |
 | GET | `/collections/{id}` | гость / владелец | Коллекция с содержимым по порядку |
-| PATCH | `/collections/{id}` | владелец | `title`, `description` (`null` очищает), `is_public` |
+| PATCH | `/collections/{id}` | владелец | `title`, `description` (`null` очищает), `is_public`; особую сделать приватной — 400 |
 | DELETE | `/collections/{id}` | владелец | → 204 |
 | GET | `/users/{username}/collections` | гость / владелец | Коллекции пользователя, новые сверху; владелец видит и приватные. `?contains={slug}` — у каждой `contains: true/false` (кнопка «В коллекцию» одним запросом); неизвестный slug — 404 |
 | GET | `/entities/{slug}/collections` | гость | Публичные коллекции, где есть сущность |
@@ -391,7 +395,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 (`/admin/collections/{id}`), например по запросу правообладателя, но не читать её. Чужую публичную менять нельзя — 403. Эндпоинты «гость / владелец» принимают токен
 необязательно (`Option<AuthUser>`): без заголовка — гость, с недействительным токеном — 401.
 
-Коллекция в ответе: `id`, `owner` (`UserRef`), `title`, `description`, `is_public`, `items_count`,
+Коллекция в ответе: `id`, `owner` (`UserRef`), `title`, `description`, `is_public`, `is_featured`, `featured_position` (у обычной `null`; фронт рисует особую иначе), `items_count`,
 `preview` (первые 4 произведения по порядку, `EntityRef` — обложки в списке; одним запросом на
 страницу), `contains` (только с `?contains=`), даты; карточка — ещё `items`: `{entity, position, note, added_at}` по `position`, затем по времени
 добавления. Изменение содержимого обновляет `updated_at` коллекции.
@@ -509,6 +513,8 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | DELETE | `/admin/reviews/{id}` | Удалить любую рецензию → 204 (голоса и комментарии — вместе с ней) |
 | DELETE | `/admin/review-comments/{id}` | Удалить любой комментарий к рецензии → 204 |
 | DELETE | `/admin/collections/{id}` | Удалить любую коллекцию, в том числе приватную → 204 |
+| PUT | `/admin/collections/{id}/featured` | Пометить публичную коллекцию особой → 200 (`Collection`); тело `{"position"?}` необязательно — без него в конец (уже особая — порядок не меняется); приватная → 400 |
+| DELETE | `/admin/collections/{id}/featured` | Снять отметку → 204 (повторно — тоже) |
 | DELETE | `/admin/threads/{id}` | Удалить любую тему вместе с сообщениями → 204 |
 | DELETE | `/admin/posts/{id}` | Удалить любое сообщение → 204 (с ответами — заглушка, как у автора) |
 | PUT | `/admin/threads/{id}/lock` | Закрыть тему для ответов → 204 (повторно — тоже) |
