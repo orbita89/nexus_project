@@ -24,6 +24,7 @@ pub mod ratings;
 pub mod reactions;
 mod refs;
 pub mod reviews;
+pub mod rooms;
 pub mod threads;
 mod validate;
 pub mod votes;
@@ -86,6 +87,11 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(chat::history))
         .routes(routes!(chat::get, chat::update, chat::delete))
         .routes(routes!(chat::mute, chat::unmute))
+        .routes(routes!(rooms::list))
+        .routes(routes!(rooms::get))
+        .routes(routes!(rooms::join, rooms::leave))
+        .routes(routes!(rooms::create))
+        .routes(routes!(rooms::update, rooms::delete))
         .routes(routes!(
             interests::get_own,
             interests::add,

@@ -647,3 +647,189 @@ async fn person_and_tag_rooms(pool: PgPool) {
         .await;
     bob_ws.silent().await;
 }
+
+/// Этап 3: свои комнаты админа. Создание (только admin, slug проверяется, занят — 409), список и
+/// комната по slug, вступление (как интерес: канал `room:` на лету, комната в «моих чатах»),
+/// сообщения, правка и удаление комнаты админом с событиями, выход.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn admin_rooms(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let admin = ctx.login("admin", "admin").await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    let body =
+        json!({ "slug": "cyberpunk-fans", "title": " Киберпанк ", "description": "Обо всём" });
+    ctx.api(
+        StatusCode::FORBIDDEN,
+        Method::POST,
+        "/admin/chat/rooms",
+        Some(body.clone()),
+        Some(&alice),
+    )
+    .await;
+    for slug in ["", "Cyber", "a--b", "-a", "a b"] {
+        ctx.api(
+            StatusCode::BAD_REQUEST,
+            Method::POST,
+            "/admin/chat/rooms",
+            Some(json!({ "slug": slug, "title": "x" })),
+            Some(&admin),
+        )
+        .await;
+    }
+    let room = ctx
+        .api(
+            StatusCode::CREATED,
+            Method::POST,
+            "/admin/chat/rooms",
+            Some(body.clone()),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(room["title"], "Киберпанк");
+    assert_eq!(room["members_count"], 0);
+    ctx.api(
+        StatusCode::CONFLICT,
+        Method::POST,
+        "/admin/chat/rooms",
+        Some(body),
+        Some(&admin),
+    )
+    .await;
+    let list = ctx
+        .api(StatusCode::OK, Method::GET, "/chat/rooms", None, None)
+        .await;
+    assert_eq!(list["total"], 1);
+    assert_eq!(
+        ctx.api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/rooms/cyberpunk-fans",
+            None,
+            None
+        )
+        .await,
+        room
+    );
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/chat/rooms/nope",
+        None,
+        None,
+    )
+    .await;
+
+    let mut bob_ws = ctx.authed(&bob).await;
+    let membership = "/chat/rooms/cyberpunk-fans/membership";
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        membership,
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        membership,
+        None,
+        Some(&bob),
+    )
+    .await;
+    let added = bob_ws.event("interest.added").await;
+    assert_eq!(added["data"]["room_id"], room["id"]);
+    bob_ws.silent().await;
+
+    let mut alice_ws = ctx.authed(&alice).await;
+    let sent = alice_ws
+        .request(
+            json!({ "type": "chat.send", "room": "room:cyberpunk-fans", "body": "Привет" }),
+            "chat.sent",
+        )
+        .await;
+    assert_eq!(sent["message"]["kind"], "room");
+    assert_eq!(sent["message"]["target_id"], room["id"]);
+    let event = bob_ws.event("chat.message.created").await;
+    assert_eq!(event["channels"], json!(["room:cyberpunk-fans"]));
+
+    let chats = ctx.chats(&bob).await;
+    assert_eq!(chats.len(), 1);
+    assert_eq!(chats[0]["room"], "room:cyberpunk-fans");
+    assert_eq!(chats[0]["custom"]["members_count"], 1);
+    assert_eq!(chats[0]["custom"]["messages_count"], 1);
+    assert_eq!(chats[0]["unread"], 1);
+    let history = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/room/cyberpunk-fans/messages",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(history["items"][0]["body"], "Привет");
+    // Новый вход: канал комнаты подписан сам.
+    let mut bob_tablet = ctx.client().await;
+    let auth = bob_tablet
+        .request(
+            json!({ "type": "auth", "token": bob.token }),
+            "authenticated",
+        )
+        .await;
+    assert_eq!(auth["channels"], json!(["user:me", "room:cyberpunk-fans"]));
+
+    let path = "/admin/chat/rooms/cyberpunk-fans";
+    let updated = ctx
+        .api(
+            StatusCode::OK,
+            Method::PATCH,
+            path,
+            Some(json!({ "title": "Киберпанк 2077", "description": "" })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(updated["title"], "Киберпанк 2077");
+    assert_eq!(updated["description"], Value::Null);
+    bob_ws.event("chat.room.updated").await;
+
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        membership,
+        None,
+        Some(&bob),
+    )
+    .await;
+    bob_ws.event("interest.removed").await;
+    assert!(ctx.chats(&bob).await.is_empty());
+
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        path,
+        None,
+        Some(&admin),
+    )
+    .await;
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        path,
+        None,
+        Some(&admin),
+    )
+    .await;
+    let error = alice_ws
+        .request(
+            json!({ "type": "chat.send", "room": "room:cyberpunk-fans", "body": "x" }),
+            "error",
+        )
+        .await;
+    assert_eq!(
+        error["error"],
+        "unknown room in channel: room:cyberpunk-fans"
+    );
+}

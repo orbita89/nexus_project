@@ -14,6 +14,9 @@ pub const MAX_THREAD_ENTITIES: usize = 10;
 pub const MAX_INTERESTS: i64 = 500;
 pub const MAX_COMMENT_BODY: usize = 2_000;
 pub const MAX_CHAT_BODY: usize = 2_000;
+pub const MAX_ROOM_SLUG: usize = 80;
+pub const MAX_ROOM_TITLE: usize = 100;
+pub const MAX_ROOM_DESCRIPTION: usize = 500;
 
 fn bad(message: String) -> AppError {
     AppError::BadRequest(message)
@@ -27,6 +30,24 @@ pub fn required(field: &str, value: &str, max: usize) -> Result<String, AppError
     }
     if value.chars().count() > max {
         return Err(bad(format!("{field} is longer than {max} chars")));
+    }
+    Ok(value.to_string())
+}
+
+/// slug своей комнаты чата: строчные латинские буквы, цифры и дефисы между ними, 1–80 символов.
+pub fn room_slug(value: &str) -> Result<String, AppError> {
+    let ok = !value.is_empty()
+        && value.len() <= MAX_ROOM_SLUG
+        && value.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        });
+    if !ok {
+        return Err(bad(format!(
+            "slug must be 1-{MAX_ROOM_SLUG} chars: a-z, 0-9 and single dashes between them"
+        )));
     }
     Ok(value.to_string())
 }

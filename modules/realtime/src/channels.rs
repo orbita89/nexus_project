@@ -1,7 +1,8 @@
 //! Имена каналов для клиента и их внутренний вид (`shared::events::Channel`).
 //!
 //! `thread:<id>` — тема форума, `entity:<slug>` — сущность каталога, `person:<slug>` — человек,
-//! `tag:<slug>` — тег (внутри по id: события приходят с id; у людей и тегов — только чат),
+//! `tag:<slug>` — тег, `room:<slug>` — своя комната чата (внутри по id: события приходят с id;
+//! у людей, тегов и комнат — только чат),
 //! `user:me` — личный канал вошедшего, подписывается сам после `auth`.
 
 use shared::directory::ChatRoom;
@@ -43,6 +44,14 @@ pub async fn parse(state: &AppState, name: &str) -> AppResult<(Channel, String)>
                 format!("person:{}", person.slug),
             ))
         }
+        Some(("room", slug)) => {
+            let (id, slug) = state
+                .chat
+                .room_by_slug(state, slug)
+                .await?
+                .ok_or_else(|| bad(format!("unknown room in channel: {name}")))?;
+            Ok((Channel::Room(id), format!("room:{slug}")))
+        }
         Some(("tag", slug)) => {
             let tag = state
                 .tags
@@ -60,7 +69,7 @@ pub async fn parse(state: &AppState, name: &str) -> AppResult<(Channel, String)>
 /// каноничное имя. Сообщения комнаты приходят в канал с тем же именем.
 pub async fn chat_room(state: &AppState, name: &str) -> AppResult<(ChatRoom, String)> {
     let unknown = || AppError::BadRequest(format!("unknown chat room: {name}"));
-    if !["entity:", "person:", "tag:"]
+    if !["entity:", "person:", "tag:", "room:"]
         .iter()
         .any(|prefix| name.starts_with(prefix))
     {
@@ -70,6 +79,7 @@ pub async fn chat_room(state: &AppState, name: &str) -> AppResult<(ChatRoom, Str
         (Channel::Entity(id), name) => Ok((ChatRoom::Entity(id), name)),
         (Channel::Person(id), name) => Ok((ChatRoom::Person(id), name)),
         (Channel::Tag(id), name) => Ok((ChatRoom::Tag(id), name)),
+        (Channel::Room(id), name) => Ok((ChatRoom::Room(id), name)),
         _ => Err(unknown()),
     }
 }
@@ -116,10 +126,20 @@ pub async fn tags(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Channel, Str
         .collect())
 }
 
-/// Все каналы интересов пользователя: сущности, люди, теги.
+/// Каналы своих комнат по id (вступил): имена `room:<slug>`. Удалённые пропускаются.
+pub async fn rooms(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Channel, String)>> {
+    let slugs = state.chat.room_slugs(state, ids).await?;
+    Ok(ids
+        .iter()
+        .filter_map(|id| Some((Channel::Room(*id), format!("room:{}", slugs.get(id)?))))
+        .collect())
+}
+
+/// Все каналы интересов пользователя: сущности, люди, теги и свои комнаты, в которые вступил.
 pub async fn interests(state: &AppState, user_id: Uuid) -> AppResult<Vec<(Channel, String)>> {
     let mut channels = entities(state, &state.interests.entity_ids(user_id).await?).await?;
     channels.extend(people(state, &state.interests.person_ids(user_id).await?).await?);
     channels.extend(tags(state, &state.interests.tag_ids(user_id).await?).await?);
+    channels.extend(rooms(state, &state.interests.room_ids(user_id).await?).await?);
     Ok(channels)
 }

@@ -48,6 +48,15 @@ impl InterestDirectory for PgInterestDirectory {
         )
     }
 
+    async fn room_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>> {
+        Ok(
+            sqlx::query_scalar("SELECT room_id FROM chat_room_members WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_all(&self.db)
+                .await?,
+        )
+    }
+
     async fn people_in_use(&self, person_ids: &[Uuid]) -> AppResult<HashSet<Uuid>> {
         if person_ids.is_empty() {
             return Ok(HashSet::new());

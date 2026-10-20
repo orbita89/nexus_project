@@ -17,11 +17,11 @@ Workspace: `app/` (bin `nexus`), `modules/{auth,catalog,social,realtime}` (one c
 - Own tables only. NEVER SELECT/UPDATE or JOIN a foreign table (`users`, `entities`, ...). FK columns to foreign tables may exist; the data behind them is read ONLY through `shared::directory` traits held in `AppState`:
   - `state.entities`: `EntityDirectory` — `by_slug`, `by_ids`, `by_slugs` → `EntityRef` (impl: `catalog`)
   - `state.users`: `UserDirectory` — `by_username`, `by_ids` → `UserRef` (impl: `auth`)
-  - `state.interests`: `InterestDirectory` — `entity_ids`, `person_ids`, `tag_ids`, `entities_in_use`, `people_in_use` (impl: `social`)
+  - `state.interests`: `InterestDirectory` — `entity_ids`, `person_ids`, `tag_ids`, `room_ids`, `entities_in_use`, `people_in_use` (impl: `social`)
   - `state.ratings`: `EntityRatings` — `set`, `replace_all` (impl: `catalog`)
   - `state.people`: `PersonDirectory` — `by_slug`, `by_ids` → `PersonRef` (impl: `catalog`)
   - `state.tags`: `TagDirectory` — `by_slug`, `by_ids` → `TagRef` (impl: `catalog`)
-  - `state.chat`: `Chat` — `send`, `read` (impl: `social`; called by `realtime` for WS `chat.send`/`chat.read`)
+  - `state.chat`: `Chat` — `send`, `read`, `room_by_slug`, `room_slugs` (impl: `social`; called by `realtime` for WS `chat.send`/`chat.read`)
   Batch always (`by_ids`, `by_slugs`): one query per list, no N+1. New need → new directory method, never a JOIN.
 - Auth checks (`AuthUser`, `AdminUser`, `Role`) live in `shared` — never re-implement them inside a module.
 
@@ -30,7 +30,7 @@ Workspace: `app/` (bin `nexus`), `modules/{auth,catalog,social,realtime}` (one c
 - Cross-module notifications ONLY via `shared::events::EventBus` (`state.events.publish(...)`). NEVER call another module's code directly.
 - Publish strictly AFTER successful `tx.commit()`; on any error publish nothing.
 - `Event.data` = ids only — no texts, names or counts; clients re-read data via REST API. Only exception: `chat.message.created` carries the message itself (`social::chat`), otherwise every chat message = a GET from every online client.
-- Channels: `shared::events::Channel::{Thread, Entity, Person, Tag, User}`; the only consumer is `realtime`.
+- Channels: `shared::events::Channel::{Thread, Entity, Person, Tag, Room, User}`; the only consumer is `realtime`.
 
 ## 4. AUTO-UPDATE DOCS (CRITICAL — Definition of Done)
 

@@ -117,6 +117,8 @@ pub trait InterestDirectory: Send + Sync {
     async fn person_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>>;
     /// Теги в интересах пользователя.
     async fn tag_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>>;
+    /// Свои комнаты чата, в которые пользователь вступил.
+    async fn room_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>>;
     /// Какие из `person_ids` нужны пользователям (в интересах, есть чат). `catalog` не удаляет
     /// таких, даже когда у человека не осталось работ (перенос в архив).
     async fn people_in_use(&self, person_ids: &[Uuid]) -> AppResult<HashSet<Uuid>>;
@@ -146,12 +148,14 @@ pub trait EntityRatings: Send + Sync {
     async fn replace_all(&self, stats: &[(Uuid, RatingStats)]) -> AppResult<()>;
 }
 
-/// Комната чата: сущность, человек или тег каталога (по id).
+/// Комната чата: сущность, человек или тег каталога (по их id) или своя комната админа (по id
+/// комнаты).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChatRoom {
     Entity(Uuid),
     Person(Uuid),
     Tag(Uuid),
+    Room(Uuid),
 }
 
 /// Чат для `realtime`: сообщения, пришедшие по WebSocket (`chat.send`, `chat.read`), пишет
@@ -179,6 +183,11 @@ pub trait Chat: Send + Sync {
         room: ChatRoom,
         message_id: Uuid,
     ) -> AppResult<()>;
+    /// Своя комната по slug (`room:<slug>`): id и slug. Нет — `None`.
+    async fn room_by_slug(&self, state: &AppState, slug: &str)
+        -> AppResult<Option<(Uuid, String)>>;
+    /// slug своих комнат по id (удалённые пропускаются).
+    async fn room_slugs(&self, state: &AppState, ids: &[Uuid]) -> AppResult<HashMap<Uuid, String>>;
 }
 
 /// Все справочники разом: аргумент [`AppState::new`](crate::AppState::new).

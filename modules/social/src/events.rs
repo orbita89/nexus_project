@@ -10,9 +10,10 @@
 //! | `reply.created` | автор родителя (если отвечает не он сам) | `thread_id`, `post_id`, `parent_id`, `author_id` |
 //! | `review.created`, `review.updated`, `review.deleted` | сущность | `review_id`, `entity_id`, `author_id` |
 //! | `review.commented`, `review.comment_deleted` | сущность | `review_id`, `comment_id`, `entity_id`, `author_id` |
-//! | `interest.added`, `interest.removed` | пользователь | `entity_id`, `person_id` или `tag_id` |
+//! | `interest.added`, `interest.removed` | пользователь | `entity_id`, `person_id`, `tag_id` или `room_id` (вступил в свою комнату / вышел) |
 //! | `chat.message.created` | комната (сущность, человек или тег) | `kind`, `target_id`, `message` — само сообщение (исключение: иначе каждое сообщение — запрос каждого клиента) |
 //! | `chat.message.updated`, `chat.message.deleted` | комната | `kind`, `target_id`, `message_id` |
+//! | `chat.room.updated`, `chat.room.deleted` | своя комната | `room_id` |
 //! | `chat.read` | пользователь | `kind`, `target_id`, `message_id` — прочитано до него (другие устройства гасят счётчик) |
 
 use serde_json::json;
@@ -169,6 +170,7 @@ pub fn room_parts(room: ChatRoom) -> (&'static str, Uuid) {
         ChatRoom::Entity(id) => ("entity", id),
         ChatRoom::Person(id) => ("person", id),
         ChatRoom::Tag(id) => ("tag", id),
+        ChatRoom::Room(id) => ("room", id),
     }
 }
 
@@ -178,5 +180,16 @@ fn room_channel(room: ChatRoom) -> Channel {
         ChatRoom::Entity(id) => Channel::Entity(id),
         ChatRoom::Person(id) => Channel::Person(id),
         ChatRoom::Tag(id) => Channel::Tag(id),
+        ChatRoom::Room(id) => Channel::Room(id),
     }
+}
+
+/// `chat.room.updated` или `chat.room.deleted`: своя комната изменена или удалена админом —
+/// клиент перечитывает `GET /chat/rooms/{slug}` или закрывает её.
+pub fn chat_room_changed(kind: &'static str, room_id: Uuid) -> Event {
+    Event::new(
+        kind,
+        vec![Channel::Room(room_id)],
+        json!({ "room_id": room_id }),
+    )
 }

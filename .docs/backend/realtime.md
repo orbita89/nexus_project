@@ -7,9 +7,9 @@
 
 **Статус:** ✅ WebSocket с каналами (`thread:`, `entity:`, `user:me`), гости и вошедшие, автоподписка
 по интересам, продление входа без разрыва, лимиты и heartbeat. Шина — внутри процесса.
-Каналы людей и тегов (`person:`, `tag:`), автоподписка по интересам всех трёх видов. Чат комнат
-сущностей, людей и тегов: отправка и «прочитано» по WebSocket (`chat.send`, `chat.read`), сообщения —
-в каналы комнат. 🕓 Redis pub/sub для нескольких экземпляров приложения, комнаты админа.
+Каналы людей, тегов и своих комнат (`person:`, `tag:`, `room:`), автоподписка по интересам и
+вступлению. Чат комнат сущностей, людей, тегов и своих комнат админа: отправка и «прочитано» по WebSocket (`chat.send`, `chat.read`), сообщения —
+в каналы комнат. 🕓 Redis pub/sub для нескольких экземпляров приложения.
 
 <tables>
 
@@ -28,7 +28,7 @@
 
 - `state.entities` — `shared::directory::EntityDirectory` (реализует `catalog`): slug сущностей для каналов `entity:<slug>`.
 - `state.interests` — `shared::directory::InterestDirectory` (реализует `social`, `entity_ids(user)`): автоподписка соединений на интересы.
-- `state.chat` — `shared::directory::Chat` (реализует `social`, `send`, `read`): запись сообщений чата из `chat.send` / `chat.read`; комната `entity:`, `person:`, `tag:<slug>` разбирается как канал (`channels::chat_room`).
+- `state.chat` — `shared::directory::Chat` (реализует `social`, `send`, `read`): запись сообщений чата из `chat.send` / `chat.read`; комната `entity:`, `person:`, `tag:`, `room:<slug>` разбирается как канал (`channels::chat_room`); `room_by_slug`, `room_slugs` — slug своих комнат (таблицы `social`).
 - `state.people`, `state.tags` — `shared::directory::PersonDirectory`, `TagDirectory` (реализует `catalog`): slug людей и тегов для каналов `person:` / `tag:`.
 - `state.events` — `shared::events::EventBus` (`tokio::sync::broadcast`, ёмкость 1024): приём событий, которые публикуют другие модули.
 - Проверка подписи и срока access-токена — общий код `shared` (правило 3 «Правил границ»), не модуль `auth`.
@@ -65,8 +65,9 @@
 | `entity:<slug>` | все | Новые темы о сущности, сообщения в её темах, изменение и удаление этих тем, рецензии |
 | `person:<slug>` | все | Чат комнаты человека (`chat.message.*`). Неизвестный или скрытый человек — `error` |
 | `tag:<slug>` | все | Чат комнаты тега. Неизвестный тег — `error` |
+| `room:<slug>` | все | Своя комната админа: чат, `chat.room.updated` / `chat.room.deleted`. Неизвестная — `error` |
 | `user:me` | только после `auth`, подписывается сам | `reply.created` — ответили на ваше сообщение; `interest.added` / `interest.removed` |
-| интересы | только после `auth`, подписываются сами | Как `entity:<slug>`, `person:<slug>`, `tag:<slug>`: по каждой сущности, человеку и тегу из интересов пользователя (`InterestDirectory::entity_ids`, `person_ids`, `tag_ids`). `interest.added` / `interest.removed` с `entity_id`, `person_id` или `tag_id` меняют подписки на лету |
+| интересы | только после `auth`, подписываются сами | Как `entity:<slug>`, `person:<slug>`, `tag:<slug>`: по каждой сущности, человеку и тегу из интересов пользователя и своей комнате, в которую он вступил (`InterestDirectory::entity_ids`, `person_ids`, `tag_ids`, `room_ids`; slug комнат — `Chat::room_slugs`). `interest.added` / `interest.removed` с `entity_id`, `person_id`, `tag_id` или `room_id` меняют подписки на лету |
 
 Существование темы при подписке не проверяется (realtime не читает таблицы форума): на
 несуществующую тему просто не придёт событий. Неизвестная сущность — `error`.
@@ -102,7 +103,7 @@ JSON-сообщения с полем `type`. Соединение открыв�
 | `{"type":"subscribe","channels":["thread:<id>","entity:<slug>"]}` | Подписаться. Всё или ничего: при любой ошибке не подписывается ни на один | `subscribed` или `error` |
 | `{"type":"unsubscribe","channels":[...]}` | Отписаться от каналов, подписанных вручную | `unsubscribed` |
 | `{"type":"ping"}` | Проверка связи на уровне приложения | `pong` |
-| `{"type":"chat.send","room":"entity:<slug>","body":"…","reply_to":null,"client_id":"tmp-1"}` | Сообщение в чат комнаты `entity:`, `person:` или `tag:<slug>` (только после `auth`). Пишет `social` через `state.chat`; `reply_to`, `client_id` необязательны | `chat.sent` или `error` (с тем же `client_id`) |
+| `{"type":"chat.send","room":"entity:<slug>","body":"…","reply_to":null,"client_id":"tmp-1"}` | Сообщение в чат комнаты `entity:`, `person:`, `tag:` или `room:<slug>` (только после `auth`). Пишет `social` через `state.chat`; `reply_to`, `client_id` необязательны | `chat.sent` или `error` (с тем же `client_id`) |
 | `{"type":"chat.read","room":"entity:<slug>","message_id":"…"}` | Прочитано в комнате до сообщения (только после `auth`) | `chat.read_saved` или `error` |
 
 ### Сервер → клиент
@@ -119,7 +120,7 @@ JSON-сообщения с полем `type`. Соединение открыв�
 | `{"type":"pong"}` | Ответ на `ping` |
 | `{"type":"chat.sent","client_id":"tmp-1","room":"entity:dune-2021","message":{…}}` | Сообщение записано; `message` — как в событии `chat.message.created` (его получат подписчики комнаты, в том числе другие соединения отправителя) |
 | `{"type":"chat.read_saved","room":"…","message_id":"…"}` | Прочитанное сохранено; остальным соединениям пользователя — событие `chat.read` в `user:me` |
-| `{"type":"error","error":"too many messages","retry_after":10,"client_id":"…"}` | Лимит частоты чата (5 сообщений за 10 с). Другие ошибки чата: `not authenticated`, `unknown chat room: …`, `unknown entity|person|tag in channel: …`, ошибки текста и `reply_to`, `not found` |
+| `{"type":"error","error":"too many messages","retry_after":10,"client_id":"…"}` | Лимит частоты чата (5 сообщений за 10 с). Другие ошибки чата: `not authenticated`, `unknown chat room: …`, `unknown entity|person|tag|room in channel: …`, ошибки текста и `reply_to`, `not found` |
 
 ### Срок токена: продление без разрыва
 
@@ -169,7 +170,7 @@ Access-токен живёт 15 минут, а соединение — часа
 |---|---|
 | `lib.rs` | Роутер `/ws`, константы лимитов |
 | `connection.rs` | Цикл соединения: сообщения клиента, события шины, heartbeat, срок токена |
-| `channels.rs` | Имена каналов ↔ `shared::events::Channel` (`thread:`, `entity:`, `person:`, `tag:`); каналы интересов (`interests`); комнаты чата (`chat_room`) |
+| `channels.rs` | Имена каналов ↔ `shared::events::Channel` (`thread:`, `entity:`, `person:`, `tag:`, `room:`); каналы интересов (`interests`, `rooms`); комнаты чата (`chat_room`) |
 | `registry.rs` | Счётчик соединений пользователя |
 
 Шина — `libs/shared/src/events.rs`. Тесты — `app/tests/realtime.rs` и `app/tests/chat.rs` (чат): настоящий WebSocket против
@@ -183,7 +184,7 @@ Access-токен живёт 15 минут, а соединение — часа
 ## Дальше 🕓
 
 - Redis pub/sub за `EventBus`, когда экземпляров приложения станет несколько.
-- Чат, этап 3: комнаты админа. Комнаты сущностей, людей и тегов — ✅, см. social.md.
+- Чат: «печатает…», присутствие в комнате. Комнаты сущностей, людей, тегов и свои комнаты админа — ✅, см. social.md.
 - Присутствие («сейчас читают тему: 5»).
 
 </roadmap>

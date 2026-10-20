@@ -1,5 +1,5 @@
 //! Чат по интересам: комната на каждую сущность (`entity:<slug>`), человека (`person:<slug>`) и
-//! тег (`tag:<slug>`) каталога.
+//! тег (`tag:<slug>`) каталога и свои комнаты админа (`room:<slug>`, см. `rooms`).
 //!
 //! Отправка и «прочитано» — по WebSocket: `realtime` принимает `chat.send` / `chat.read` и
 //! вызывает [`PgChat`] через `shared::directory::Chat` (`state.chat`). Здесь же REST: мои чаты
@@ -37,9 +37,11 @@ const HISTORY_LIMIT: i64 = 50;
 const MAX_HISTORY_LIMIT: i64 = 100;
 
 /// Вид комнаты (`entity`, `person`, `tag`) и id того, чья она, — из строки `chat_rooms` `r`.
+/// У своей комнаты (`slug`) target — id самой комнаты.
 const ROOM_COLUMNS: &str = "CASE WHEN r.entity_id IS NOT NULL THEN 'entity'
-          WHEN r.person_id IS NOT NULL THEN 'person' ELSE 'tag' END AS kind,
-     coalesce(r.entity_id, r.person_id, r.tag_id) AS target_id";
+          WHEN r.person_id IS NOT NULL THEN 'person'
+          WHEN r.tag_id IS NOT NULL THEN 'tag' ELSE 'room' END AS kind,
+     coalesce(r.entity_id, r.person_id, r.tag_id, r.id) AS target_id";
 
 const MESSAGE_COLUMNS: &str = "m.id, m.author_id, m.reply_to, m.body, m.created_at,
      m.edited_at, m.deleted_at";
@@ -50,6 +52,7 @@ fn column(room: ChatRoom) -> &'static str {
         ChatRoom::Entity(_) => "entity_id",
         ChatRoom::Person(_) => "person_id",
         ChatRoom::Tag(_) => "tag_id",
+        ChatRoom::Room(_) => "id",
     }
 }
 
@@ -57,7 +60,8 @@ fn room_from(kind: &str, id: Uuid) -> ChatRoom {
     match kind {
         "entity" => ChatRoom::Entity(id),
         "person" => ChatRoom::Person(id),
-        _ => ChatRoom::Tag(id),
+        "tag" => ChatRoom::Tag(id),
+        _ => ChatRoom::Room(id),
     }
 }
 
@@ -84,10 +88,10 @@ impl MessageRow {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ChatMessage {
     pub id: Uuid,
-    /// Вид комнаты: `entity`, `person`, `tag`.
+    /// Вид комнаты: `entity`, `person`, `tag`, `room`.
     #[schema(example = "entity")]
     pub kind: String,
-    /// id сущности, человека или тега комнаты.
+    /// id сущности, человека или тега комнаты; у своей комнаты — id комнаты.
     pub target_id: Uuid,
     pub author: Option<UserRef>,
     pub body: Option<String>,
@@ -98,10 +102,31 @@ pub struct ChatMessage {
     pub deleted: bool,
 }
 
-/// Комната в списке «мои чаты». Заполнено ровно одно из `entity`, `person`, `tag` — по `kind`.
+/// Своя комната (админа): название, описание, счётчики.
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+pub struct CustomRoom {
+    pub id: Uuid,
+    #[schema(example = "cyberpunk-fans")]
+    pub slug: String,
+    #[schema(example = "Киберпанк")]
+    pub title: String,
+    pub description: Option<String>,
+    pub members_count: i64,
+    pub messages_count: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Колонки [`CustomRoom`] из `chat_rooms r`.
+pub(crate) const CUSTOM_COLUMNS: &str = "r.id, r.slug, r.title, r.description,
+     (SELECT count(*) FROM chat_room_members cm WHERE cm.room_id = r.id) AS members_count,
+     r.messages_count, r.created_at";
+
+/// Комната в списке «мои чаты». Заполнено ровно одно из `entity`, `person`, `tag`, `custom` —
+/// по `kind`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ChatSummary {
-    /// Имя канала и комнаты для WebSocket: `entity:<slug>`, `person:<slug>`, `tag:<slug>`.
+    /// Имя канала и комнаты для WebSocket: `entity:<slug>`, `person:<slug>`, `tag:<slug>`,
+    /// `room:<slug>`.
     #[schema(example = "entity:dune-2021")]
     pub room: String,
     #[schema(example = "entity")]
@@ -109,6 +134,8 @@ pub struct ChatSummary {
     pub entity: Option<EntityRef>,
     pub person: Option<PersonRef>,
     pub tag: Option<TagRef>,
+    /// Своя комната админа (`kind = room`).
+    pub custom: Option<CustomRoom>,
     /// `null` — сообщений ещё нет.
     pub last_message: Option<ChatMessage>,
     /// Непрочитанные чужие сообщения, не больше 100.
@@ -145,8 +172,18 @@ async fn room_by_slug(state: &AppState, kind: &str, slug: &str) -> AppResult<Cha
         "entity" => ChatRoom::Entity(refs::entity(state, slug).await?.id),
         "person" => ChatRoom::Person(refs::person(state, slug).await?.id),
         "tag" => ChatRoom::Tag(refs::tag(state, slug).await?.id),
+        "room" => ChatRoom::Room(custom_room_id(&state.db, slug).await?),
         _ => return Err(AppError::NotFound),
     })
+}
+
+/// id своей комнаты по slug, иначе 404.
+pub(crate) async fn custom_room_id(db: &sqlx::PgPool, slug: &str) -> AppResult<Uuid> {
+    sqlx::query_scalar("SELECT id FROM chat_rooms WHERE slug = $1")
+        .bind(slug)
+        .fetch_optional(db)
+        .await?
+        .ok_or(AppError::NotFound)
 }
 
 /// Строки → сообщения: авторы одним запросом.
@@ -189,9 +226,17 @@ async fn message_row(db: &mut PgConnection, id: Uuid) -> AppResult<Option<Messag
     .await?)
 }
 
-/// Комната: найти или создать. Строка комнаты остаётся заблокированной до конца транзакции —
-/// счётчик и последнее сообщение меняются по очереди. Нет сущности, человека или тега — 404.
+/// Комната: найти или создать (своя — только найти). Строка комнаты остаётся заблокированной до
+/// конца транзакции — счётчик и последнее сообщение меняются по очереди. Нет сущности, человека,
+/// тега или своей комнаты — 404.
 async fn room_id(tx: &mut PgConnection, room: ChatRoom) -> AppResult<Uuid> {
+    if let ChatRoom::Room(id) = room {
+        return sqlx::query_scalar("SELECT id FROM chat_rooms WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(tx)
+            .await?
+            .ok_or(AppError::NotFound);
+    }
     let column = column(room);
     sqlx::query_scalar(&format!(
         "INSERT INTO chat_rooms ({column}) VALUES ($1)
@@ -321,6 +366,32 @@ impl Chat for PgChat {
         events::publish(state, events::chat_read(user_id, room, message_id));
         Ok(())
     }
+
+    async fn room_by_slug(
+        &self,
+        state: &AppState,
+        slug: &str,
+    ) -> AppResult<Option<(Uuid, String)>> {
+        Ok(
+            sqlx::query_as("SELECT id, slug FROM chat_rooms WHERE slug = $1")
+                .bind(slug)
+                .fetch_optional(&state.db)
+                .await?,
+        )
+    }
+
+    async fn room_slugs(&self, state: &AppState, ids: &[Uuid]) -> AppResult<HashMap<Uuid, String>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, slug FROM chat_rooms WHERE id = ANY($1) AND slug IS NOT NULL",
+        )
+        .bind(ids)
+        .fetch_all(&state.db)
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
 }
 
 /// Прочитано до `message_id`; назад не двигается (uuidv7 растёт со временем).
@@ -353,7 +424,8 @@ struct SummaryRow {
     muted: bool,
 }
 
-/// Мои чаты: комнаты всех сущностей, людей и тегов из интересов (сообщений может ещё не быть).
+/// Мои чаты: комнаты всех сущностей, людей и тегов из интересов и свои комнаты, в которые
+/// вступил (сообщений может ещё не быть).
 /// Сверху — с самыми свежими сообщениями, затем без сообщений (новые интересы сверху).
 #[utoipa::path(
     get, operation_id = "list_own_chats", path = "/chats", tag = "chat",
@@ -380,7 +452,10 @@ pub async fn list_own(
              UNION ALL
              SELECT 'tag', i.tag_id, i.created_at, c.id
              FROM user_tag_interests i LEFT JOIN chat_rooms c ON c.tag_id = i.tag_id
-             WHERE i.user_id = $1)
+             WHERE i.user_id = $1
+             UNION ALL
+             SELECT 'room', cm.room_id, cm.created_at, cm.room_id
+             FROM chat_room_members cm WHERE cm.user_id = $1)
          SELECT mine.kind, mine.target_id, r.last_message_id,
                 (SELECT count(*) FROM (
                      SELECT 1 FROM chat_messages m
@@ -422,11 +497,20 @@ pub async fn list_own(
     let entities = refs::entities(&state, ids_of("entity")).await?;
     let people = refs::people(&state, ids_of("person")).await?;
     let tags = refs::tags(&state, ids_of("tag")).await?;
+    let custom: HashMap<Uuid, CustomRoom> = sqlx::query_as::<_, CustomRoom>(&format!(
+        "SELECT {CUSTOM_COLUMNS} FROM chat_rooms r WHERE r.id = ANY($1)"
+    ))
+    .bind(ids_of("room"))
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .map(|room| (room.id, room))
+    .collect();
 
     Ok(Json(
         rows.into_iter()
             .filter_map(|row| {
-                let (mut entity, mut person, mut tag) = (None, None, None);
+                let (mut entity, mut person, mut tag, mut own) = (None, None, None, None);
                 let slug = match row.kind.as_str() {
                     "entity" => {
                         let found = entities.get(&row.target_id)?.clone();
@@ -440,10 +524,16 @@ pub async fn list_own(
                         person = Some(found);
                         slug
                     }
-                    _ => {
+                    "tag" => {
                         let found = tags.get(&row.target_id)?.clone();
                         let slug = found.slug.clone();
                         tag = Some(found);
+                        slug
+                    }
+                    _ => {
+                        let found = custom.get(&row.target_id)?.clone();
+                        let slug = found.slug.clone();
+                        own = Some(found);
                         slug
                     }
                 };
@@ -453,6 +543,7 @@ pub async fn list_own(
                     entity,
                     person,
                     tag,
+                    custom: own,
                     last_message: row.last_message_id.and_then(|id| last.remove(&id)),
                     unread: row.unread,
                     muted: row.muted,
@@ -467,8 +558,8 @@ pub async fn list_own(
 #[utoipa::path(
     get, operation_id = "chat_history", path = "/chat/{kind}/{slug}/messages", tag = "chat",
     params(
-        ("kind" = String, Path, description = "Вид комнаты: `entity`, `person`, `tag`", example = "entity"),
-        ("slug" = String, Path, description = "slug сущности, человека или тега", example = "dune-2021"),
+        ("kind" = String, Path, description = "Вид комнаты: `entity`, `person`, `tag`, `room`", example = "entity"),
+        ("slug" = String, Path, description = "slug сущности, человека, тега или своей комнаты", example = "dune-2021"),
         HistoryQuery,
     ),
     responses(
@@ -628,8 +719,8 @@ pub async fn delete(
     put, operation_id = "mute_chat", path = "/chat/{kind}/{slug}/mute", tag = "chat",
     security(("bearer" = [])),
     params(
-        ("kind" = String, Path, description = "Вид комнаты: `entity`, `person`, `tag`", example = "entity"),
-        ("slug" = String, Path, description = "slug сущности, человека или тега", example = "dune-2021"),
+        ("kind" = String, Path, description = "Вид комнаты: `entity`, `person`, `tag`, `room`", example = "entity"),
+        ("slug" = String, Path, description = "slug сущности, человека, тега или своей комнаты", example = "dune-2021"),
     ),
     responses(
         (status = 204, description = "Заглушена (повторно — тоже 204)"),
@@ -659,8 +750,8 @@ pub async fn mute(
     delete, operation_id = "unmute_chat", path = "/chat/{kind}/{slug}/mute", tag = "chat",
     security(("bearer" = [])),
     params(
-        ("kind" = String, Path, description = "Вид комнаты: `entity`, `person`, `tag`", example = "entity"),
-        ("slug" = String, Path, description = "slug сущности, человека или тега", example = "dune-2021"),
+        ("kind" = String, Path, description = "Вид комнаты: `entity`, `person`, `tag`, `room`", example = "entity"),
+        ("slug" = String, Path, description = "slug сущности, человека, тега или своей комнаты", example = "dune-2021"),
     ),
     responses(
         (status = 204, description = "Не заглушена"),

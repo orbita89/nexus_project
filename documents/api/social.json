@@ -10,6 +10,229 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/social/admin/chat/rooms": {
+      "post": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Создать свою комнату.",
+        "operationId": "admin_create_chat_room",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRoom"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomRoom"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный slug, название или описание",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/admin/chat/rooms/{slug}": {
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Удалить свою комнату вместе с сообщениями и участниками → 204.",
+        "operationId": "admin_delete_chat_room",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "cyberpunk-fans"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Изменить название или описание своей комнаты (slug не меняется: это адрес канала).",
+        "operationId": "admin_update_chat_room",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "cyberpunk-fans"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRoom"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomRoom"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверное название или описание",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/admin/collections/{id}": {
       "delete": {
         "tags": [
@@ -623,6 +846,192 @@
         ]
       }
     },
+    "/api/v1/social/chat/rooms": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Свои комнаты: больше участников — выше.",
+        "operationId": "list_chat_rooms",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница комнат",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_CustomRoom"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/social/chat/rooms/{slug}": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Своя комната по slug.",
+        "operationId": "get_chat_room",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "cyberpunk-fans"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Комната",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomRoom"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/social/chat/rooms/{slug}/membership": {
+      "put": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Вступить в комнату → 204 (повторно — тоже 204): она в «моих чатах», канал подписан.",
+        "operationId": "join_chat_room",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "cyberpunk-fans"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Участник"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Выйти из комнаты → 204 (даже если не был участником).",
+        "operationId": "leave_chat_room",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "cyberpunk-fans"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Не участник"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/chat/{kind}/{slug}/messages": {
       "get": {
         "tags": [
@@ -634,7 +1043,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Вид комнаты: `entity`, `person`, `tag`",
+            "description": "Вид комнаты: `entity`, `person`, `tag`, `room`",
             "required": true,
             "schema": {
               "type": "string"
@@ -644,7 +1053,7 @@
           {
             "name": "slug",
             "in": "path",
-            "description": "slug сущности, человека или тега",
+            "description": "slug сущности, человека, тега или своей комнаты",
             "required": true,
             "schema": {
               "type": "string"
@@ -717,7 +1126,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Вид комнаты: `entity`, `person`, `tag`",
+            "description": "Вид комнаты: `entity`, `person`, `tag`, `room`",
             "required": true,
             "schema": {
               "type": "string"
@@ -727,7 +1136,7 @@
           {
             "name": "slug",
             "in": "path",
-            "description": "slug сущности, человека или тега",
+            "description": "slug сущности, человека, тега или своей комнаты",
             "required": true,
             "schema": {
               "type": "string"
@@ -776,7 +1185,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Вид комнаты: `entity`, `person`, `tag`",
+            "description": "Вид комнаты: `entity`, `person`, `tag`, `room`",
             "required": true,
             "schema": {
               "type": "string"
@@ -786,7 +1195,7 @@
           {
             "name": "slug",
             "in": "path",
-            "description": "slug сущности, человека или тега",
+            "description": "slug сущности, человека, тега или своей комнаты",
             "required": true,
             "schema": {
               "type": "string"
@@ -831,7 +1240,7 @@
         "tags": [
           "chat"
         ],
-        "summary": "Мои чаты: комнаты всех сущностей, людей и тегов из интересов (сообщений может ещё не быть).\nСверху — с самыми свежими сообщениями, затем без сообщений (новые интересы сверху).",
+        "summary": "Мои чаты: комнаты всех сущностей, людей и тегов из интересов и свои комнаты, в которые\nвступил (сообщений может ещё не быть).\nСверху — с самыми свежими сообщениями, затем без сообщений (новые интересы сверху).",
         "operationId": "list_own_chats",
         "responses": {
           "200": {
@@ -4779,7 +5188,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "Вид комнаты: `entity`, `person`, `tag`.",
+            "description": "Вид комнаты: `entity`, `person`, `tag`, `room`.",
             "example": "entity"
           },
           "reply_to": {
@@ -4793,13 +5202,13 @@
           "target_id": {
             "type": "string",
             "format": "uuid",
-            "description": "id сущности, человека или тега комнаты."
+            "description": "id сущности, человека или тега комнаты; у своей комнаты — id комнаты."
           }
         }
       },
       "ChatSummary": {
         "type": "object",
-        "description": "Комната в списке «мои чаты». Заполнено ровно одно из `entity`, `person`, `tag` — по `kind`.",
+        "description": "Комната в списке «мои чаты». Заполнено ровно одно из `entity`, `person`, `tag`, `custom` —\nпо `kind`.",
         "required": [
           "room",
           "kind",
@@ -4807,6 +5216,17 @@
           "muted"
         ],
         "properties": {
+          "custom": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CustomRoom",
+                "description": "Своя комната админа (`kind = room`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "entity": {
             "oneOf": [
               {
@@ -4847,7 +5267,7 @@
           },
           "room": {
             "type": "string",
-            "description": "Имя канала и комнаты для WebSocket: `entity:<slug>`, `person:<slug>`, `tag:<slug>`.",
+            "description": "Имя канала и комнаты для WebSocket: `entity:<slug>`, `person:<slug>`, `tag:<slug>`,\n`room:<slug>`.",
             "example": "entity:dune-2021"
           },
           "tag": {
@@ -5050,6 +5470,32 @@
         },
         "additionalProperties": false
       },
+      "CreateRoom": {
+        "type": "object",
+        "required": [
+          "slug",
+          "title"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "До 500 символов."
+          },
+          "slug": {
+            "type": "string",
+            "description": "a-z, 0-9 и дефисы между ними, 1–80: адрес `room:<slug>`.",
+            "example": "cyberpunk-fans"
+          },
+          "title": {
+            "type": "string",
+            "description": "1–100 символов.",
+            "example": "Киберпанк"
+          }
+        }
+      },
       "CreateThread": {
         "type": "object",
         "description": "Новая тема.",
@@ -5082,6 +5528,50 @@
           }
         },
         "additionalProperties": false
+      },
+      "CustomRoom": {
+        "type": "object",
+        "description": "Своя комната (админа): название, описание, счётчики.",
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "members_count",
+          "messages_count",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "members_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "messages_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "slug": {
+            "type": "string",
+            "example": "cyberpunk-fans"
+          },
+          "title": {
+            "type": "string",
+            "example": "Киберпанк"
+          }
+        }
       },
       "EntityRef": {
         "type": "object",
@@ -5461,6 +5951,81 @@
                 "updated_at": {
                   "type": "string",
                   "format": "date-time"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_CustomRoom": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Своя комната (админа): название, описание, счётчики.",
+              "required": [
+                "id",
+                "slug",
+                "title",
+                "members_count",
+                "messages_count",
+                "created_at"
+              ],
+              "properties": {
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "members_count": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "messages_count": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "slug": {
+                  "type": "string",
+                  "example": "cyberpunk-fans"
+                },
+                "title": {
+                  "type": "string",
+                  "example": "Киберпанк"
                 }
               }
             }
@@ -6828,6 +7393,25 @@
           }
         },
         "additionalProperties": false
+      },
+      "UpdateRoom": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "До 500 символов; пустая строка — убрать; не передан — не меняется."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "1–100 символов; не передан — не меняется."
+          }
+        }
       },
       "UpdateThread": {
         "type": "object",

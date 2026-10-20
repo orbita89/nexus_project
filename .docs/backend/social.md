@@ -8,10 +8,10 @@
 **Статус:** ✅ рецензии и оценки (спойлеры, лайки и дизлайки, комментарии, только после выхода),
 реакции, отметки «позже» / «просмотрено», подписки на пользователей, коллекции (с превью),
 социальный профиль, форум (темы на несколько сущностей, сообщения с ветками, закрытие тем),
-интересы (сущности, люди, теги), чат по интересам (комнаты сущностей, людей и тегов, отправка по
-WebSocket), лента, события
+интересы (сущности, люди, теги), чат по интересам (комнаты сущностей, людей, тегов и свои комнаты
+админа, отправка по WebSocket), лента, события
 для `realtime`, модерация, мини-дамп.
-🕓 чат: комнаты админа (этап 3); «новое в ленте» по подпискам в реальном времени, более умное «популярное».
+🕓 «новое в ленте» по подпискам в реальном времени, более умное «популярное».
 
 Все таблицы ссылаются на `entities.id`, а не на «фильм» или «книгу». Поэтому любая функция
 модуля сразу работает для любого типа контента.
@@ -228,6 +228,21 @@ WebSocket), лента, события
 нескольких экземплярах) — иначе 429; `reply_to` — неудалённое сообщение той же комнаты;
 непрочитанные — чужие неудалённые сообщения новее `last_read_id`, считаются до 100 (`MAX_UNREAD`).
 
+### Свои комнаты админа и `chat_room_members` ✅ — чат, этап 3
+
+Миграция `20261101100000_social_chat_rooms.sql` (2026-10-20). Своя комната — строка `chat_rooms` с
+`slug` (UNIQUE, a-z/0-9/дефисы, 1–80: канал `room:<slug>`), `title` (1–100), `description` (до 500),
+`created_by` FK → `users` SET NULL; CHECK `chat_rooms_one_target` теперь
+`num_nonnulls(entity_id, person_id, tag_id, slug) = 1`, CHECK `chat_rooms_custom_title` — `title` есть
+ровно у своих. У своей комнаты `target_id` в сообщениях и событиях — id самой комнаты.
+
+| Таблица | Колонки | Индексы |
+|---|---|---|
+| `chat_room_members` | PK (`user_id` FK → `users` CASCADE, `room_id` FK → `chat_rooms` CASCADE), `created_at` | (`user_id`, `created_at DESC`); `room_id` — число участников |
+
+Вступление — как интерес: комната в «моих чатах», канал realtime подписывается сам
+(`InterestDirectory::room_ids`). Писать может любой вошедший (как в остальных комнатах).
+
 ### `user_person_interests`, `user_tag_interests` ✅ — интересы к людям и тегам
 
 Миграция `20261031100000_social_chat_people_tags.sql` (2026-10-20). Как `user_interests`, но для
@@ -281,11 +296,11 @@ WebSocket), лента, события
 `social` реализует и `Chat` (`social::chat::PgChat`, `state.chat`): `send(state, user, ChatRoom,
 body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, message_id)`. Его вызывает
 `realtime` на `chat.send` / `chat.read` — модули не знают друг о друге, запись в таблицы чата
-остаётся у `social`, событие `social` публикует сам после `commit`. `ChatRoom::{Entity, Person, Tag}(id)`.
+остаётся у `social`, событие `social` публикует сам после `commit`. `ChatRoom::{Entity, Person, Tag, Room}(id)`; для realtime ещё `room_by_slug(slug)`, `room_slugs(ids)` — slug своих комнат.
 
 Люди и теги — справочники `PersonDirectory` (`state.people`) и `TagDirectory` (`state.tags`),
 реализует `catalog` (`by_slug`, `by_ids` → `PersonRef` `{id, slug, full_name, photo_url}`, `TagRef`
-`{id, slug, name, kind}`). `InterestDirectory` дополнен: `person_ids(user)`, `tag_ids(user)` —
+`{id, slug, name, kind}`). `InterestDirectory` дополнен: `person_ids(user)`, `tag_ids(user)`, `room_ids(user)` (вступил) —
 автоподписка realtime; `people_in_use(ids)` — люди в `user_person_interests` или с комнатой
 `chat_rooms.person_id`: `catalog` не удаляет их при переносе в архив.
 
@@ -442,14 +457,20 @@ WebSocket-соединений пользователя (`interest.added` / `int
 
 | Метод | Путь | Кто | Что делает |
 |---|---|---|---|
-| GET | `/chats` | user | Мои чаты = комнаты всех сущностей, людей и тегов из интересов (сообщений может не быть): `[{room: "entity:<slug>" \| "person:<slug>" \| "tag:<slug>", kind, entity \| null, person \| null, tag \| null, last_message \| null, unread (до 100), muted}]` — из `entity`/`person`/`tag` заполнено одно, по `kind`; сверху со свежими сообщениями, затем без сообщений (новые интересы сверху). Без пагинации (интересов ≤ 3 × 500) |
-| GET | `/chat/{kind}/{slug}/messages?before=&limit=` | все | История комнаты (`kind` — `entity`, `person`, `tag`): `{items, next_before}` — `limit` 1–100 (50) сообщений старше `before` (без него — последние), в `items` старые сверху; `next_before` — курсор дальше в прошлое, `null` — начало. 400 — `limit` вне 1–100; 404 — неизвестный `kind` или slug |
+| GET | `/chats` | user | Мои чаты = комнаты всех сущностей, людей и тегов из интересов и свои комнаты, в которые вступил (сообщений может не быть): `[{room: "entity:<slug>" \| "person:<slug>" \| "tag:<slug>" \| "room:<slug>", kind, entity \| null, person \| null, tag \| null, custom \| null, last_message \| null, unread (до 100), muted}]` — из `entity`/`person`/`tag`/`custom` заполнено одно, по `kind`; сверху со свежими сообщениями, затем без сообщений (новые интересы сверху). Без пагинации (интересов ≤ 3 × 500) |
+| GET | `/chat/{kind}/{slug}/messages?before=&limit=` | все | История комнаты (`kind` — `entity`, `person`, `tag`, `room`): `{items, next_before}` — `limit` 1–100 (50) сообщений старше `before` (без него — последние), в `items` старые сверху; `next_before` — курсор дальше в прошлое, `null` — начало. 400 — `limit` вне 1–100; 404 — неизвестный `kind` или slug |
 | GET | `/chat/messages/{id}` | все | Одно сообщение (перечитать по `chat.message.updated` / `deleted`). 404 — нет |
 | PATCH | `/chat/messages/{id}` | автор | `{body}` 1–2000 → 200 сообщение с `edited_at`. 403 — чужое, 400 — пусто/длинно/удалено, 404 — нет |
 | DELETE | `/chat/messages/{id}` | автор или admin | Мягкое удаление → 204 (повторно — 204). 403 — чужое, 404 — нет |
 | PUT / DELETE | `/chat/{kind}/{slug}/mute` | user | Заглушить / снять → 204 (повторно — 204). 404 — неизвестный `kind` или slug |
+| GET | `/chat/rooms` | все | Свои комнаты админа, больше участников — выше: `Page<CustomRoom>` (`?limit=&offset=`) |
+| GET | `/chat/rooms/{slug}` | все | Комната: `CustomRoom` `{id, slug, title, description, members_count, messages_count, created_at}`. 404 — нет |
+| PUT / DELETE | `/chat/rooms/{slug}/membership` | user | Вступить / выйти → 204 (повторно — 204); публикует `interest.added` / `interest.removed` с `room_id`. 404 — нет комнаты |
+| POST | `/admin/chat/rooms` | admin | `{slug, title, description?}` → 201 `CustomRoom`. 400 — неверный slug (a-z, 0-9, дефисы между ними, 1–80), пустое/длинное название (1–100), описание > 500; 409 — slug занят |
+| PATCH | `/admin/chat/rooms/{slug}` | admin | `{title?, description?}` (пустое описание — убрать; slug не меняется) → 200 `CustomRoom`, событие `chat.room.updated`. 404 — нет |
+| DELETE | `/admin/chat/rooms/{slug}` | admin | Удалить с сообщениями и участниками → 204, событие `chat.room.deleted`. 404 — нет |
 
-`ChatMessage`: `id`, `kind` (`entity` / `person` / `tag`), `target_id` (id сущности, человека или тега), `author` (`UserRef`; `null` у удалённого), `body` (`null` у
+`ChatMessage`: `id`, `kind` (`entity` / `person` / `tag` / `room`), `target_id` (id сущности, человека, тега или своей комнаты), `author` (`UserRef`; `null` у удалённого), `body` (`null` у
 удалённого), `reply_to`, `created_at`, `edited_at`, `deleted`. Тег OpenAPI — `chat`.
 
 ### Отметки «Посмотреть позже» и «Просмотрено»
@@ -551,6 +572,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `ratings.rs` | Сводки оценок для сортировок каталога (`EntityRatings`) |
 | `threads.rs`, `posts.rs` | Форум: темы и сообщения |
 | `interests.rs` | Интересы: сущности, люди, теги (общие `add_interest` / `remove_interest`) |
+| `rooms.rs` | Свои комнаты админа: список, комната, вступление и выход, создание, правка, удаление |
 | `chat.rs` | Чат: `PgChat` (`shared::directory::Chat` для realtime), мои чаты, история, правка, удаление, заглушение |
 | `feed.rs` | Лента: ярусы, курсор |
 | `events.rs` | События для `realtime` |
@@ -583,9 +605,10 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `reply.created` | автор сообщения, на которое ответили (себе — нет) | `thread_id`, `post_id`, `parent_id`, `author_id` |
 | `review.created`, `review.updated`, `review.deleted` | сущность | `review_id`, `entity_id`, `author_id` |
 | `review.commented`, `review.comment_deleted` | сущность | `review_id`, `comment_id`, `entity_id`, `author_id` |
-| `interest.added`, `interest.removed` | пользователь | `entity_id`, `person_id` или `tag_id` |
-| `chat.message.created` | комната: `entity:`, `person:` или `tag:` | `kind`, `target_id`, `message` — **сообщение целиком** (`ChatMessage`). Исключение из правила «только id»: иначе каждое сообщение — запрос каждого онлайн-клиента |
+| `interest.added`, `interest.removed` | пользователь | `entity_id`, `person_id`, `tag_id` или `room_id` (вступил в свою комнату / вышел) |
+| `chat.message.created` | комната: `entity:`, `person:`, `tag:` или `room:` | `kind`, `target_id`, `message` — **сообщение целиком** (`ChatMessage`). Исключение из правила «только id»: иначе каждое сообщение — запрос каждого онлайн-клиента |
 | `chat.message.updated`, `chat.message.deleted` | комната | `kind`, `target_id`, `message_id` — перечитать `GET /chat/messages/{id}` |
+| `chat.room.updated`, `chat.room.deleted` | своя комната (`room:`) | `room_id` — перечитать `GET /chat/rooms/{slug}` или закрыть |
 | `chat.read` | пользователь | `kind`, `target_id`, `message_id` — прочитано до него: другие устройства гасят счётчик |
 
 `thread.updated` — и правка автором, и закрытие/открытие admin; `thread.deleted` и `post.deleted` —
@@ -600,7 +623,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 
 - «Новое в ленте» в реальном времени по подпискам на людей: сейчас по интересам это уже приходит
   через каналы сущностей `realtime`, по людям нужен новый канал.
-- Чат, этап 3: комнаты админа (`room:<slug>`, вступление).
+- Чат: модерация (бан в комнате, жалобы), вложения, «печатает…».
 - «Популярное» сложнее: за период, с рецензиями и коллекциями, с учётом интересов похожих людей.
 
 </roadmap>

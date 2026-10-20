@@ -1,8 +1,8 @@
 //! Одно WebSocket-соединение: сообщения клиента, события шины, heartbeat и срок токена.
 //!
 //! Соединение открывается гостем: можно подписаться на публичные каналы (`thread:`, `entity:`,
-//! `person:`, `tag:`). `auth` с access-токеном добавляет личный канал `user:me` и каналы
-//! интересов (сущности, люди, теги).
+//! `person:`, `tag:`, `room:`). `auth` с access-токеном добавляет личный канал `user:me` и каналы
+//! интересов (сущности, люди, теги, свои комнаты, в которые вступил).
 //! Токен живёт 15 минут: за минуту до конца сервер присылает `auth_expiring`, клиент обновляет
 //! токен через REST и присылает новый `auth` — соединение и подписки не прерываются. Не прислал —
 //! соединение становится гостевым (`auth_expired`): личные каналы отключаются, ручные остаются.
@@ -380,7 +380,7 @@ impl Conn {
     }
 
     /// Интерес добавлен или убран (в том числе с другого устройства) — меняем подписки.
-    /// В данных — `entity_id`, `person_id` или `tag_id`.
+    /// В данных — `entity_id`, `person_id`, `tag_id` или `room_id` (вступил в свою комнату / вышел).
     async fn follow_interests(&mut self, event: &Event) -> Result<(), AppError> {
         let id_of = |key: &str| {
             event
@@ -398,8 +398,10 @@ impl Conn {
             Some((Channel::Entity(id), id))
         } else if let Some(id) = id_of("person_id") {
             Some((Channel::Person(id), id))
+        } else if let Some(id) = id_of("tag_id") {
+            Some((Channel::Tag(id), id))
         } else {
-            id_of("tag_id").map(|id| (Channel::Tag(id), id))
+            id_of("room_id").map(|id| (Channel::Room(id), id))
         };
         let Some((channel, id)) = found else {
             return Ok(());
@@ -411,7 +413,8 @@ impl Conn {
         let named = match channel {
             Channel::Entity(_) => channels::entities(&self.state, &[id]).await?,
             Channel::Person(_) => channels::people(&self.state, &[id]).await?,
-            _ => channels::tags(&self.state, &[id]).await?,
+            Channel::Tag(_) => channels::tags(&self.state, &[id]).await?,
+            _ => channels::rooms(&self.state, &[id]).await?,
         };
         self.interests.extend(named);
         Ok(())
