@@ -317,6 +317,26 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 | `entities_libgen_work_idx` | `(metadata #>> '{libgen,work}')` WHERE `kind = 'book' AND metadata ? 'libgen'` | другой файл того же произведения находит книгу |
 | `people_name_key_idx` | `(replace(lower(full_name), 'ё', 'е'))` | автор из дампа находит человека, уже записанного автором (`entity_credits.role = 'author'`) |
 
+### `banners` ✅ — баннеры страниц сайта
+
+Миграция `20261101100000_catalog_banners.sql`. Промо и новости, которые админ настраивает для каждой
+страницы сайта отдельно. Ссылок на чужие таблицы нет.
+
+| Колонка | Тип | Заметки |
+|---|---|---|
+| `id` | `uuid` PK | `DEFAULT uuidv7()` |
+| `page` | `text NOT NULL` | CHECK `IN ('home', 'films', 'series', 'books', 'games', 'people')` (`banners::PAGES`) |
+| `title` | `text NOT NULL` | до 300 символов, обрезается |
+| `subtitle` | `text` | до 300, пустая — `NULL` |
+| `image_url` | `text NOT NULL` | только `http(s)://` |
+| `link_url` | `text` | `http(s)://` или путь сайта с `/` (не `//`) |
+| `position` | `int NOT NULL DEFAULT 0` | порядок на странице, по возрастанию |
+| `is_active` | `bool NOT NULL DEFAULT true` | выключенный не показывается |
+| `starts_at`, `ends_at` | `timestamptz` | окно показа, `NULL` — без границы; CHECK `banners_window`: `ends_at > starts_at` |
+| `created_at`, `updated_at` | `timestamptz` | `updated_at` — триггер `banners_set_updated_at` (`set_updated_at()`) |
+
+**Индекс:** `banners_page_active_idx` `(page, position) WHERE is_active` — публичный список.
+
 </tables>
 
 <deps>
@@ -997,6 +1017,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/people/{slug}` | Человек и его работы в активных сущностях, новые сверху. Из PostgreSQL. Все работы скрыты — 404; админу — 200 со всеми работами |
 | GET | `/tags` | Все теги с `kind` и `entities_count` (активных сущностей), без пагинации (тегов немного); `?kind=genre\|tag` — только жанры или только теги |
 | GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `entities_count`; нет — 404 |
+| GET | `/banners?page=` | Баннеры страницы сайта (`page`: `home`, `films`, `series`, `books`, `games`, `people`): `is_active`, сейчас в окне `starts_at`/`ends_at` (пустая граница — открыта), по `position`, затем `created_at`; до 20, без пагинации → `[Banner]` (`id`, `page`, `title`, `subtitle`, `image_url`, `link_url`, `position`, `is_active`, `starts_at`, `ends_at`, `created_at`, `updated_at`). Публичный. 400 — нет или неизвестная `page` |
 | GET | `/archive/search` | Поиск по холодному архиву (Tantivy): `q` (1–200 символов, все слова в `title` или `orig_title`; синтаксис Tantivy разбирается снисходительно), `limit` 1–20 (20), `offset` 0–1000 (0) → `Page<ArchiveDoc>` `{items, total, limit, offset}` (`total` — всего найдено, `Count`); `ArchiveDoc`: `slug`, `title`, `original_title`, `kind`, `tmdb_id`, `release_date`, `popularity`, `cover_url` (`null` — нет постера). Публичный. На сайте — второй блок выдачи после `GET /search` (чекбокс «Архив», по умолчанию включён). 400 — пустой/длинный `q`, `limit`/`offset` вне диапазона; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/stats` | Размер холодного архива: `{"total": N, "by_kind": {"book": 0, "game": 0, "movie": N, "series": 0}}` — документов в индексе Tantivy (работы не на сайте, их ищет `GET /archive/search`). `by_kind` — все типы `EntityKind::ALL` (нет в архиве — 0; новый тип появляется сам), счёт — `Count` по терму поля `type`, удалённые не считаются; всё с одного снимка индекса (`Archive::counts`). `?kind=movie\|series\|book\|game` — `total` только этого типа (как фильтр `kind` у `/search`). Публичный, без запроса к PostgreSQL. Для подписи на сайте («ещё N в архиве»). 400 — неизвестный `kind`; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/entities/{slug}` | Фильм из архива для его страницы (только чтение): `ArchiveDoc` (название, оригинальное название, дата, постер). Публичный. 404 — нет в архиве или неверный slug (фильм мог вернуться на сайт — `GET /entities/{slug}`); 503 — архив недоступен |
@@ -1051,6 +1072,9 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | PATCH / DELETE | `/admin/people/{id}` | Изменить (`null` очищает; `original_name` — до 300 символов) / удалить вместе с участием; `fame` и документ в индексе `people` пересчитываются |
 | POST | `/admin/tags` | Создать тег: `slug`, `name`, `kind` (`genre` / `tag`, по умолчанию `tag`) → 201 |
 | PATCH / DELETE | `/admin/tags/{id}` | Переименовать, сменить slug или `kind` / удалить (снимается со всех сущностей). Карточки с тегом пересобираются |
+| GET | `/admin/banners` | Все баннеры (и выключенные, и вне окна): `?page=` (необязательно), `limit`/`offset` → `Page<Banner>`, по `page`, `position`. 400 — неизвестная `page` |
+| POST | `/admin/banners` | Создать: `page`, `title`, `image_url` обязательны; `subtitle`, `link_url`, `position` (0), `is_active` (`true`), `starts_at`, `ends_at` → 201 `Banner`. 400 — неизвестная `page`, пустой/длинный `title`, URL не `http(s)://` (у `link_url` можно путь `/...`), `ends_at <= starts_at` |
+| PATCH / DELETE | `/admin/banners/{id}` | Изменить (переданные поля заменяются, `null` очищает `subtitle`, `link_url`, `starts_at`, `ends_at`; окно проверяется с текущими значениями) → 200 `Banner` / удалить → 204. 400 — как у POST; 404 — нет баннера. Событий и ISR нет: фронтенд читает список сам |
 | POST | `/admin/search/reindex` | Перестроить поисковый индекс без простоя (`?force=true` — без проверки размера, `SEARCH_REINDEX_MIN_PERCENT`: 80, в dev 0) → `ReindexResult`; `409` — уже идёт или новый индекс слишком мал |
 | POST | `/admin/search/reindex/stream` | То же потоком `text/event-stream` ([«Перестройка поиска»](#перестройка-поиска-)) |
 | POST | `/admin/tmdb/stats/stream` | «Обновить рейтинги»: дампы TMDB (popularity) и IMDb (рейтинг) → `entity_stats`, пересчёт балла, перестройка поиска; потоком; `done.stats`. `409` — уже идёт долгая операция ([«Сортировка и активные»](#сортировка-и-активные-)) |
@@ -1122,6 +1146,8 @@ dev.twitch.tv/console (IGDB принадлежит Twitch). Без ключа и
 `catalog` **не публикует** событий в `shared::events::EventBus`: он сообщает об изменениях напрямую —
 `search::update_index` (Meilisearch) и `shared::isr` (пересборка статики фронтенда) внутри
 `publish::run`. Очередь событий модулю не нужна.
+
+Баннеры (`/admin/banners`) тоже без событий: публичный список фронтенд читает запросом `GET /banners?page=`.
 
 </events>
 
@@ -1415,6 +1441,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
 | `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), `GET /search` (фильтры — `filters_of`), `GET /search/studios` |
 | `studios.rs` | Студии: `sync` (из `metadata.studios` и переданных `Company`), `refs` (ссылки в карточке), `GET /studios/{slug}` (данные компании из TMDB при первом открытии), `metadata_filter` для `GET /entities?studio=` |
+| `banners.rs` | Баннеры страниц: `Banner`, `PAGES`, проверки полей, `GET /banners` |
 | `people_search.rs` | Индекс `people` (`PersonDoc`, `settings`, `fill`, `update_index`), известность `refresh_fame` → `person_stats`, `GET /search/people` |
 | `tmdb.rs` | Операции админки: «Обновить рейтинги» (дампы TMDB и IMDb), «Пересобрать активные» |
 | `archive/enrich.rs` | Полные данные TMDB: `tmdb_get` (общий запрос с ключом; и для студий), `fetch_movie`, `film_fields`, `film_credits`, `slugify`, `insert_film` (фильм, статистика, сырьё, жанры, люди, титры) |
@@ -1426,7 +1453,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
 | `publish.rs` | Публикация правки: `Touched`, поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |
-| `admin/` | Админские эндпоинты (`relations.rs` — связанные произведения) |
+| `admin/` | Админские эндпоинты (`relations.rs` — связанные произведения, `banners.rs` — баннеры) |
 | `media/` | `nexus media` (`media/pick.rs` — фильтр Rutube) |
 
 Тесты — `app/tests/catalog.rs` (данные — `app/tests/fixtures/catalog.sql`), архив —

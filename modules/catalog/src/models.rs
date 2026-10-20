@@ -883,7 +883,7 @@ pub struct ReindexQuery {
 }
 
 /// Отличает отсутствующее поле (`None`) от `null` (`Some(None)`). Вместе с `#[serde(default)]`.
-fn nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: Deserialize<'de>,
     D: Deserializer<'de>,

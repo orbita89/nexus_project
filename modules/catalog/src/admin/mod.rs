@@ -2,6 +2,7 @@
 //! После каждой записи затронутые сущности и люди переотправляются в поисковые индексы,
 //! страницы пересобираются на фронтенде (`publish::run`).
 
+pub mod banners;
 pub mod entities;
 pub mod people;
 pub mod relations;
