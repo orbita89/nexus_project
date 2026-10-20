@@ -276,6 +276,13 @@ async fn build_splits_hot_layer_and_archive(pool: PgPool) {
     let ctx = Ctx::new(pool);
     ctx.seed().await;
 
+    let stats = ctx.send(Method::GET, "/archive/stats", None).await;
+    assert_eq!(stats.status, StatusCode::OK);
+    assert_eq!(
+        stats.json(),
+        json!({"total": 0, "by_kind": {"book": 0, "game": 0, "movie": 0, "series": 0}})
+    );
+
     let report = ctx.dump_and_build().await;
     assert_eq!(
         report,
@@ -295,6 +302,20 @@ async fn build_splits_hot_layer_and_archive(pool: PgPool) {
             manual_archived: 0,
         }
     );
+
+    let stats = ctx.send(Method::GET, "/archive/stats", None).await;
+    assert_eq!(
+        stats.json(),
+        json!({"total": 4, "by_kind": {"book": 0, "game": 0, "movie": 4, "series": 0}})
+    );
+    let movies = ctx
+        .send(Method::GET, "/archive/stats?kind=movie", None)
+        .await;
+    assert_eq!(movies.json()["total"], 4);
+    let books = ctx
+        .send(Method::GET, "/archive/stats?kind=book", None)
+        .await;
+    assert_eq!(books.json()["total"], 0);
 
     // ru: ru-hit-1 (50), ru-new (45); иностранный: en-hit (30). en-used — в интересах.
     assert_eq!(
@@ -455,6 +476,7 @@ async fn archive_search_validates_query(pool: PgPool) {
         "/archive/search?q=a&limit=21",
         "/archive/search?q=a&offset=-1",
         "/archive/search?q=a&offset=1001",
+        "/archive/stats?kind=film",
     ] {
         let response = ctx.send(Method::GET, path, None).await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST, "{path}");
@@ -472,7 +494,11 @@ async fn archive_search_validates_query(pool: PgPool) {
     let mut config = (*state.config).clone();
     config.archive_dir = None;
     state.config = Arc::new(config);
-    for path in ["/archive/search?q=a", "/archive/entities/a"] {
+    for path in [
+        "/archive/search?q=a",
+        "/archive/entities/a",
+        "/archive/stats",
+    ] {
         let app = nexus::build_app(state.clone());
         let response = request(app, Method::GET, &format!("{CATALOG}{path}"), None, None).await;
         assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE, "{path}");

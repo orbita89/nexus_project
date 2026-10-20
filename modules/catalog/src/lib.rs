@@ -40,6 +40,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(people_search::search))
         .routes(routes!(search::studios))
         .routes(routes!(archive::search))
+        .routes(routes!(archive::stats))
         .routes(routes!(archive::get))
         .routes(routes!(archive::restore))
         .routes(routes!(admin::entities::list, admin::entities::create))

@@ -29,7 +29,7 @@ use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path, Query};
 use shared::pagination::Page;
 use shared::{AdminUser, AppError, AppResult, AppState};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use utoipa::{IntoParams, ToSchema};
@@ -137,6 +137,56 @@ pub async fn search(
         total: total as i64,
         limit: limit as i64,
         offset: offset as i64,
+    }))
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ArchiveStatsQuery {
+    /// Только этот тип: `total` — его число. Без параметра — всего.
+    pub kind: Option<EntityKind>,
+}
+
+/// Размер холодного архива: сколько работ можно найти через `GET /archive/search`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ArchiveStats {
+    /// Документов в индексе архива (работ не на сайте); с `?kind=` — только этого типа.
+    pub total: u64,
+    /// По типам: все `kind` каталога, нет в архиве — 0 (`{"movie": 1200000, "book": 0, ...}`).
+    #[schema(value_type = HashMap<String, u64>)]
+    pub by_kind: BTreeMap<&'static str, u64>,
+}
+
+/// Сколько работ в архиве, всего и по типам — для подписи на сайте («ещё N в архиве»).
+/// Публичный, без запроса к PostgreSQL: счётчики Tantivy с одного снимка индекса.
+#[utoipa::path(
+    get, operation_id = "archive_stats", path = "/archive/stats", tag = "catalog",
+    params(ArchiveStatsQuery),
+    responses(
+        (status = 200, description = "Число работ в архиве, всего и по типам", body = ArchiveStats),
+        (status = 400, description = "Неизвестный `kind`", body = ErrorBody),
+        (status = 503, description = "Архив не настроен (`ARCHIVE_DIR`) или недоступен", body = ErrorBody),
+    )
+)]
+pub async fn stats(
+    State(state): State<AppState>,
+    Query(query): Query<ArchiveStatsQuery>,
+) -> AppResult<Json<ArchiveStats>> {
+    let archive = open(&state)?;
+    let (total, by_kind) = blocking(move || archive.counts()).await?;
+    let total = match query.kind {
+        Some(kind) => by_kind
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map_or(0, |(_, count)| *count),
+        None => total,
+    };
+    Ok(Json(ArchiveStats {
+        total,
+        by_kind: by_kind
+            .into_iter()
+            .map(|(kind, count)| (kind.as_str(), count))
+            .collect(),
     }))
 }
 

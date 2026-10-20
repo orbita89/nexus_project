@@ -264,6 +264,22 @@ impl Archive {
         self.reader.searcher().num_docs()
     }
 
+    /// Документов всего и по типам — с одного снимка индекса, чтобы сумма сходилась. Тип —
+    /// терм поля `type` (`STRING`): `Count` по списку документов терма, без чтения самих
+    /// документов; удалённые не считаются. Все типы `EntityKind::ALL`, нет документов — 0.
+    pub fn counts(&self) -> Result<(u64, Vec<(EntityKind, u64)>), ArchiveError> {
+        let searcher = self.reader.searcher();
+        let by_kind = EntityKind::ALL
+            .into_iter()
+            .map(|kind| {
+                let term = Term::from_field_text(self.fields.kind, kind.as_str());
+                let query = TermQuery::new(term, IndexRecordOption::Basic);
+                Ok((kind, searcher.search(&query, &Count)? as u64))
+            })
+            .collect::<Result<_, ArchiveError>>()?;
+        Ok((searcher.num_docs(), by_kind))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
