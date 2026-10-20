@@ -8,3 +8,4 @@ infra/.env.prod
 .idea/
 .vscode/
 http/http-client.private.env.json
+scripts/games-import/.venv/

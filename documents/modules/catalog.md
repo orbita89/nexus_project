@@ -32,7 +32,7 @@
 | `metadata` | `jsonb` | NOT NULL, default `{}` | Поля, специфичные для типа (см. ниже) |
 | `active` | `boolean` | NOT NULL, default `true` | Видна на сайте. Миграция `20261016100000_entity_active.sql`, см. ниже |
 | `active_manual` | `boolean` | NOT NULL, default `false` | `active` переключали в админке (`PATCH`, `POST` с `active`) или это сид, привязанный импортом: «Пересобрать активные» не трогает. Миграция `20261017100000_entity_tmdb.sql` |
-| `external_ids` | `jsonb` | NOT NULL, default `{}` | Id во внешних сервисах, например `{"tmdb": 550}`. Уникальный индекс `entities_external_tmdb_uq` по `((external_ids->>'tmdb')::int) WHERE external_ids ? 'tmdb'`. Новый внешний сервис — новый ключ, без новой таблицы. Миграция `20261027100000_external_ids.sql` (2026-10-19) |
+| `external_ids` | `jsonb` | NOT NULL, default `{}` | Id во внешних сервисах, например `{"tmdb": 550}`. Уникальный индекс `entities_external_tmdb_uq` по `((external_ids->>'tmdb')::int) WHERE external_ids ? 'tmdb'`. Игры: `{"steam": 292030}`, индекс `entities_external_steam_uq` — UNIQUE `((external_ids->>'steam')::int)` WHERE `external_ids ? 'steam'` (миграция `20261029100000_external_steam.sql`, пишет `scripts/games-import/steam_games.py`). Новый внешний сервис — новый ключ, без новой таблицы. Миграция `20261027100000_external_ids.sql` (2026-10-19) |
 | `created_at` | `timestamptz` | NOT NULL | |
 | `updated_at` | `timestamptz` | NOT NULL | Обновляется триггером |
 
@@ -932,6 +932,36 @@ Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `cov
 
 Тесты: `app/tests/books.rs` — `imports_russian_books_with_authors_and_is_idempotent`,
 `limit_and_dump_without_schema`; разбор дампа и полей — модульные тесты `books::dump`, `books`.
+
+## Игры из Steam ✅
+
+Без своих таблиц, без кода в `catalog` и без ключей: `scripts/games-import/steam_games.py`
+(`requests`, `psycopg2`; `DATABASE_URL`; venv — `scripts/games-import/.venv`, в `.gitignore`).
+- Список — SteamSpy `api.php?request=all&page=N` (1000 на страницу, не чаще раза в минуту,
+  `--max-pages` 5), по убыванию нижней границы `owners`, затем `positive`. Данные — Steam Store
+  `api/appdetails?appids=…&l=russian&cc=us`, пауза `--delay` (1,5 с; лимит ~200 запросов за 5 мин),
+  повторы на 429/5xx. `--limit` (1000) — сколько новых записать, `--dry-run`.
+- Пропуск: `type` не `game`, `success: false` (нет в магазине или скрыто для региона), только для
+  взрослых (`content_descriptors.ids` 3 или 4), appid уже в каталоге (не запрашивается), нет обложки.
+- `entities` (`kind = 'game'`, `active = true`): `title` — `name` из appdetails (русское, если
+  игра его локализовала); `original_title` — английское `name` SteamSpy, если отличается;
+  `description` — `about_the_game` без HTML, иначе `short_description` (до 20 000); `release_date` —
+  разбор `release_date.date` («19 мая. 2015 г.» → 2015-05-19, только год → 1 января, «Скоро» —
+  `NULL`); `metadata`: `platforms` (`windows`/`mac`/`linux` → `pc`/`macos`/`linux`), `developer`,
+  `publisher` — первые из списков; `external_ids` = `{"steam": appid}`. Трейлеры не пишутся (у Steam
+  mp4) — `make media` добавляет Rutube.
+- `cover_url` — первая рабочая из `library_600x900_2x.jpg`, `library_600x900.jpg`, `header.jpg`
+  (`store_item_assets/steam/apps/{appid}/`), затем `header_image` из ответа (новые игры — пути с
+  хэшем). Прямая ссылка на CDN Steam `https://shared.akamai.steamstatic.com/…`, как у фильмов
+  `image.tmdb.org`: картинки у нас не хранятся и не кэшируются. Проверка — GET (JPEG/PNG > 1 КБ).
+- Slug — от `original_title`/`title`, занят — `-<год>`, затем `-<md5(appid)[:6]>`.
+- Теги — жанры Steam по id (`GENRES`): `action`, `adventure`, `strategy`, `rpg`, `simulator`,
+  `racing`, `sport`, `casual` (`kind = genre`), `indie`, `mmo`, `free-to-play`, `early-access`
+  (`kind = tag`); нет тега — создаётся.
+- Дубликат — тот же appid: индекс `entities_external_steam_uq` — UNIQUE
+  `((external_ids->>'steam')::int)` WHERE `external_ids ? 'steam'` (миграция
+  `20261029100000_external_steam.sql`); перезапуск безопасен.
+- Событий нет. Затем `scripts/reindex-search.sh` (поиск, ISR) и `make media` (трейлер Rutube).
 
 ## Эндпоинты
 
