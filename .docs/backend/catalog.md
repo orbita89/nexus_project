@@ -141,6 +141,11 @@ TMDB с русским названием (121 371) и 500 самых попул
 **Индексы:** триграммный GIN по `full_name` — поиск людей по подстроке; `(full_name, id)` — список
 по алфавиту.
 
+Люди и теги для других модулей — справочники `PersonDirectory` (`PgPersonDirectory`, `state.people`:
+`by_slug` — только публичные, `by_ids` — все → `PersonRef` `{id, slug, full_name, photo_url}`) и
+`TagDirectory` (`PgTagDirectory`, `state.tags`: `by_slug`, `by_ids` → `TagRef` `{id, slug, name, kind}`)
+в `catalog::directory`; ими `social` и `realtime` строят интересы и комнаты чата `person:` / `tag:`.
+
 **Публичный человек** — с работой в активной сущности или вовсе без работ (заведён в админке):
 `/people` и `/people/{slug}` показывают только таких (админу карточка открыта всегда),
 фильмография — только активные сущности.
@@ -332,6 +337,8 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 | Дампы TMDB и IMDb | `reqwest` + `flate2` (распаковка `.gz`): `TMDB_EXPORTS_URL` (`https://files.tmdb.org/p/exports`), `IMDB_DATASETS_URL` (`https://datasets.imdbws.com`), без ключей | «Обновить рейтинги» в админке |
 | TMDB API (возврат из архива) | `reqwest`; `TMDB_API_KEY` (v3 — параметром, v4 JWT — заголовком), `TMDB_API_URL` (по умолчанию `https://api.themoviedb.org/3`, в тестах — подставной сервер), `ARCHIVE_RESTORE_PER_HOUR` (300; `governor`); `unicode-normalization` — slug людей | `archive::enrich`: полные данные фильма при `restore` и `promote` |
 | Холодный архив | `tantivy` 0.26 (`mmap`, `lz4-compression`, без zstd) + `csv`; каталог `ARCHIVE_DIR` (`Config::archive_dir`, dev/prod — том `archivedata` в `/var/lib/nexus/archive`; не задан — эндпоинты архива 503) | `catalog::archive`: индекс, поиск, страница фильма, промоушен, `nexus archive dump\|build` |
+| `PersonDirectory`, `TagDirectory` (реализует `catalog`: `PgPersonDirectory`, `PgTagDirectory`) | `shared::directory`, `state.people`, `state.tags` | `social`/`realtime` читают людей и теги без JOIN: интересы, комнаты чата. `PersonDirectory::by_slug` — только публичные (`PUBLIC_PERSON`), `by_ids` — все |
+| `InterestDirectory::people_in_use` (реализует `social`) | `shared::directory`, `state.interests` | каких людей не удалять при переносе в архив, даже без работ: в интересах или с комнатой чата |
 | `InterestDirectory::entities_in_use` (реализует `social`) | `shared::directory`, `state.interests` | какие сущности нужны пользователям (интересы, рецензии, коллекции, отметки, реакции, темы форума) — их сборка архива не удаляет |
 | Дамп LibGen | локальный файл (`flate2` для `.gz`); обложки — `https://libgen.is/covers/` (`books::COVERS`) | `nexus books import` |
 | Блокировки перестройки | Redis (`shared::cache`): `nexus:v1:catalog:reindex-running`, `nexus:v1:catalog:reindex-lock` | «одна перестройка за раз» между инстансами |
@@ -783,7 +790,8 @@ event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"peo
 перестраивается) → `scripts/archive-purge.sql` (список — `nexus archive ids` во временной таблице сессии
 `archive_ids (tmdb_id)`, её создаёт запуск через `COPY … FROM STDIN` до файла; одна транзакция: `session_replication_role =
 replica` — нужен суперпользователь, `LOCK … EXCLUSIVE` на `entities`/`people` — чтение идёт,
-set-based удаление детей, `entities`, людей без работ, пересчёт `person_credit_counts` и
+set-based удаление детей, `entities`, людей без работ (кроме нужных пользователям —
+`InterestDirectory::people_in_use`: в интересах или с комнатой чата; `delete_entities`), пересчёт `person_credit_counts` и
 `tags.entities_count` как в миграции `entity_active`, проверка всех FK на `entities`/`people` —
 висячие → ROLLBACK; повторный запуск ничего не находит) → `VACUUM FULL` → перестройка поиска
 (`POST /admin/search/reindex?force=true` или перезапуск). Тест — `deferred_delete_and_purge_script`.

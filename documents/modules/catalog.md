@@ -138,6 +138,11 @@ TMDB с русским названием (121 371) и 500 самых попул
 **Индексы:** триграммный GIN по `full_name` — поиск людей по подстроке; `(full_name, id)` — список
 по алфавиту.
 
+Люди и теги для других модулей — справочники `PersonDirectory` (`PgPersonDirectory`, `state.people`:
+`by_slug` — только публичные, `by_ids` — все → `PersonRef` `{id, slug, full_name, photo_url}`) и
+`TagDirectory` (`PgTagDirectory`, `state.tags`: `by_slug`, `by_ids` → `TagRef` `{id, slug, name, kind}`)
+в `catalog::directory`; ими `social` и `realtime` строят интересы и комнаты чата `person:` / `tag:`.
+
 **Публичный человек** — с работой в активной сущности или вовсе без работ (заведён в админке):
 `/people` и `/people/{slug}` показывают только таких (админу карточка открыта всегда),
 фильмография — только активные сущности.
@@ -763,7 +768,8 @@ event: done      data: {"type":"done","ok":true,"reindex":{"indexed":100000,"peo
 перестраивается) → `scripts/archive-purge.sql` (перед файлом в той же сессии — временная таблица
 `archive_ids(tmdb_id)`, заполненная из `nexus archive ids` через `COPY FROM STDIN`; одна транзакция: `session_replication_role =
 replica` — нужен суперпользователь, `LOCK … EXCLUSIVE` на `entities`/`people` — чтение идёт,
-set-based удаление детей, `entities`, людей без работ, пересчёт `person_credit_counts` и
+set-based удаление детей, `entities`, людей без работ (кроме нужных пользователям —
+`InterestDirectory::people_in_use`: в интересах или с комнатой чата; `delete_entities`), пересчёт `person_credit_counts` и
 `tags.entities_count` как в миграции `entity_active`, проверка всех FK на `entities`/`people` —
 висячие → ROLLBACK; повторный запуск ничего не находит) → `VACUUM FULL` → перестройка поиска
 (`POST /admin/search/reindex?force=true` или перезапуск). Тест — `deferred_delete_and_purge_script`.

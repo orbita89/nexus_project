@@ -9,7 +9,7 @@ use crate::models::{
     MarkedEntity, Post, PostRow, Review, ReviewComment, ReviewCommentRow, ReviewRow, Thread,
     ThreadRow,
 };
-use shared::directory::{EntityRef, UserRef};
+use shared::directory::{EntityRef, PersonRef, TagRef, UserRef};
 use shared::{AppError, AppResult, AppState};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -21,6 +21,24 @@ pub async fn entity(state: &AppState, slug: &str) -> AppResult<EntityRef> {
         .by_slug(slug)
         .await?
         .ok_or(AppError::NotFound)
+}
+
+/// Человек каталога по slug из URL (только публичный), иначе 404.
+pub async fn person(state: &AppState, slug: &str) -> AppResult<PersonRef> {
+    state.people.by_slug(slug).await?.ok_or(AppError::NotFound)
+}
+
+/// Тег каталога по slug из URL, иначе 404.
+pub async fn tag(state: &AppState, slug: &str) -> AppResult<TagRef> {
+    state.tags.by_slug(slug).await?.ok_or(AppError::NotFound)
+}
+
+pub async fn people(state: &AppState, ids: Vec<Uuid>) -> AppResult<HashMap<Uuid, PersonRef>> {
+    state.people.by_ids(&dedup(ids)).await
+}
+
+pub async fn tags(state: &AppState, ids: Vec<Uuid>) -> AppResult<HashMap<Uuid, TagRef>> {
+    state.tags.by_ids(&dedup(ids)).await
 }
 
 /// Оценки, рецензии и реакции — только после выхода: дата выхода позже сегодняшней (UTC) → 409

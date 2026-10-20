@@ -10,9 +10,13 @@
 //! | `reply.created` | автор родителя (если отвечает не он сам) | `thread_id`, `post_id`, `parent_id`, `author_id` |
 //! | `review.created`, `review.updated`, `review.deleted` | сущность | `review_id`, `entity_id`, `author_id` |
 //! | `review.commented`, `review.comment_deleted` | сущность | `review_id`, `comment_id`, `entity_id`, `author_id` |
-//! | `interest.added`, `interest.removed` | пользователь | `entity_id` |
+//! | `interest.added`, `interest.removed` | пользователь | `entity_id`, `person_id` или `tag_id` |
+//! | `chat.message.created` | комната (сущность, человек или тег) | `kind`, `target_id`, `message` — само сообщение (исключение: иначе каждое сообщение — запрос каждого клиента) |
+//! | `chat.message.updated`, `chat.message.deleted` | комната | `kind`, `target_id`, `message_id` |
+//! | `chat.read` | пользователь | `kind`, `target_id`, `message_id` — прочитано до него (другие устройства гасят счётчик) |
 
 use serde_json::json;
+use shared::directory::ChatRoom;
 use shared::events::{Channel, Event};
 use shared::AppState;
 use sqlx::PgExecutor;
@@ -123,11 +127,56 @@ pub fn review_comment(
     )
 }
 
-/// `interest.added` или `interest.removed`: realtime по нему меняет подписки соединений пользователя.
-pub fn interest(kind: &'static str, user_id: Uuid, entity_id: Uuid) -> Event {
+/// `interest.added` или `interest.removed`: realtime по нему меняет подписки соединений
+/// пользователя. `key` — `entity_id`, `person_id` или `tag_id`.
+pub fn interest(kind: &'static str, user_id: Uuid, key: &str, id: Uuid) -> Event {
+    Event::new(kind, vec![Channel::User(user_id)], json!({ key: id }))
+}
+
+/// `chat.message.created`: сообщение целиком — клиенты показывают его без запроса к API.
+pub fn chat_message_created(room: ChatRoom, message: &serde_json::Value) -> Event {
+    let (kind, target_id) = room_parts(room);
     Event::new(
-        kind,
-        vec![Channel::User(user_id)],
-        json!({ "entity_id": entity_id }),
+        "chat.message.created",
+        vec![room_channel(room)],
+        json!({ "kind": kind, "target_id": target_id, "message": message }),
     )
+}
+
+/// `chat.message.updated` или `chat.message.deleted`: клиент перечитывает сообщение.
+pub fn chat_message_changed(event: &'static str, room: ChatRoom, message_id: Uuid) -> Event {
+    let (kind, target_id) = room_parts(room);
+    Event::new(
+        event,
+        vec![room_channel(room)],
+        json!({ "kind": kind, "target_id": target_id, "message_id": message_id }),
+    )
+}
+
+/// `chat.read`: прочитано до `message_id` — другие устройства пользователя гасят счётчик.
+pub fn chat_read(user_id: Uuid, room: ChatRoom, message_id: Uuid) -> Event {
+    let (kind, target_id) = room_parts(room);
+    Event::new(
+        "chat.read",
+        vec![Channel::User(user_id)],
+        json!({ "kind": kind, "target_id": target_id, "message_id": message_id }),
+    )
+}
+
+/// Вид комнаты (`entity`, `person`, `tag`) и id сущности, человека или тега.
+pub fn room_parts(room: ChatRoom) -> (&'static str, Uuid) {
+    match room {
+        ChatRoom::Entity(id) => ("entity", id),
+        ChatRoom::Person(id) => ("person", id),
+        ChatRoom::Tag(id) => ("tag", id),
+    }
+}
+
+/// Канал комнаты: сообщения приходят подписчикам `entity:`, `person:` или `tag:`.
+fn room_channel(room: ChatRoom) -> Channel {
+    match room {
+        ChatRoom::Entity(id) => Channel::Entity(id),
+        ChatRoom::Person(id) => Channel::Person(id),
+        ChatRoom::Tag(id) => Channel::Tag(id),
+    }
 }

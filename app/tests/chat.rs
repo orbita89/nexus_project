@@ -1,0 +1,649 @@
+//! Чат по интересам (комнаты сущностей, людей и тегов): отправка и «прочитано» по WebSocket, история,
+//! мои чаты, правка, удаление и заглушение по REST. Приложение на случайном порту, события — по
+//! общей шине `AppState`.
+//!
+//! Сущности — `fixtures/catalog.sql`, пользователи создаются через dev login.
+
+use axum::http::{Method, StatusCode};
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{json, Value};
+use shared::{AppState, Config};
+use sqlx::PgPool;
+use std::net::SocketAddr;
+use std::time::Duration;
+use test_utils::request;
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+const SOCIAL: &str = "/api/v1/social";
+const ROOM: &str = "entity:dune-2021";
+const WAIT: Duration = Duration::from_secs(5);
+const QUIET: Duration = Duration::from_millis(300);
+
+struct Ctx {
+    state: AppState,
+    addr: SocketAddr,
+}
+
+struct User {
+    id: String,
+    token: String,
+}
+
+impl Ctx {
+    async fn new(pool: PgPool) -> Self {
+        let mut config = Config::from_env();
+        config.dev_login = true;
+        let (state, _) = test_utils::state_with_config(pool, config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = nexus::build_app(state.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Self { state, addr }
+    }
+
+    async fn client(&self) -> Client {
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", self.addr))
+            .await
+            .unwrap();
+        Client { ws }
+    }
+
+    /// Вошедший клиент.
+    async fn authed(&self, user: &User) -> Client {
+        let mut client = self.client().await;
+        client
+            .request(
+                json!({ "type": "auth", "token": user.token }),
+                "authenticated",
+            )
+            .await;
+        client
+    }
+
+    async fn login(&self, name: &str, role: &str) -> User {
+        let app = nexus::build_app(self.state.clone());
+        let response = request(
+            app,
+            Method::POST,
+            "/api/v1/auth/dev/login",
+            Some(json!({ "login": format!("{name}@example.com"), "role": role })),
+            None,
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let body = response.json();
+        User {
+            id: body["user"]["id"].as_str().unwrap().to_string(),
+            token: body["access_token"].as_str().unwrap().to_string(),
+        }
+    }
+
+    /// Запрос к social, ожидающий `status`: тело ответа.
+    async fn api(
+        &self,
+        status: StatusCode,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        user: Option<&User>,
+    ) -> Value {
+        let app = nexus::build_app(self.state.clone());
+        let token = user.map(|u| u.token.as_str());
+        let response = request(app, method.clone(), &format!("{SOCIAL}{path}"), body, token).await;
+        assert_eq!(response.status, status, "{method} {path}");
+        if response.body.is_empty() {
+            Value::Null
+        } else {
+            response.json()
+        }
+    }
+
+    async fn interest(&self, user: &User, slug: &str) {
+        let path = format!("/entities/{slug}/interest");
+        self.api(StatusCode::NO_CONTENT, Method::PUT, &path, None, Some(user))
+            .await;
+    }
+
+    async fn chats(&self, user: &User) -> Vec<Value> {
+        let chats = self
+            .api(StatusCode::OK, Method::GET, "/chats", None, Some(user))
+            .await;
+        chats.as_array().unwrap().clone()
+    }
+
+    async fn history(&self, query: &str) -> Value {
+        let path = format!("/chat/entity/dune-2021/messages{query}");
+        self.api(StatusCode::OK, Method::GET, &path, None, None)
+            .await
+    }
+}
+
+struct Client {
+    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
+}
+
+impl Client {
+    async fn send(&mut self, message: Value) {
+        self.ws
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .unwrap();
+    }
+
+    async fn next(&mut self, wait: Duration) -> Option<Value> {
+        loop {
+            let message = tokio::time::timeout(wait, self.ws.next()).await.ok()??;
+            match message.unwrap() {
+                Message::Text(text) => return Some(serde_json::from_str(&text).unwrap()),
+                Message::Ping(_) | Message::Pong(_) => continue,
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+    }
+
+    async fn expect(&mut self, kind: &str) -> Value {
+        let message = self
+            .next(WAIT)
+            .await
+            .unwrap_or_else(|| panic!("no {kind} message"));
+        assert_eq!(message["type"], kind, "{message}");
+        message
+    }
+
+    async fn event(&mut self, event: &str) -> Value {
+        let message = self.expect("event").await;
+        assert_eq!(message["event"], event, "{message}");
+        message
+    }
+
+    async fn silent(&mut self) {
+        if let Some(message) = self.next(QUIET).await {
+            panic!("unexpected message: {message}");
+        }
+    }
+
+    async fn request(&mut self, message: Value, reply: &str) -> Value {
+        self.send(message).await;
+        self.expect(reply).await
+    }
+
+    async fn say(&mut self, body: &str) -> Value {
+        let reply = self
+            .request(
+                json!({ "type": "chat.send", "room": ROOM, "body": body, "client_id": "c1" }),
+                "chat.sent",
+            )
+            .await;
+        assert_eq!(reply["client_id"], "c1");
+        assert_eq!(reply["room"], ROOM);
+        reply["message"].clone()
+    }
+}
+
+/// Отправка по WebSocket: ответ `chat.sent`, событие с сообщением подписчикам комнаты (гостю по
+/// `subscribe`, вошедшему — по интересу), история, мои чаты с непрочитанными, `chat.read` гасит
+/// счётчик и приходит на другие устройства.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn message_sent_over_websocket_reaches_room_and_history(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+    ctx.interest(&bob, "dune-2021").await;
+
+    let mut guest = ctx.client().await;
+    guest
+        .request(
+            json!({ "type": "subscribe", "channels": [ROOM] }),
+            "subscribed",
+        )
+        .await;
+    let mut bob_ws = ctx.authed(&bob).await;
+    let mut bob_phone = ctx.authed(&bob).await;
+    let mut alice_ws = ctx.authed(&alice).await;
+
+    let message = alice_ws.say("  Кто смотрел?  ").await;
+    assert_eq!(message["body"], "Кто смотрел?");
+    assert_eq!(message["author"]["id"], alice.id.as_str());
+    assert_eq!(message["deleted"], false);
+    // У alice нет интереса и ручной подписки — события ей нет.
+    alice_ws.silent().await;
+
+    for client in [&mut guest, &mut bob_ws, &mut bob_phone] {
+        let event = client.event("chat.message.created").await;
+        assert_eq!(event["channels"], json!([ROOM]));
+        assert_eq!(event["data"]["message"], message);
+    }
+
+    let history = ctx.history("").await;
+    assert_eq!(history["items"], json!([message]));
+    assert_eq!(history["next_before"], Value::Null);
+
+    let chats = ctx.chats(&bob).await;
+    assert_eq!(chats.len(), 1);
+    assert_eq!(chats[0]["room"], ROOM);
+    assert_eq!(chats[0]["entity"]["slug"], "dune-2021");
+    assert_eq!(chats[0]["last_message"]["id"], message["id"]);
+    assert_eq!(chats[0]["unread"], 1);
+    assert_eq!(chats[0]["muted"], false);
+    // Без интересов чатов нет; своё сообщение — прочитано.
+    assert!(ctx.chats(&alice).await.is_empty());
+
+    let saved = bob_ws
+        .request(
+            json!({ "type": "chat.read", "room": ROOM, "message_id": message["id"] }),
+            "chat.read_saved",
+        )
+        .await;
+    assert_eq!(saved["message_id"], message["id"]);
+    for client in [&mut bob_ws, &mut bob_phone] {
+        let event = client.event("chat.read").await;
+        assert_eq!(event["channels"], json!(["user:me"]));
+        assert_eq!(event["data"]["message_id"], message["id"]);
+    }
+    assert_eq!(ctx.chats(&bob).await[0]["unread"], 0);
+
+    // Ответ на сообщение.
+    let reply = bob_ws
+        .request(
+            json!({ "type": "chat.send", "room": ROOM, "body": "Я", "reply_to": message["id"] }),
+            "chat.sent",
+        )
+        .await;
+    assert_eq!(reply["message"]["reply_to"], message["id"]);
+    assert_eq!(reply["client_id"], Value::Null);
+}
+
+/// Ошибки `chat.send` / `chat.read`: гость, неизвестная комната, пустой и длинный текст,
+/// `reply_to` не из комнаты, чужое сообщение в `chat.read`, лимит частоты.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn chat_errors_over_websocket(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+
+    let mut guest = ctx.client().await;
+    let error = guest
+        .request(
+            json!({ "type": "chat.send", "room": ROOM, "body": "x", "client_id": "g" }),
+            "error",
+        )
+        .await;
+    assert_eq!(error["error"], "not authenticated");
+    assert_eq!(error["client_id"], "g");
+
+    let mut ws = ctx.authed(&alice).await;
+    let other = ws
+        .request(
+            json!({ "type": "chat.send", "room": "entity:dune-part-two-2024", "body": "x" }),
+            "chat.sent",
+        )
+        .await;
+    let long = "я".repeat(2001);
+    for (message, text) in [
+        (
+            json!({ "type": "chat.send", "room": "thread:1", "body": "x" }),
+            "unknown chat room: thread:1",
+        ),
+        (
+            json!({ "type": "chat.send", "room": "entity:nope", "body": "x" }),
+            "unknown entity in channel: entity:nope",
+        ),
+        (
+            json!({ "type": "chat.send", "room": ROOM, "body": "  " }),
+            "body must not be empty",
+        ),
+        (
+            json!({ "type": "chat.send", "room": ROOM, "body": long }),
+            "body is longer than 2000 chars",
+        ),
+        (
+            json!({ "type": "chat.send", "room": ROOM, "body": "x", "reply_to": other["message"]["id"] }),
+            "reply_to: no such message in this room",
+        ),
+        (
+            json!({ "type": "chat.read", "room": ROOM, "message_id": other["message"]["id"] }),
+            "not found",
+        ),
+    ] {
+        let error = ws.request(message, "error").await;
+        assert_eq!(error["error"], text);
+    }
+
+    // Лимит: уже 1 сообщение, ещё 4 проходят, шестое — нет.
+    for _ in 0..4 {
+        ws.say("x").await;
+    }
+    let error = ws
+        .request(
+            json!({ "type": "chat.send", "room": ROOM, "body": "x", "client_id": "c6" }),
+            "error",
+        )
+        .await;
+    assert_eq!(error["error"], "too many messages");
+    assert_eq!(error["retry_after"], 10);
+    assert_eq!(error["client_id"], "c6");
+}
+
+/// REST: правка — только автор, удаление — автор или admin (заглушка в истории), события
+/// `chat.message.updated` / `deleted` с id, сообщение по id, заглушение, страницы истории.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn edit_delete_mute_and_history_pages(pool: PgPool) {
+    let ctx = Ctx::new(pool.clone()).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+    let admin = ctx.login("admin", "admin").await;
+    ctx.interest(&bob, "dune-2021").await;
+
+    let mut alice_ws = ctx.authed(&alice).await;
+    let message = alice_ws.say("Первое").await;
+    let id = message["id"].as_str().unwrap();
+    let mut bob_ws = ctx.authed(&bob).await;
+    let path = format!("/chat/messages/{id}");
+
+    let body = Some(json!({ "body": "Правка" }));
+    ctx.api(
+        StatusCode::FORBIDDEN,
+        Method::PATCH,
+        &path,
+        body.clone(),
+        Some(&bob),
+    )
+    .await;
+    ctx.api(
+        StatusCode::UNAUTHORIZED,
+        Method::PATCH,
+        &path,
+        body.clone(),
+        None,
+    )
+    .await;
+    let edited = ctx
+        .api(StatusCode::OK, Method::PATCH, &path, body, Some(&alice))
+        .await;
+    assert_eq!(edited["body"], "Правка");
+    assert!(edited["edited_at"].is_string());
+    let event = bob_ws.event("chat.message.updated").await;
+    assert_eq!(
+        event["data"],
+        json!({ "kind": "entity", "target_id": message["target_id"], "message_id": id })
+    );
+    assert_eq!(
+        ctx.api(StatusCode::OK, Method::GET, &path, None, None)
+            .await,
+        edited
+    );
+
+    ctx.api(
+        StatusCode::FORBIDDEN,
+        Method::DELETE,
+        &path,
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &path,
+        None,
+        Some(&admin),
+    )
+    .await;
+    bob_ws.event("chat.message.deleted").await;
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &path,
+        None,
+        Some(&alice),
+    )
+    .await;
+    bob_ws.silent().await;
+    let stub = ctx
+        .api(StatusCode::OK, Method::GET, &path, None, None)
+        .await;
+    assert_eq!(stub["deleted"], true);
+    assert_eq!(stub["body"], Value::Null);
+    assert_eq!(stub["author"], Value::Null);
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::PATCH,
+        &path,
+        Some(json!({ "body": "x" })),
+        Some(&alice),
+    )
+    .await;
+    // Удалённое не считается непрочитанным.
+    assert_eq!(ctx.chats(&bob).await[0]["unread"], 0);
+    let missing = format!("/chat/messages/{}", uuid::Uuid::new_v4());
+    ctx.api(StatusCode::NOT_FOUND, Method::GET, &missing, None, None)
+        .await;
+
+    // Заглушение.
+    let mute = "/chat/entity/dune-2021/mute";
+    ctx.api(StatusCode::NO_CONTENT, Method::PUT, mute, None, Some(&bob))
+        .await;
+    ctx.api(StatusCode::NO_CONTENT, Method::PUT, mute, None, Some(&bob))
+        .await;
+    assert_eq!(ctx.chats(&bob).await[0]["muted"], true);
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        mute,
+        None,
+        Some(&bob),
+    )
+    .await;
+    assert_eq!(ctx.chats(&bob).await[0]["muted"], false);
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::PUT,
+        "/chat/entity/nope/mute",
+        None,
+        Some(&bob),
+    )
+    .await;
+
+    // Страницы истории: ещё 4 сообщения (лимит частоты обходим вставкой).
+    sqlx::query(
+        "INSERT INTO chat_messages (room_id, author_id, body)
+         SELECT m.room_id, $1::uuid, 'm' || n FROM chat_messages m, generate_series(1, 4) n
+         WHERE m.id = $2::uuid ORDER BY n",
+    )
+    .bind(&bob.id)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let page = ctx.history("?limit=2").await;
+    let bodies: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(bodies, ["m3", "m4"]);
+    let before = page["next_before"].as_str().unwrap();
+    let page = ctx.history(&format!("?limit=10&before={before}")).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 3);
+    assert_eq!(page["items"][0]["deleted"], true);
+    assert_eq!(page["next_before"], Value::Null);
+    // Свои сообщения непрочитанными не считаются.
+    assert_eq!(ctx.chats(&bob).await[0]["unread"], 0);
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        "/chat/entity/dune-2021/messages?limit=0",
+        None,
+        None,
+    )
+    .await;
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/chat/entity/nope/messages",
+        None,
+        None,
+    )
+    .await;
+}
+
+/// Этап 2: интересы к людям и тегам, их комнаты. Автоподписка на `person:` / `tag:` при `auth` и
+/// на лету (`interest.added`), сообщения в эти каналы, «мои чаты» всех трёх видов, история по
+/// `/chat/{kind}/{slug}`, неизвестный вид — 404.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn person_and_tag_rooms(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    let person = "/people/denis-villeneuve/interest";
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        person,
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        person,
+        None,
+        Some(&bob),
+    )
+    .await;
+    let own = ctx
+        .api(StatusCode::OK, Method::GET, person, None, Some(&bob))
+        .await;
+    assert_eq!(own["person"]["slug"], "denis-villeneuve");
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        person,
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::PUT,
+        "/people/nope/interest",
+        None,
+        Some(&bob),
+    )
+    .await;
+    let list = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/interests/people",
+            None,
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(list["total"], 1);
+
+    // Подключён до интереса к тегу: подписка приходит на лету.
+    let mut bob_ws = ctx.client().await;
+    let auth = bob_ws
+        .request(
+            json!({ "type": "auth", "token": bob.token }),
+            "authenticated",
+        )
+        .await;
+    assert_eq!(
+        auth["channels"],
+        json!(["user:me", "person:denis-villeneuve"])
+    );
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        "/tags/sci-fi/interest",
+        None,
+        Some(&bob),
+    )
+    .await;
+    let added = bob_ws.event("interest.added").await;
+    assert!(added["data"]["tag_id"].is_string());
+    let tags = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/interests/tags",
+            None,
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(tags["items"][0]["tag"]["slug"], "sci-fi");
+
+    let mut alice_ws = ctx.authed(&alice).await;
+    for room in ["person:denis-villeneuve", "tag:sci-fi"] {
+        let sent = alice_ws
+            .request(
+                json!({ "type": "chat.send", "room": room, "body": room }),
+                "chat.sent",
+            )
+            .await;
+        assert_eq!(sent["room"], room);
+        let event = bob_ws.event("chat.message.created").await;
+        assert_eq!(event["channels"], json!([room]));
+        assert_eq!(event["data"]["message"], sent["message"]);
+    }
+
+    let chats = ctx.chats(&bob).await;
+    let rooms: Vec<&str> = chats.iter().map(|c| c["room"].as_str().unwrap()).collect();
+    assert_eq!(rooms, ["tag:sci-fi", "person:denis-villeneuve"]);
+    assert_eq!(chats[0]["kind"], "tag");
+    assert_eq!(chats[0]["tag"]["slug"], "sci-fi");
+    assert_eq!(chats[0]["entity"], Value::Null);
+    assert_eq!(chats[1]["person"]["slug"], "denis-villeneuve");
+    assert_eq!(chats[1]["unread"], 1);
+
+    let history = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/person/denis-villeneuve/messages",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(history["items"][0]["body"], "person:denis-villeneuve");
+    assert_eq!(history["items"][0]["kind"], "person");
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/chat/room/x/messages",
+        None,
+        None,
+    )
+    .await;
+    let error = alice_ws
+        .request(
+            json!({ "type": "chat.send", "room": "tag:nope", "body": "x" }),
+            "error",
+        )
+        .await;
+    assert_eq!(error["error"], "unknown tag in channel: tag:nope");
+
+    // Интерес убран — подписка снята.
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        "/tags/sci-fi/interest",
+        None,
+        Some(&bob),
+    )
+    .await;
+    bob_ws.event("interest.removed").await;
+    alice_ws
+        .request(
+            json!({ "type": "chat.send", "room": "tag:sci-fi", "body": "x" }),
+            "chat.sent",
+        )
+        .await;
+    bob_ws.silent().await;
+}

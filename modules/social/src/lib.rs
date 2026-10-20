@@ -1,5 +1,5 @@
 //! social — рецензии и оценки, подписки на пользователей, коллекции, социальный профиль, форум,
-//! интересы, лента. После изменений публикует события в `shared::events` (см. `events`) для `realtime`.
+//! интересы, чат по интересам, лента. После изменений публикует события в `shared::events` (см. `events`) для `realtime`.
 //! Монтируется под `/api/v1/social`.
 //!
 //! Чтение публичного — без авторизации, запись — любой вошедший (темы форума — author и выше),
@@ -8,6 +8,7 @@
 //! справочники `shared::directory` (`AppState::entities`, `AppState::users`), см. `refs`.
 
 pub mod admin;
+pub mod chat;
 pub mod collections;
 pub mod comments;
 pub mod directory;
@@ -69,6 +70,22 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(collections::put_item, collections::delete_item))
         .routes(routes!(feed::get))
         .routes(routes!(interests::list_own))
+        .routes(routes!(interests::list_own_people))
+        .routes(routes!(interests::list_own_tags))
+        .routes(routes!(
+            interests::get_own_person,
+            interests::add_person,
+            interests::remove_person
+        ))
+        .routes(routes!(
+            interests::get_own_tag,
+            interests::add_tag,
+            interests::remove_tag
+        ))
+        .routes(routes!(chat::list_own))
+        .routes(routes!(chat::history))
+        .routes(routes!(chat::get, chat::update, chat::delete))
+        .routes(routes!(chat::mute, chat::unmute))
         .routes(routes!(
             interests::get_own,
             interests::add,

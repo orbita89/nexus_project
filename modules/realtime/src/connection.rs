@@ -1,7 +1,8 @@
 //! Одно WebSocket-соединение: сообщения клиента, события шины, heartbeat и срок токена.
 //!
-//! Соединение открывается гостем: можно подписаться на публичные каналы (`thread:`, `entity:`).
-//! `auth` с access-токеном добавляет личный канал `user:me` и каналы сущностей из интересов.
+//! Соединение открывается гостем: можно подписаться на публичные каналы (`thread:`, `entity:`,
+//! `person:`, `tag:`). `auth` с access-токеном добавляет личный канал `user:me` и каналы
+//! интересов (сущности, люди, теги).
 //! Токен живёт 15 минут: за минуту до конца сервер присылает `auth_expiring`, клиент обновляет
 //! токен через REST и присылает новый `auth` — соединение и подписки не прерываются. Не прислал —
 //! соединение становится гостевым (`auth_expired`): личные каналы отключаются, ручные остаются.
@@ -13,6 +14,7 @@ use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket};
 use chrono::{TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use shared::directory::ChatRoom;
 use shared::events::{Channel, Event};
 use shared::{AppError, AppState};
 use std::collections::{HashMap, HashSet};
@@ -37,6 +39,22 @@ enum ClientMessage {
         channels: Vec<String>,
     },
     Ping,
+    /// Сообщение в чат комнаты (`entity:<slug>`); `client_id` возвращается в ответе.
+    #[serde(rename = "chat.send")]
+    ChatSend {
+        room: String,
+        body: String,
+        #[serde(default)]
+        reply_to: Option<Uuid>,
+        #[serde(default)]
+        client_id: Option<String>,
+    },
+    /// Прочитано в комнате до `message_id` включительно.
+    #[serde(rename = "chat.read")]
+    ChatRead {
+        room: String,
+        message_id: Uuid,
+    },
 }
 
 /// Вошедший пользователь соединения.
@@ -55,7 +73,7 @@ struct Conn {
     session: Option<Session>,
     /// Подписки клиента: канал → имя, как его видит клиент.
     manual: HashMap<Channel, String>,
-    /// Каналы сущностей из интересов вошедшего.
+    /// Каналы интересов вошедшего: сущности, люди, теги.
     interests: HashMap<Channel, String>,
 }
 
@@ -120,6 +138,21 @@ fn error(message: impl Into<String>) -> Value {
     json!({ "type": "error", "error": message.into() })
 }
 
+/// Ошибка чата → `error`; у лимита частоты — `retry_after` (секунды).
+fn chat_error(e: AppError) -> Value {
+    match e {
+        AppError::BadRequest(message) => error(message),
+        AppError::NotFound => error("not found"),
+        AppError::Forbidden => error("forbidden"),
+        AppError::TooManyRequests { retry_after_secs } => json!({
+            "type": "error",
+            "error": "too many messages",
+            "retry_after": retry_after_secs,
+        }),
+        e => internal(e),
+    }
+}
+
 fn internal(e: AppError) -> Value {
     tracing::error!(error = %e, "realtime");
     error("internal error")
@@ -149,6 +182,72 @@ impl Conn {
             ClientMessage::Subscribe { channels } => vec![self.subscribe(&channels).await],
             ClientMessage::Unsubscribe { channels } => vec![self.unsubscribe(channels)],
             ClientMessage::Ping => vec![json!({ "type": "pong" })],
+            ClientMessage::ChatSend {
+                room,
+                body,
+                reply_to,
+                client_id,
+            } => vec![self.chat_send(&room, &body, reply_to, client_id).await],
+            ClientMessage::ChatRead { room, message_id } => {
+                vec![self.chat_read(&room, message_id).await]
+            }
+        }
+    }
+
+    /// `chat.send`: сообщение пишет `social` (`state.chat`), событие рассылает шина. Ответ
+    /// отправителю — `chat.sent` с сообщением или `error`; в обоих — его `client_id`.
+    async fn chat_send(
+        &self,
+        room: &str,
+        body: &str,
+        reply_to: Option<Uuid>,
+        client_id: Option<String>,
+    ) -> Value {
+        let mut reply = match self.chat_room(room).await {
+            Err(reply) => reply,
+            Ok((user_id, chat_room, name)) => {
+                match self
+                    .state
+                    .chat
+                    .send(&self.state, user_id, chat_room, body, reply_to)
+                    .await
+                {
+                    Ok(message) => json!({ "type": "chat.sent", "room": name, "message": message }),
+                    Err(e) => chat_error(e),
+                }
+            }
+        };
+        reply["client_id"] = json!(client_id);
+        reply
+    }
+
+    /// `chat.read`: прочитано до сообщения → `chat.read_saved`; другие устройства получат
+    /// событие `chat.read` в `user:me`.
+    async fn chat_read(&self, room: &str, message_id: Uuid) -> Value {
+        let (user_id, chat_room, name) = match self.chat_room(room).await {
+            Ok(found) => found,
+            Err(reply) => return reply,
+        };
+        match self
+            .state
+            .chat
+            .read(&self.state, user_id, chat_room, message_id)
+            .await
+        {
+            Ok(()) => json!({ "type": "chat.read_saved", "room": name, "message_id": message_id }),
+            Err(e) => chat_error(e),
+        }
+    }
+
+    /// Вошедший и комната чата по имени; иначе — готовый ответ `error`.
+    async fn chat_room(&self, room: &str) -> Result<(Uuid, ChatRoom, String), Value> {
+        let Some(session) = &self.session else {
+            return Err(error("not authenticated"));
+        };
+        match channels::chat_room(&self.state, room).await {
+            Ok((chat_room, name)) => Ok((session.user_id, chat_room, name)),
+            Err(AppError::BadRequest(message)) => Err(error(message)),
+            Err(e) => Err(internal(e)),
         }
     }
 
@@ -169,11 +268,7 @@ impl Conn {
                 "no more than {MAX_CONNECTIONS_PER_USER} connections per user"
             ));
         };
-        let interests = match self.state.interests.entity_ids(claims.sub).await {
-            Ok(ids) => ids,
-            Err(e) => return internal(e),
-        };
-        let interests = match channels::entities(&self.state, &interests).await {
+        let interests = match channels::interests(&self.state, claims.sub).await {
             Ok(interests) => interests,
             Err(e) => return internal(e),
         };
@@ -285,22 +380,40 @@ impl Conn {
     }
 
     /// Интерес добавлен или убран (в том числе с другого устройства) — меняем подписки.
+    /// В данных — `entity_id`, `person_id` или `tag_id`.
     async fn follow_interests(&mut self, event: &Event) -> Result<(), AppError> {
-        let entity = event
-            .data
-            .get("entity_id")
-            .and_then(Value::as_str)
-            .and_then(|id| id.parse::<Uuid>().ok());
-        match (event.kind, entity) {
-            ("interest.added", Some(id)) => {
-                self.interests
-                    .extend(channels::entities(&self.state, &[id]).await?);
-            }
-            ("interest.removed", Some(id)) => {
-                self.interests.remove(&Channel::Entity(id));
-            }
-            _ => {}
+        let id_of = |key: &str| {
+            event
+                .data
+                .get(key)
+                .and_then(Value::as_str)
+                .and_then(|id| id.parse::<Uuid>().ok())
+        };
+        let added = match event.kind {
+            "interest.added" => true,
+            "interest.removed" => false,
+            _ => return Ok(()),
+        };
+        let found = if let Some(id) = id_of("entity_id") {
+            Some((Channel::Entity(id), id))
+        } else if let Some(id) = id_of("person_id") {
+            Some((Channel::Person(id), id))
+        } else {
+            id_of("tag_id").map(|id| (Channel::Tag(id), id))
+        };
+        let Some((channel, id)) = found else {
+            return Ok(());
+        };
+        if !added {
+            self.interests.remove(&channel);
+            return Ok(());
         }
+        let named = match channel {
+            Channel::Entity(_) => channels::entities(&self.state, &[id]).await?,
+            Channel::Person(_) => channels::people(&self.state, &[id]).await?,
+            _ => channels::tags(&self.state, &[id]).await?,
+        };
+        self.interests.extend(named);
         Ok(())
     }
 

@@ -1,8 +1,13 @@
-//! Справочник сущностей для других модулей (`shared::directory::EntityDirectory`) и сводки оценок
-//! от `social` для сортировок (`shared::directory::EntityRatings`).
+//! Справочники сущностей, людей и тегов для других модулей (`shared::directory::EntityDirectory`,
+//! `PersonDirectory`, `TagDirectory`) и сводки оценок от `social` для сортировок
+//! (`shared::directory::EntityRatings`).
 
 use crate::models::VISIBLE;
-use shared::directory::{async_trait, EntityDirectory, EntityRatings, EntityRef, RatingStats};
+use crate::people::PUBLIC_PERSON;
+use shared::directory::{
+    async_trait, EntityDirectory, EntityRatings, EntityRef, PersonDirectory, PersonRef,
+    RatingStats, TagDirectory, TagRef,
+};
 use shared::AppResult;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -61,6 +66,77 @@ impl EntityDirectory for PgEntityDirectory {
             .into_iter()
             .map(|row| (row.slug.clone(), row))
             .collect())
+    }
+}
+
+pub struct PgPersonDirectory {
+    db: PgPool,
+}
+
+impl PgPersonDirectory {
+    pub fn new(db: PgPool) -> Self {
+        Self { db }
+    }
+}
+
+/// По slug — только публичные (`PUBLIC_PERSON`: скрытого на сайте нет, другие модули отвечают
+/// 404), по id — все.
+#[async_trait]
+impl PersonDirectory for PgPersonDirectory {
+    async fn by_slug(&self, slug: &str) -> AppResult<Option<PersonRef>> {
+        Ok(sqlx::query_as(&format!(
+            "SELECT id, slug, full_name, photo_url FROM people p
+             WHERE p.slug = $1 AND {PUBLIC_PERSON}"
+        ))
+        .bind(slug)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
+    async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, PersonRef>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<PersonRef> =
+            sqlx::query_as("SELECT id, slug, full_name, photo_url FROM people WHERE id = ANY($1)")
+                .bind(ids)
+                .fetch_all(&self.db)
+                .await?;
+        Ok(rows.into_iter().map(|row| (row.id, row)).collect())
+    }
+}
+
+pub struct PgTagDirectory {
+    db: PgPool,
+}
+
+impl PgTagDirectory {
+    pub fn new(db: PgPool) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl TagDirectory for PgTagDirectory {
+    async fn by_slug(&self, slug: &str) -> AppResult<Option<TagRef>> {
+        Ok(
+            sqlx::query_as("SELECT id, slug, name, kind FROM tags WHERE slug = $1")
+                .bind(slug)
+                .fetch_optional(&self.db)
+                .await?,
+        )
+    }
+
+    async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, TagRef>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<TagRef> =
+            sqlx::query_as("SELECT id, slug, name, kind FROM tags WHERE id = ANY($1)")
+                .bind(ids)
+                .fetch_all(&self.db)
+                .await?;
+        Ok(rows.into_iter().map(|row| (row.id, row)).collect())
     }
 }
 

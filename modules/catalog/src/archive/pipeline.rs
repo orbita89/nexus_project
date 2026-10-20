@@ -28,7 +28,8 @@ use super::index::{Archive, ArchiveDoc, ArchiveError};
 use crate::models::EntityKind;
 use crate::validate;
 use chrono::NaiveDate;
-use shared::AppState;
+use shared::directory::InterestDirectory;
+use shared::{AppResult, AppState};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
@@ -824,7 +825,8 @@ async fn delete_archived(
         report.kept_in_use += (chunk.len() - ids.len()) as u64;
 
         let mut tx = state.db.begin().await?;
-        let (deleted, people_deleted) = delete_entities(&mut tx, &ids, false).await?;
+        let (deleted, people_deleted) =
+            delete_entities(&mut tx, state.interests.as_ref(), &ids, false).await?;
         tx.commit().await?;
         report.deleted += deleted;
         report.people_deleted += people_deleted;
@@ -851,19 +853,26 @@ pub fn mark_manual(archive: &Archive, tmdb_ids: &[i32]) -> Result<u64, ArchiveEr
 }
 
 /// Удаляет строки `entities`, ушедшие в архив (каскадом титры, теги, статистика, связки
-/// импорта), и людей, у которых не осталось работ. `with_manual` — и `active_manual` (ручной
+/// импорта), и людей, у которых не осталось работ, кроме нужных пользователям (в интересах или
+/// с чатом: `InterestDirectory::people_in_use`). `with_manual` — и `active_manual` (ручной
 /// перенос из админки). Возвращает (сущностей, людей).
 pub(crate) async fn delete_entities(
     tx: &mut sqlx::PgConnection,
+    interests: &dyn InterestDirectory,
     ids: &[Uuid],
     with_manual: bool,
-) -> sqlx::Result<(u64, u64)> {
+) -> AppResult<(u64, u64)> {
     let people: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT person_id FROM entity_credits WHERE entity_id = ANY($1)",
     )
     .bind(ids)
     .fetch_all(&mut *tx)
     .await?;
+    let in_use = interests.people_in_use(&people).await?;
+    let people: Vec<Uuid> = people
+        .into_iter()
+        .filter(|id| !in_use.contains(id))
+        .collect();
     let deleted =
         sqlx::query("DELETE FROM entities WHERE id = ANY($1) AND ($2 OR NOT active_manual)")
             .bind(ids)

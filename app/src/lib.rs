@@ -88,6 +88,7 @@ struct CatalogDoc;
         (name = "collections", description = "Коллекции: приватные видит только владелец"),
         (name = "feed", description = "Лента: записи тех, на кого подписан, затем по интересам, затем популярные темы. Пагинация курсором"),
         (name = "interests", description = "Интересы: на какие сущности подписан пользователь. Список личный; по нему realtime (/ws) присылает события сущностей"),
+        (name = "chat", description = "Чат по интересам: комната на каждую сущность. Отправка и «прочитано» — по WebSocket /ws (chat.send, chat.read); здесь мои чаты, история, правка, удаление, заглушение"),
         (name = "marks", description = "Личные отметки «Посмотреть позже» и «Просмотрено». Видит только сам пользователь"),
         (name = "forum", description = "Форум: темы, привязанные к нескольким сущностям, и сообщения с ветками. Темы создаёт роль author и выше, отвечает любой вошедший"),
         (name = "social-admin", description = "Модерация. Только роль admin"),
@@ -102,7 +103,10 @@ pub fn directories(db: PgPool) -> Directories {
         entities: Arc::new(catalog::directory::PgEntityDirectory::new(db.clone())),
         users: Arc::new(auth::directory::PgUserDirectory::new(db.clone())),
         interests: Arc::new(social::directory::PgInterestDirectory::new(db.clone())),
-        ratings: Arc::new(catalog::directory::PgEntityRatings::new(db)),
+        ratings: Arc::new(catalog::directory::PgEntityRatings::new(db.clone())),
+        chat: Arc::new(social::chat::PgChat),
+        people: Arc::new(catalog::directory::PgPersonDirectory::new(db.clone())),
+        tags: Arc::new(catalog::directory::PgTagDirectory::new(db.clone())),
     }
 }
 

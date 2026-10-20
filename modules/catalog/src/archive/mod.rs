@@ -659,9 +659,10 @@ pub async fn demote(
 
     let deleted = async {
         let mut tx = state.db.begin().await?;
-        let counts = pipeline::delete_entities(&mut tx, &chosen_ids, true).await?;
+        let counts =
+            pipeline::delete_entities(&mut tx, state.interests.as_ref(), &chosen_ids, true).await?;
         tx.commit().await?;
-        Ok::<_, sqlx::Error>(counts)
+        Ok::<_, AppError>(counts)
     }
     .await;
     let (archive_result, deleted) = {

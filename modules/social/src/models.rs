@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
-use shared::directory::{EntityRef, UserRef};
+use shared::directory::{EntityRef, PersonRef, TagRef, UserRef};
 use shared::pagination::Page;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -572,6 +572,29 @@ pub struct Interest {
 #[derive(Debug, sqlx::FromRow)]
 pub struct InterestRow {
     pub entity_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Человек в интересах пользователя.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PersonInterest {
+    pub person: PersonRef,
+    /// Когда добавлен.
+    pub since: DateTime<Utc>,
+}
+
+/// Тег или жанр в интересах пользователя.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TagInterest {
+    pub tag: TagRef,
+    /// Когда добавлен.
+    pub since: DateTime<Utc>,
+}
+
+/// Строка интереса к человеку или тегу: id и когда добавлен.
+#[derive(Debug, sqlx::FromRow)]
+pub struct TargetRow {
+    pub id: Uuid,
     pub created_at: DateTime<Utc>,
 }
 

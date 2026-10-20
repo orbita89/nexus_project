@@ -435,6 +435,436 @@
         ]
       }
     },
+    "/api/v1/social/chat/messages/{id}": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Одно сообщение: клиент перечитывает его по событию `chat.message.updated` / `deleted`.",
+        "operationId": "get_chat_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сообщения",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сообщение",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Удалить сообщение: автор или admin. В истории остаётся заглушка → 204.",
+        "operationId": "delete_chat_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сообщения",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалено (повторно — тоже 204)"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужое сообщение",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Изменить своё сообщение.",
+        "operationId": "update_chat_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сообщения",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateChatMessage"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatMessage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пустой или длинный текст, сообщение удалено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужое сообщение",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/chat/{kind}/{slug}/messages": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "История комнаты: страница по 50 (до 100), старые сверху; дальше в прошлое —\n`?before=<next_before>`. Публичная, как форум.",
+        "operationId": "chat_history",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Вид комнаты: `entity`, `person`, `tag`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "entity"
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности, человека или тега",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Сообщения старше этого id (курсор `next_before`). Без него — самые новые.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница истории",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatHistory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`limit` вне 1–100",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Неизвестный вид комнаты или slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/social/chat/{kind}/{slug}/mute": {
+      "put": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Заглушить комнату: события приходят, но фронтенд не показывает уведомления → 204.",
+        "operationId": "mute_chat",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Вид комнаты: `entity`, `person`, `tag`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "entity"
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности, человека или тега",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Заглушена (повторно — тоже 204)"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Неизвестный вид комнаты или slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Снять заглушение → 204 (даже если не было).",
+        "operationId": "unmute_chat",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Вид комнаты: `entity`, `person`, `tag`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "entity"
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности, человека или тега",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Не заглушена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Неизвестный вид комнаты или slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/chats": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Мои чаты: комнаты всех сущностей, людей и тегов из интересов (сообщений может ещё не быть).\nСверху — с самыми свежими сообщениями, затем без сообщений (новые интересы сверху).",
+        "operationId": "list_own_chats",
+        "responses": {
+          "200": {
+            "description": "Комнаты по интересам",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChatSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/collections": {
       "get": {
         "tags": [
@@ -2181,7 +2611,7 @@
         "tags": [
           "interests"
         ],
-        "summary": "Свои интересы, новые сверху.",
+        "summary": "Свои интересы-сущности, новые сверху.",
         "operationId": "list_own",
         "parameters": [
           {
@@ -2218,6 +2648,288 @@
           },
           "401": {
             "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/interests/people": {
+      "get": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Свои интересы-люди, новые сверху.",
+        "operationId": "list_own_person_interests",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница интересов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_PersonInterest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/interests/tags": {
+      "get": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Свои интересы-теги и жанры, новые сверху.",
+        "operationId": "list_own_tag_interests",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница интересов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_TagInterest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/people/{slug}/interest": {
+      "get": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Есть ли человек в своих интересах: кнопка «Следить» на его странице.",
+        "operationId": "get_own_person_interest",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug человека",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "denis-villeneuve"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "В интересах",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonInterest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Человек не найден или его нет в интересах",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Добавить человека в интересы → 204 (повторно — тоже 204).",
+        "operationId": "add_person_interest",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug человека",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "denis-villeneuve"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "В интересах"
+          },
+          "400": {
+            "description": "Уже 500 людей в интересах",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Человек не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Убрать человека из интересов → 204 (даже если его там не было).",
+        "operationId": "remove_person_interest",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug человека",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "denis-villeneuve"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Не в интересах"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Человек не найден",
             "content": {
               "application/json": {
                 "schema": {
@@ -2788,6 +3500,172 @@
           },
           "404": {
             "description": "Рецензия не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/tags/{slug}/interest": {
+      "get": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Есть ли тег в своих интересах.",
+        "operationId": "get_own_tag_interest",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug тега",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "sci-fi"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "В интересах",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagInterest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Тег не найден или его нет в интересах",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Добавить тег в интересы → 204 (повторно — тоже 204).",
+        "operationId": "add_tag_interest",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug тега",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "sci-fi"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "В интересах"
+          },
+          "400": {
+            "description": "Уже 500 тегов в интересах",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Тег не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "interests"
+        ],
+        "summary": "Убрать тег из интересов → 204 (даже если его там не было).",
+        "operationId": "remove_tag_interest",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug тега",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "sci-fi"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Не в интересах"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Тег не найден",
             "content": {
               "application/json": {
                 "schema": {
@@ -3831,6 +4709,164 @@
   },
   "components": {
     "schemas": {
+      "ChatHistory": {
+        "type": "object",
+        "description": "Страница истории: старые сверху, последнее — самое новое.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatMessage"
+            }
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Курсор для более старых: `?before=`. `null` — это начало истории."
+          }
+        }
+      },
+      "ChatMessage": {
+        "type": "object",
+        "description": "Сообщение чата. Удалённое — заглушка: `deleted: true`, без `author` и `body`.",
+        "required": [
+          "id",
+          "kind",
+          "target_id",
+          "created_at",
+          "deleted"
+        ],
+        "properties": {
+          "author": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UserRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "edited_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Вид комнаты: `entity`, `person`, `tag`.",
+            "example": "entity"
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Ответ на сообщение той же комнаты (`null` — нет или оно удалено насовсем)."
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "id сущности, человека или тега комнаты."
+          }
+        }
+      },
+      "ChatSummary": {
+        "type": "object",
+        "description": "Комната в списке «мои чаты». Заполнено ровно одно из `entity`, `person`, `tag` — по `kind`.",
+        "required": [
+          "room",
+          "kind",
+          "unread",
+          "muted"
+        ],
+        "properties": {
+          "entity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "example": "entity"
+          },
+          "last_message": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChatMessage",
+                "description": "`null` — сообщений ещё нет."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "muted": {
+            "type": "boolean"
+          },
+          "person": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PersonRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "room": {
+            "type": "string",
+            "description": "Имя канала и комнаты для WebSocket: `entity:<slug>`, `person:<slug>`, `tag:<slug>`.",
+            "example": "entity:dune-2021"
+          },
+          "tag": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TagRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unread": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Непрочитанные чужие сообщения, не больше 100."
+          }
+        }
+      },
       "Collection": {
         "type": "object",
         "description": "Коллекция в списке.",
@@ -4598,6 +5634,55 @@
           }
         }
       },
+      "Page_PersonInterest": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Человек в интересах пользователя.",
+              "required": [
+                "person",
+                "since"
+              ],
+              "properties": {
+                "person": {
+                  "$ref": "#/components/schemas/PersonRef"
+                },
+                "since": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Когда добавлен."
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "Page_Post": {
         "type": "object",
         "description": "Страница списка.",
@@ -4874,6 +5959,55 @@
           }
         }
       },
+      "Page_TagInterest": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Тег или жанр в интересах пользователя.",
+              "required": [
+                "tag",
+                "since"
+              ],
+              "properties": {
+                "since": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Когда добавлен."
+                },
+                "tag": {
+                  "$ref": "#/components/schemas/TagRef"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "Page_Thread": {
         "type": "object",
         "description": "Страница списка.",
@@ -4963,6 +6097,53 @@
             "format": "int64",
             "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
             "example": 137
+          }
+        }
+      },
+      "PersonInterest": {
+        "type": "object",
+        "description": "Человек в интересах пользователя.",
+        "required": [
+          "person",
+          "since"
+        ],
+        "properties": {
+          "person": {
+            "$ref": "#/components/schemas/PersonRef"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Когда добавлен."
+          }
+        }
+      },
+      "PersonRef": {
+        "type": "object",
+        "description": "Человек каталога (автор, режиссёр, актёр) в чужих ответах: ссылка на его страницу.",
+        "required": [
+          "id",
+          "slug",
+          "full_name"
+        ],
+        "properties": {
+          "full_name": {
+            "type": "string",
+            "example": "Дени Вильнёв"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "denis-villeneuve"
           }
         }
       },
@@ -5456,6 +6637,53 @@
           }
         }
       },
+      "TagInterest": {
+        "type": "object",
+        "description": "Тег или жанр в интересах пользователя.",
+        "required": [
+          "tag",
+          "since"
+        ],
+        "properties": {
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Когда добавлен."
+          },
+          "tag": {
+            "$ref": "#/components/schemas/TagRef"
+          }
+        }
+      },
+      "TagRef": {
+        "type": "object",
+        "description": "Тег или жанр каталога в чужих ответах.",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`genre` или `tag`.",
+            "example": "genre"
+          },
+          "name": {
+            "type": "string",
+            "example": "Научная фантастика"
+          },
+          "slug": {
+            "type": "string",
+            "example": "sci-fi"
+          }
+        }
+      },
       "Thread": {
         "type": "object",
         "description": "Тема в списке: без текста и сообщений.",
@@ -5549,6 +6777,18 @@
           "active",
           "new"
         ]
+      },
+      "UpdateChatMessage": {
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "1–2000 символов."
+          }
+        }
       },
       "UpdateCollection": {
         "type": "object",
@@ -5714,6 +6954,10 @@
     {
       "name": "interests",
       "description": "Интересы: на какие сущности подписан пользователь. Список личный; по нему realtime (/ws) присылает события сущностей"
+    },
+    {
+      "name": "chat",
+      "description": "Чат по интересам: комната на каждую сущность. Отправка и «прочитано» — по WebSocket /ws (chat.send, chat.read); здесь мои чаты, история, правка, удаление, заглушение"
     },
     {
       "name": "marks",

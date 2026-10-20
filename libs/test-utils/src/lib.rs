@@ -40,7 +40,10 @@ pub fn directories(db: PgPool) -> Directories {
         entities: Arc::new(catalog::directory::PgEntityDirectory::new(db.clone())),
         users: Arc::new(auth::directory::PgUserDirectory::new(db.clone())),
         interests: Arc::new(social::directory::PgInterestDirectory::new(db.clone())),
-        ratings: Arc::new(catalog::directory::PgEntityRatings::new(db)),
+        ratings: Arc::new(catalog::directory::PgEntityRatings::new(db.clone())),
+        chat: Arc::new(social::chat::PgChat),
+        people: Arc::new(catalog::directory::PgPersonDirectory::new(db.clone())),
+        tags: Arc::new(catalog::directory::PgTagDirectory::new(db.clone())),
     }
 }
 

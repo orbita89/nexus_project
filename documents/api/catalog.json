@@ -2280,6 +2280,58 @@
         }
       }
     },
+    "/api/v1/catalog/archive/stats": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Сколько работ в архиве, всего и по типам — для подписи на сайте («ещё N в архиве»).\nПубличный, без запроса к PostgreSQL: счётчики Tantivy с одного снимка индекса.",
+        "operationId": "archive_stats",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Только этот тип: `total` — его число. Без параметра — всего.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Число работ в архиве, всего и по типам",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveStats"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестный `kind`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Архив не настроен (`ARCHIVE_DIR`) или недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/catalog/entities": {
       "get": {
         "tags": [
@@ -3249,6 +3301,34 @@
             "format": "int32",
             "description": "Id фильма в TMDB: по нему импорт пропускает фильмы архива.",
             "example": 42491
+          }
+        }
+      },
+      "ArchiveStats": {
+        "type": "object",
+        "description": "Размер холодного архива: сколько работ можно найти через `GET /archive/search`.",
+        "required": [
+          "total",
+          "by_kind"
+        ],
+        "properties": {
+          "by_kind": {
+            "type": "object",
+            "description": "По типам: все `kind` каталога, нет в архиве — 0 (`{\"movie\": 1200000, \"book\": 0, ...}`).",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Документов в индексе архива (работ не на сайте); с `?kind=` — только этого типа.",
+            "minimum": 0
           }
         }
       },
