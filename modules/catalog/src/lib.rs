@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod archive;
+pub mod banners;
 pub mod books;
 pub mod directory;
 pub mod entities;
@@ -64,4 +65,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(ranking::save_stream))
         .routes(routes!(archive::promote))
         .routes(routes!(archive::demote))
+        .routes(routes!(banners::list))
+        .routes(routes!(admin::banners::list, admin::banners::create))
+        .routes(routes!(admin::banners::update, admin::banners::delete))
 }
