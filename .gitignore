@@ -9,3 +9,4 @@ infra/.env.prod
 .vscode/
 http/http-client.private.env.json
 scripts/games-import/.venv/
+.claude/worktrees/
