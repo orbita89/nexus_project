@@ -833,3 +833,114 @@ async fn admin_rooms(pool: PgPool) {
         "unknown room in channel: room:cyberpunk-fans"
     );
 }
+
+/// Состояние комнаты для открытой панели (`GET /chat/{kind}/{slug}`): гостю `me: null`,
+/// вошедшему — в «моих чатах» ли, заглушена ли, непрочитанные; `joined` в списке своих комнат.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn room_info_for_viewer(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let admin = ctx.login("admin", "admin").await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    let path = "/chat/entity/dune-2021";
+    let guest = ctx.api(StatusCode::OK, Method::GET, path, None, None).await;
+    assert_eq!(guest["room"], ROOM);
+    assert_eq!(guest["entity"]["slug"], "dune-2021");
+    assert_eq!(guest["last_message"], Value::Null);
+    assert_eq!(guest["me"], Value::Null);
+    let fresh = ctx
+        .api(StatusCode::OK, Method::GET, path, None, Some(&bob))
+        .await;
+    assert_eq!(
+        fresh["me"],
+        json!({ "member": false, "muted": false, "unread": 0, "last_read_id": null })
+    );
+
+    let mut alice_ws = ctx.authed(&alice).await;
+    let message = alice_ws.say("Привет").await;
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        "/chat/entity/dune-2021/mute",
+        None,
+        Some(&bob),
+    )
+    .await;
+    let info = ctx
+        .api(StatusCode::OK, Method::GET, path, None, Some(&bob))
+        .await;
+    assert_eq!(info["last_message"]["id"], message["id"]);
+    assert_eq!(
+        info["me"],
+        json!({ "member": false, "muted": true, "unread": 1, "last_read_id": null })
+    );
+    let own = ctx
+        .api(StatusCode::OK, Method::GET, path, None, Some(&alice))
+        .await;
+    assert_eq!(own["me"]["unread"], 0);
+    assert_eq!(own["me"]["last_read_id"], message["id"]);
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/chat/entity/nope",
+        None,
+        None,
+    )
+    .await;
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/chat/planet/x",
+        None,
+        None,
+    )
+    .await;
+
+    ctx.api(
+        StatusCode::CREATED,
+        Method::POST,
+        "/admin/chat/rooms",
+        Some(json!({ "slug": "books", "title": "Книги" })),
+        Some(&admin),
+    )
+    .await;
+    let rooms = ctx
+        .api(StatusCode::OK, Method::GET, "/chat/rooms", None, None)
+        .await;
+    assert_eq!(rooms["items"][0]["joined"], Value::Null);
+    let rooms = ctx
+        .api(StatusCode::OK, Method::GET, "/chat/rooms", None, Some(&bob))
+        .await;
+    assert_eq!(rooms["items"][0]["joined"], false);
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        "/chat/rooms/books/membership",
+        None,
+        Some(&bob),
+    )
+    .await;
+    let room = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/rooms/books",
+            None,
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(room["joined"], true);
+    let info = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/room/books",
+            None,
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(info["me"]["member"], true);
+    assert_eq!(info["custom"]["joined"], true);
+    assert_eq!(ctx.chats(&bob).await[0]["custom"]["joined"], true);
+}

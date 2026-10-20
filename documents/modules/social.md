@@ -447,13 +447,14 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | Метод | Путь | Кто | Что делает |
 |---|---|---|---|
 | GET | `/chats` | user | Мои чаты = комнаты всех сущностей, людей и тегов из интересов и свои комнаты, в которые вступил (сообщений может не быть): `[{room: "entity:<slug>" \| "person:<slug>" \| "tag:<slug>" \| "room:<slug>", kind, entity \| null, person \| null, tag \| null, custom \| null, last_message \| null, unread (до 100), muted}]` — из `entity`/`person`/`tag`/`custom` заполнено одно, по `kind`; сверху со свежими сообщениями, затем без сообщений (новые интересы сверху). Без пагинации (интересов ≤ 3 × 500) |
+| GET | `/chat/{kind}/{slug}` | все (`Option<AuthUser>`) | Комната для открытой панели, в том числе не из «моих чатов» (открыта с карточки): `{room, kind, entity \| person \| tag \| custom, last_message \| null, me}`. `me` — вошедшему `{member, muted, unread (до 100), last_read_id}`: `member` — сущность, человек или тег в интересах / в свою комнату вступил; `last_read_id` — для разделителя «новые сообщения». Гостю `me: null`. 404 — неизвестный `kind` или slug; 401 — неверный токен |
 | GET | `/chat/{kind}/{slug}/messages?before=&limit=` | все | История комнаты (`kind` — `entity`, `person`, `tag`, `room`): `{items, next_before}` — `limit` 1–100 (50) сообщений старше `before` (без него — последние), в `items` старые сверху; `next_before` — курсор дальше в прошлое, `null` — начало. 400 — `limit` вне 1–100; 404 — неизвестный `kind` или slug |
 | GET | `/chat/messages/{id}` | все | Одно сообщение (перечитать по `chat.message.updated` / `deleted`). 404 — нет |
 | PATCH | `/chat/messages/{id}` | автор | `{body}` 1–2000 → 200 сообщение с `edited_at`. 403 — чужое, 400 — пусто/длинно/удалено, 404 — нет |
 | DELETE | `/chat/messages/{id}` | автор или admin | Мягкое удаление → 204 (повторно — 204). 403 — чужое, 404 — нет |
 | PUT / DELETE | `/chat/{kind}/{slug}/mute` | user | Заглушить / снять → 204 (повторно — 204). 404 — неизвестный `kind` или slug |
-| GET | `/chat/rooms` | все | Свои комнаты админа, больше участников — выше: `Page<CustomRoom>` (`?limit=&offset=`) |
-| GET | `/chat/rooms/{slug}` | все | Комната: `CustomRoom` `{id, slug, title, description, members_count, messages_count, created_at}`. 404 — нет |
+| GET | `/chat/rooms` | все (`Option<AuthUser>`) | Свои комнаты админа, больше участников — выше: `Page<CustomRoom>` (`?limit=&offset=`). `joined` — вступил ли вошедший (одним запросом на страницу), гостю `null` |
+| GET | `/chat/rooms/{slug}` | все (`Option<AuthUser>`) | Комната: `CustomRoom` `{id, slug, title, description, members_count, messages_count, created_at, joined}` (`joined` — гостю `null`; в `/chats` всегда `true`). 404 — нет |
 | PUT / DELETE | `/chat/rooms/{slug}/membership` | user | Вступить / выйти → 204 (повторно — 204); публикует `interest.added` / `interest.removed` с `room_id`. 404 — нет комнаты |
 | POST | `/admin/chat/rooms` | admin | `{slug, title, description?}` → 201 `CustomRoom`. 400 — неверный slug (a-z, 0-9, дефисы между ними, 1–80), пустое/длинное название (1–100), описание > 500; 409 — slug занят |
 | PATCH | `/admin/chat/rooms/{slug}` | admin | `{title?, description?}` (пустое описание — убрать; slug не меняется) → 200 `CustomRoom`, событие `chat.room.updated`. 404 — нет |

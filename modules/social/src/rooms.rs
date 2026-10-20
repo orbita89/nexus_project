@@ -4,7 +4,7 @@
 //! подписывается сам (`interest.added` / `interest.removed` с `room_id`). Писать в комнату, как и в
 //! остальные, может любой вошедший; сообщения и история — общие (`chat`, `/chat/room/{slug}/...`).
 
-use crate::chat::{custom_room_id, CustomRoom, CUSTOM_COLUMNS};
+use crate::chat::{custom_room, custom_room_id, CustomRoom, CUSTOM_COLUMNS};
 use crate::events;
 use crate::models::PageQuery;
 use crate::validate::{self, MAX_ROOM_DESCRIPTION, MAX_ROOM_TITLE};
@@ -40,30 +40,51 @@ pub struct UpdateRoom {
 }
 
 async fn room(state: &AppState, id: Uuid) -> AppResult<CustomRoom> {
-    sqlx::query_as(&format!(
-        "SELECT {CUSTOM_COLUMNS} FROM chat_rooms r WHERE r.id = $1 AND r.slug IS NOT NULL"
-    ))
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound)
+    custom_room(&state.db, id).await
 }
 
-/// Свои комнаты: больше участников — выше.
+/// `joined` для вошедшего: в какие из комнат он вступил (одним запросом). Гость — `null`.
+async fn fill_joined(
+    state: &AppState,
+    viewer: Option<&AuthUser>,
+    rooms: &mut [CustomRoom],
+) -> AppResult<()> {
+    let Some(user) = viewer else {
+        return Ok(());
+    };
+    let ids: Vec<Uuid> = rooms.iter().map(|room| room.id).collect();
+    let joined: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT room_id FROM chat_room_members WHERE user_id = $1 AND room_id = ANY($2)",
+    )
+    .bind(user.id)
+    .bind(&ids)
+    .fetch_all(&state.db)
+    .await?;
+    for room in rooms {
+        room.joined = Some(joined.contains(&room.id));
+    }
+    Ok(())
+}
+
+/// Свои комнаты: больше участников — выше. Вошедшему — `joined` (вступил ли).
 #[utoipa::path(
     get, operation_id = "list_chat_rooms", path = "/chat/rooms", tag = "chat",
     params(PageQuery),
-    responses((status = 200, description = "Страница комнат", body = Page<CustomRoom>))
+    responses(
+        (status = 200, description = "Страница комнат", body = Page<CustomRoom>),
+        (status = 401, description = "Неверный токен", body = ErrorBody),
+    )
 )]
 pub async fn list(
     State(state): State<AppState>,
+    viewer: Option<AuthUser>,
     Query(query): Query<PageQuery>,
 ) -> AppResult<Json<Page<CustomRoom>>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
     let total: i64 = sqlx::query_scalar("SELECT count(*) FROM chat_rooms WHERE slug IS NOT NULL")
         .fetch_one(&state.db)
         .await?;
-    let items = sqlx::query_as(&format!(
+    let mut items: Vec<CustomRoom> = sqlx::query_as(&format!(
         "SELECT {CUSTOM_COLUMNS} FROM chat_rooms r WHERE r.slug IS NOT NULL
          ORDER BY members_count DESC, r.created_at, r.id LIMIT $1 OFFSET $2"
     ))
@@ -71,6 +92,7 @@ pub async fn list(
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
+    fill_joined(&state, viewer.as_ref(), &mut items).await?;
     Ok(Json(Page {
         items,
         total,
@@ -79,21 +101,26 @@ pub async fn list(
     }))
 }
 
-/// Своя комната по slug.
+/// Своя комната по slug. Вошедшему — `joined` (вступил ли).
 #[utoipa::path(
     get, operation_id = "get_chat_room", path = "/chat/rooms/{slug}", tag = "chat",
     params(("slug" = String, Path, description = "slug комнаты", example = "cyberpunk-fans")),
     responses(
         (status = 200, description = "Комната", body = CustomRoom),
+        (status = 401, description = "Неверный токен", body = ErrorBody),
         (status = 404, description = "Нет такой комнаты", body = ErrorBody),
     )
 )]
 pub async fn get(
     State(state): State<AppState>,
+    viewer: Option<AuthUser>,
     Path(slug): Path<String>,
 ) -> AppResult<Json<CustomRoom>> {
     let id = custom_room_id(&state.db, &slug).await?;
-    Ok(Json(room(&state, id).await?))
+    let mut rooms = [room(&state, id).await?];
+    fill_joined(&state, viewer.as_ref(), &mut rooms).await?;
+    let [room] = rooms;
+    Ok(Json(room))
 }
 
 /// Вступить в комнату → 204 (повторно — тоже 204): она в «моих чатах», канал подписан.

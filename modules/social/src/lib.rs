@@ -84,6 +84,7 @@ pub fn router() -> OpenApiRouter<AppState> {
             interests::remove_tag
         ))
         .routes(routes!(chat::list_own))
+        .routes(routes!(chat::info))
         .routes(routes!(chat::history))
         .routes(routes!(chat::get, chat::update, chat::delete))
         .routes(routes!(chat::mute, chat::unmute))

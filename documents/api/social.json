@@ -851,7 +851,7 @@
         "tags": [
           "chat"
         ],
-        "summary": "Свои комнаты: больше участников — выше.",
+        "summary": "Свои комнаты: больше участников — выше. Вошедшему — `joined` (вступил ли).",
         "operationId": "list_chat_rooms",
         "parameters": [
           {
@@ -885,6 +885,16 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -894,7 +904,7 @@
         "tags": [
           "chat"
         ],
-        "summary": "Своя комната по slug.",
+        "summary": "Своя комната по slug. Вошедшему — `joined` (вступил ли).",
         "operationId": "get_chat_room",
         "parameters": [
           {
@@ -915,6 +925,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CustomRoom"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1030,6 +1050,69 @@
             "bearer": []
           }
         ]
+      }
+    },
+    "/api/v1/social/chat/{kind}/{slug}": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Комната для открытой панели: что это, последнее сообщение и (для вошедшего) в «моих чатах»\nли она, заглушена ли, сколько непрочитанных. Работает и для комнаты не из «моих чатов»\n(открытой с карточки). Публичный: у гостя `me: null`.",
+        "operationId": "get_chat_room_info",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Вид комнаты: `entity`, `person`, `tag`, `room`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "entity"
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности, человека, тега или своей комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Комната",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatRoomInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Неизвестный вид комнаты или slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/social/chat/{kind}/{slug}/messages": {
@@ -5206,6 +5289,118 @@
           }
         }
       },
+      "ChatRoomInfo": {
+        "type": "object",
+        "description": "Комната для открытой панели чата: что это, последнее сообщение и состояние текущего\nпользователя. Заполнено одно из `entity`, `person`, `tag`, `custom` — по `kind`.",
+        "required": [
+          "room",
+          "kind"
+        ],
+        "properties": {
+          "custom": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CustomRoom"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "entity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "example": "entity"
+          },
+          "last_message": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChatMessage",
+                "description": "`null` — сообщений ещё нет."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "me": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChatRoomMe",
+                "description": "Состояние текущего пользователя; `null` — гость."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "person": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PersonRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "room": {
+            "type": "string",
+            "description": "Имя канала и комнаты для WebSocket.",
+            "example": "entity:dune-2021"
+          },
+          "tag": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TagRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ChatRoomMe": {
+        "type": "object",
+        "description": "Комната глазами текущего пользователя.",
+        "required": [
+          "member",
+          "muted",
+          "unread"
+        ],
+        "properties": {
+          "last_read_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Последнее прочитанное сообщение (`null` — ничего): разделитель «новые сообщения»."
+          },
+          "member": {
+            "type": "boolean",
+            "description": "Комната в «моих чатах»: сущность, человек или тег в интересах, в свою комнату — вступил."
+          },
+          "muted": {
+            "type": "boolean"
+          },
+          "unread": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Непрочитанные чужие сообщения, не больше 100."
+          }
+        }
+      },
       "ChatSummary": {
         "type": "object",
         "description": "Комната в списке «мои чаты». Заполнено ровно одно из `entity`, `person`, `tag`, `custom` —\nпо `kind`.",
@@ -5554,6 +5749,13 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "joined": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Вступил ли текущий пользователь; `null` — гость."
           },
           "members_count": {
             "type": "integer",
@@ -6010,6 +6212,13 @@
                 "id": {
                   "type": "string",
                   "format": "uuid"
+                },
+                "joined": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Вступил ли текущий пользователь; `null` — гость."
                 },
                 "members_count": {
                   "type": "integer",

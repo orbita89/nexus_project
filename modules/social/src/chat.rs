@@ -114,6 +114,51 @@ pub struct CustomRoom {
     pub members_count: i64,
     pub messages_count: i32,
     pub created_at: DateTime<Utc>,
+    /// Вступил ли текущий пользователь; `null` — гость.
+    #[sqlx(skip)]
+    pub joined: Option<bool>,
+}
+
+/// Своя комната по id, иначе 404.
+pub(crate) async fn custom_room(db: &sqlx::PgPool, id: Uuid) -> AppResult<CustomRoom> {
+    sqlx::query_as(&format!(
+        "SELECT {CUSTOM_COLUMNS} FROM chat_rooms r WHERE r.id = $1 AND r.slug IS NOT NULL"
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)
+}
+
+/// Комната для открытой панели чата: что это, последнее сообщение и состояние текущего
+/// пользователя. Заполнено одно из `entity`, `person`, `tag`, `custom` — по `kind`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ChatRoomInfo {
+    /// Имя канала и комнаты для WebSocket.
+    #[schema(example = "entity:dune-2021")]
+    pub room: String,
+    #[schema(example = "entity")]
+    pub kind: String,
+    pub entity: Option<EntityRef>,
+    pub person: Option<PersonRef>,
+    pub tag: Option<TagRef>,
+    pub custom: Option<CustomRoom>,
+    /// `null` — сообщений ещё нет.
+    pub last_message: Option<ChatMessage>,
+    /// Состояние текущего пользователя; `null` — гость.
+    pub me: Option<ChatRoomMe>,
+}
+
+/// Комната глазами текущего пользователя.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ChatRoomMe {
+    /// Комната в «моих чатах»: сущность, человек или тег в интересах, в свою комнату — вступил.
+    pub member: bool,
+    pub muted: bool,
+    /// Непрочитанные чужие сообщения, не больше 100.
+    pub unread: i64,
+    /// Последнее прочитанное сообщение (`null` — ничего): разделитель «новые сообщения».
+    pub last_read_id: Option<Uuid>,
 }
 
 /// Колонки [`CustomRoom`] из `chat_rooms r`.
@@ -504,7 +549,15 @@ pub async fn list_own(
     .fetch_all(&state.db)
     .await?
     .into_iter()
-    .map(|room| (room.id, room))
+    .map(|room| {
+        (
+            room.id,
+            CustomRoom {
+                joined: Some(true),
+                ..room
+            },
+        )
+    })
     .collect();
 
     Ok(Json(
@@ -551,6 +604,146 @@ pub async fn list_own(
             })
             .collect(),
     ))
+}
+
+/// Таблица и колонка «в моих чатах» для вида комнаты: интересы или участники своей комнаты.
+fn membership(room: ChatRoom) -> (&'static str, &'static str) {
+    match room {
+        ChatRoom::Entity(_) => ("user_interests", "entity_id"),
+        ChatRoom::Person(_) => ("user_person_interests", "person_id"),
+        ChatRoom::Tag(_) => ("user_tag_interests", "tag_id"),
+        ChatRoom::Room(_) => ("chat_room_members", "room_id"),
+    }
+}
+
+/// Комната для открытой панели: что это, последнее сообщение и (для вошедшего) в «моих чатах»
+/// ли она, заглушена ли, сколько непрочитанных. Работает и для комнаты не из «моих чатов»
+/// (открытой с карточки). Публичный: у гостя `me: null`.
+#[utoipa::path(
+    get, operation_id = "get_chat_room_info", path = "/chat/{kind}/{slug}", tag = "chat",
+    params(
+        ("kind" = String, Path, description = "Вид комнаты: `entity`, `person`, `tag`, `room`", example = "entity"),
+        ("slug" = String, Path, description = "slug сущности, человека, тега или своей комнаты", example = "dune-2021"),
+    ),
+    responses(
+        (status = 200, description = "Комната", body = ChatRoomInfo),
+        (status = 401, description = "Неверный токен", body = ErrorBody),
+        (status = 404, description = "Неизвестный вид комнаты или slug", body = ErrorBody),
+    )
+)]
+pub async fn info(
+    State(state): State<AppState>,
+    viewer: Option<AuthUser>,
+    Path((kind, slug)): Path<(String, String)>,
+) -> AppResult<Json<ChatRoomInfo>> {
+    let (mut entity, mut person, mut tag, mut custom) = (None, None, None, None);
+    let (room, slug) = match kind.as_str() {
+        "entity" => {
+            let found = refs::entity(&state, &slug).await?;
+            let room = (ChatRoom::Entity(found.id), found.slug.clone());
+            entity = Some(found);
+            room
+        }
+        "person" => {
+            let found = refs::person(&state, &slug).await?;
+            let room = (ChatRoom::Person(found.id), found.slug.clone());
+            person = Some(found);
+            room
+        }
+        "tag" => {
+            let found = refs::tag(&state, &slug).await?;
+            let room = (ChatRoom::Tag(found.id), found.slug.clone());
+            tag = Some(found);
+            room
+        }
+        "room" => {
+            let found = custom_room(&state.db, custom_room_id(&state.db, &slug).await?).await?;
+            let room = (ChatRoom::Room(found.id), found.slug.clone());
+            custom = Some(found);
+            room
+        }
+        _ => return Err(AppError::NotFound),
+    };
+    let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(&format!(
+        "SELECT id, last_message_id FROM chat_rooms WHERE {} = $1",
+        column(room)
+    ))
+    .bind(room_parts(room).1)
+    .fetch_optional(&state.db)
+    .await?;
+    let (room_id, last_id) = match row {
+        Some((id, last)) => (Some(id), last),
+        None => (None, None),
+    };
+    let last_message = match last_id {
+        Some(id) => {
+            let mut db = state.db.acquire().await?;
+            let found = message_row(&mut db, id).await?;
+            drop(db);
+            match found {
+                Some(row) => messages(&state, vec![row]).await?.pop(),
+                None => None,
+            }
+        }
+        None => None,
+    };
+
+    let me = match viewer {
+        None => None,
+        Some(user) => {
+            let (table, member_column) = membership(room);
+            let member: bool = sqlx::query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM {table} WHERE user_id = $1 AND {member_column} = $2)"
+            ))
+            .bind(user.id)
+            .bind(room_parts(room).1)
+            .fetch_one(&state.db)
+            .await?;
+            let (muted, unread, last_read_id) = match room_id {
+                None => (false, 0, None),
+                Some(room_id) => {
+                    sqlx::query_as::<_, (bool, i64, Option<Uuid>)>(
+                        "WITH rd AS (SELECT last_read_id FROM chat_reads
+                                     WHERE user_id = $1 AND room_id = $2)
+                         SELECT EXISTS (SELECT 1 FROM chat_mutes
+                                        WHERE user_id = $1 AND room_id = $2),
+                                (SELECT count(*) FROM (
+                                     SELECT 1 FROM chat_messages m
+                                     WHERE m.room_id = $2 AND m.deleted_at IS NULL
+                                       AND m.author_id <> $1
+                                       AND ((SELECT last_read_id FROM rd) IS NULL
+                                            OR m.id > (SELECT last_read_id FROM rd))
+                                     LIMIT $3) unread),
+                                (SELECT last_read_id FROM rd)",
+                    )
+                    .bind(user.id)
+                    .bind(room_id)
+                    .bind(MAX_UNREAD)
+                    .fetch_one(&state.db)
+                    .await?
+                }
+            };
+            if let Some(custom) = custom.as_mut() {
+                custom.joined = Some(member);
+            }
+            Some(ChatRoomMe {
+                member,
+                muted,
+                unread,
+                last_read_id,
+            })
+        }
+    };
+    Ok(Json(ChatRoomInfo {
+        room: format!("{kind}:{slug}"),
+        kind,
+        entity,
+        person,
+        tag,
+        custom,
+        last_message,
+        me,
+    }))
 }
 
 /// История комнаты: страница по 50 (до 100), старые сверху; дальше в прошлое —
