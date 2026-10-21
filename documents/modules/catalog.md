@@ -330,25 +330,39 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 | `entities_libgen_work_idx` | `(metadata #>> '{libgen,work}')` WHERE `kind = 'book' AND metadata ? 'libgen'` | другой файл того же произведения находит книгу |
 | `people_name_key_idx` | `(replace(lower(full_name), 'ё', 'е'))` | автор из дампа находит человека, уже записанного автором (`entity_credits.role = 'author'`) |
 
-### `banners` ✅ — баннеры страниц сайта
+### `banners` ✅ — баннеры сайта (v2)
 
-Миграция `20261101200000_catalog_banners.sql`. Промо и новости, которые админ настраивает для каждой
-страницы сайта отдельно. Ссылок на чужие таблицы нет.
+Миграции `20261101200000_catalog_banners.sql` (v1) и `20261102200000_catalog_banners_v2.sql` (v2:
+вид, HTML, слайды, кнопки, тема, цели показа, приоритет; колонка `page` удалена — старые баннеры
+получили `kind = 'image'` и `targets = [{"type":"page","page":<page>}]`). Промо и новости, которые
+админ показывает на всех страницах, на выбранных страницах или по шаблонам путей. Ссылок на чужие
+таблицы нет.
 
 | Колонка | Тип | Заметки |
 |---|---|---|
 | `id` | `uuid` PK | `DEFAULT uuidv7()` |
-| `page` | `text NOT NULL` | CHECK `IN ('home', 'films', 'series', 'books', 'games', 'people')` (`banners::PAGES`) |
+| `kind` | `text NOT NULL DEFAULT 'image'` | CHECK `IN ('image', 'html', 'slides')` |
 | `title` | `text NOT NULL` | до 300 символов, обрезается |
 | `subtitle` | `text` | до 300, пустая — `NULL` |
-| `image_url` | `text NOT NULL` | только `http(s)://` |
+| `image_url` | `text` | только `http(s)://`; обязателен при `kind=image` |
 | `link_url` | `text` | `http(s)://` или путь сайта с `/` (не `//`) |
-| `position` | `int NOT NULL DEFAULT 0` | порядок на странице, по возрастанию |
+| `content_html` | `text` | санитизированный HTML (allowlist, `ammonia`), ≤ 20 000 символов; обязателен при `kind=html`; при `image` — текст поверх картинки |
+| `slides` | `jsonb NOT NULL DEFAULT '[]'` | массив `{image_url, title, subtitle, content_html, link_url}`, ≤ 10 (CHECK), ≥ 1 при `kind=slides` |
+| `buttons` | `jsonb NOT NULL DEFAULT '[]'` | массив `{label 1..60, url, style: primary\|secondary\|ghost}`, ≤ 3 (CHECK) |
+| `theme` | `text` | пресет оформления из `banners::THEMES`: `default, halloween, romance, new-year, horror, sci-fi, family, summer` (проверка в коде) |
+| `targets` | `jsonb NOT NULL DEFAULT '[{"type":"all"}]'` | `{type:"all"}` \| `{type:"page",page}` \| `{type:"path",pattern}`; 1..20 (CHECK) |
+| `exclude_paths` | `text[] NOT NULL DEFAULT '{}'` | шаблоны путей, где не показывать, ≤ 20 (CHECK); `/admin/*` исключён всегда (в коде) |
+| `priority` | `int NOT NULL DEFAULT 0` | больше — выше |
+| `position` | `int NOT NULL DEFAULT 0` | порядок при равном `priority`, по возрастанию |
 | `is_active` | `bool NOT NULL DEFAULT true` | выключенный не показывается |
 | `starts_at`, `ends_at` | `timestamptz` | окно показа, `NULL` — без границы; CHECK `banners_window`: `ends_at > starts_at` |
 | `created_at`, `updated_at` | `timestamptz` | `updated_at` — триггер `banners_set_updated_at` (`set_updated_at()`) |
 
-**Индекс:** `banners_page_active_idx` `(page, position) WHERE is_active` — публичный список.
+**CHECK `banners_kind_content`:** `kind=image` → `image_url IS NOT NULL`; `kind=html` →
+`content_html IS NOT NULL`; `kind=slides` → `jsonb_array_length(slides) >= 1`.
+
+**Индекс:** `banners_active_idx` `(priority DESC, position) WHERE is_active` — публичный список
+(`banners_page_active_idx` удалён вместе с `page`).
 
 ## Поиск
 
@@ -892,6 +906,8 @@ Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `cov
 
 | Что | Где | Назначение |
 |---|---|---|
+| Санитизация HTML баннеров | `ammonia` 4 (транзитивно `cssparser`, `dtoa-short` — MPL-2.0, точечное исключение в `deny.toml`) | `banners::sanitize_html`: allowlist для `content_html` |
+| Ошибка с полем | `shared::error::AppError::Invalid { field, message }` / `AppError::on_field` → 400 `{error, code:"validation", field}` (`ErrorBody.field`) | валидация баннеров |
 | TMDB API (возврат из архива) | `reqwest`; `TMDB_API_KEY` (v3 — параметром, v4 JWT — заголовком), `TMDB_API_URL` (по умолчанию `https://api.themoviedb.org/3`, в тестах — подставной сервер), `ARCHIVE_RESTORE_PER_HOUR` (300; `governor`); `unicode-normalization` — slug людей | `archive::enrich`: полные данные фильма при `restore` и `promote` |
 | Холодный архив | `tantivy` 0.26 (`mmap`, `lz4-compression`, без zstd) + `csv`; каталог `ARCHIVE_DIR` (`Config::archive_dir`, dev/prod — том `archivedata` в `/var/lib/nexus/archive`; не задан — эндпоинты архива 503) | `catalog::archive`: индекс, поиск, страница фильма, промоушен, `nexus archive dump\|build` |
 | `InterestDirectory::entities_in_use` (реализует `social`) | `shared::directory`, `state.interests` | какие сущности нужны пользователям (интересы, рецензии, коллекции, отметки, реакции, темы форума) — их сборка архива не удаляет |
@@ -1008,7 +1024,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/people/{slug}` | Человек и его работы в активных сущностях, новые сверху. Из PostgreSQL. Все работы скрыты — 404; админу — 200 со всеми работами |
 | GET | `/tags` | Все теги с `kind` и `entities_count` (активных сущностей), без пагинации (тегов немного); `?kind=genre\|tag` — только жанры или только теги |
 | GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `entities_count`; нет — 404 |
-| GET | `/banners?page=` | Баннеры страницы сайта (`page`: `home`, `films`, `series`, `books`, `games`, `people`): `is_active`, сейчас в окне `starts_at`/`ends_at` (пустая граница — открыта), по `position`, затем `created_at`; до 20, без пагинации → `[Banner]` (`id`, `page`, `title`, `subtitle`, `image_url`, `link_url`, `position`, `is_active`, `starts_at`, `ends_at`, `created_at`, `updated_at`). Публичный. 400 — нет или неизвестная `page` |
+| GET | `/banners?path=` / `/banners?page=` | Баннеры страницы сайта. `path` — путь страницы (`/films/dune-2021`; query и `#` отбрасываются, хвостовой `/` тоже; должен начинаться с `/`, ≤ 2048); `page` (совместимость: `home`→`/`, `films`→`/films`, `series`, `books`, `games`, `people`). Возвращает `is_active`, сейчас в окне `starts_at`/`ends_at` (пустая граница — открыта), у которых совпал хотя бы один target (`all`; `page`, соответствующий пути: `/`→home, `/films`→films, …, точное совпадение; `path`-шаблон: `*` — любая последовательность символов, `/x/*` совпадает и с `/x`) и не совпал ни один `exclude_paths`; на `/admin` и `/admin/*` — всегда `[]`. Порядок `priority desc`, `position`, `created_at`; до 20, без пагинации → `[Banner]` (`id`, `page` — первый `targets[].page` или `null`, переходный период; `kind`, `title`, `subtitle`, `image_url`, `link_url`, `content_html`, `slides`, `buttons`, `theme`, `targets`, `exclude_paths`, `priority`, `position`, `is_active`, `starts_at`, `ends_at`, `created_at`, `updated_at`). Заголовок `Cache-Control: public, max-age=60`. Публичный. 400 `validation` + `field` — нет ни `path`, ни `page`, неизвестная `page`, `path` не с `/` |
 | GET | `/archive/search` | Поиск по холодному архиву (Tantivy): `q` (1–200 символов, все слова в `title` или `orig_title`; синтаксис Tantivy разбирается снисходительно), `limit` 1–20 (20), `offset` 0–1000 (0) → `Page<ArchiveDoc>` `{items, total, limit, offset}` (`total` — всего найдено, `Count`); `ArchiveDoc`: `slug`, `title`, `original_title`, `kind`, `tmdb_id`, `release_date`, `popularity`, `cover_url` (`null` — нет постера). Публичный. На сайте — второй блок выдачи после `GET /search` (чекбокс «Архив», по умолчанию включён). 400 — пустой/длинный `q`, `limit`/`offset` вне диапазона; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/stats` | Размер холодного архива: `{"total": N, "by_kind": {"book": 0, "game": 0, "movie": N, "series": 0}}` — документов в индексе Tantivy (работы не на сайте, их ищет `GET /archive/search`). `by_kind` — все типы `EntityKind::ALL` (нет в архиве — 0; новый тип появляется сам), счёт — `Count` по терму поля `type`, удалённые не считаются; всё с одного снимка индекса (`Archive::counts`). `?kind=movie\|series\|book\|game` — `total` только этого типа (как фильтр `kind` у `/search`). Публичный, без запроса к PostgreSQL. Для подписи на сайте («ещё N в архиве»). 400 — неизвестный `kind`; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/entities/{slug}` | Фильм из архива для его страницы (только чтение): `ArchiveDoc` (название, оригинальное название, дата, постер). Публичный. 404 — нет в архиве или неверный slug (фильм мог вернуться на сайт — `GET /entities/{slug}`); 503 — архив недоступен |
@@ -1063,9 +1079,13 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | PATCH / DELETE | `/admin/people/{id}` | Изменить (`null` очищает; `original_name` — до 300 символов) / удалить вместе с участием; `fame` и документ в индексе `people` пересчитываются |
 | POST | `/admin/tags` | Создать тег: `slug`, `name`, `kind` (`genre` / `tag`, по умолчанию `tag`) → 201 |
 | PATCH / DELETE | `/admin/tags/{id}` | Переименовать, сменить slug или `kind` / удалить (снимается со всех сущностей). Карточки с тегом пересобираются |
-| GET | `/admin/banners` | Все баннеры (и выключенные, и вне окна): `?page=` (необязательно), `limit`/`offset` → `Page<Banner>`, по `page`, `position`. 400 — неизвестная `page` |
-| POST | `/admin/banners` | Создать: `page`, `title`, `image_url` обязательны; `subtitle`, `link_url`, `position` (0), `is_active` (`true`), `starts_at`, `ends_at` → 201 `Banner`. 400 — неизвестная `page`, пустой/длинный `title`, URL не `http(s)://` (у `link_url` можно путь `/...`), `ends_at <= starts_at` |
-| PATCH / DELETE | `/admin/banners/{id}` | Изменить (переданные поля заменяются, `null` очищает `subtitle`, `link_url`, `starts_at`, `ends_at`; окно проверяется с текущими значениями) → 200 `Banner` / удалить → 204. 400 — как у POST; 404 — нет баннера. Событий и ISR нет: фронтенд читает список сам |
+| GET | `/admin/banners` | Все баннеры (и выключенные, и вне окна), query-параметры: `?target=` (`all`, страница `home`…`people` или `path` — баннеры с такой целью, `targets @> ...`), `?page=` (совместимость, = `target=<page>`), `?q=` (подстрока `title`, ILIKE), `limit`/`offset` → `Page<Banner>`, по `priority desc`, `position`. 400 `validation`, `field: "target"` — неизвестная цель |
+| POST | `/admin/banners` | Создать: `title` обязателен; `kind` (`image` по умолчанию), `subtitle`, `image_url` (обязателен при `image`), `link_url`, `content_html`, `slides` (`[]`), `buttons` (`[]`), `theme`, `targets` (1..20; можно вместо него устаревший `page` → `[{type:page}]`), `exclude_paths` (`[]`), `priority` (0), `position` (0), `is_active` (`true`), `starts_at`, `ends_at` → 201 `Banner`. 400 `{error, code:"validation", field}` (см. «Валидация баннеров») |
+| PATCH / DELETE | `/admin/banners/{id}` | Изменить: переданные поля заменяются, массивы `slides`, `buttons`, `targets`, `exclude_paths` — целиком; `null` очищает `subtitle`, `image_url`, `link_url`, `content_html`, `theme`, `starts_at`, `ends_at`; устаревший `page` заменяет `targets` (если `targets` не передан). Итог (текущие значения + патч) проверяется целиком, как при POST (под `FOR UPDATE`) → 200 `Banner` / удалить → 204. 400 — как у POST; 404 — нет баннера. Событий и ISR нет: фронтенд читает список сам |
+
+**Валидация баннеров** (`banners::Draft::validate`, 400 `{error, code:"validation", field}`; `field` — путь поля: `title`, `content_html`, `slides[1].image_url`, `buttons[0].label`, `targets[2].pattern`, `exclude_paths[0]`, `ends_at`, …): `title` 1..300; `subtitle`/`slides[].title`/`slides[].subtitle` ≤ 300; `image_url` и `slides[].image_url` — `http(s)://`, `image_url` обязателен при `kind=image`; `link_url`, `slides[].link_url`, `buttons[].url` — `http(s)://` или путь `/…` (не `//`, без пробелов); `content_html` непуст после санитизации при `kind=html`, ≤ 20 000 символов после санитизации; `slides` ≤ 10 и ≥ 1 при `kind=slides`; `buttons` ≤ 3, `label` 1..60, `style` `primary|secondary|ghost`; `theme` из `banners::THEMES`; `targets` 1..20, `page` из `PAGES`, `pattern` — с `/`, ≤ 200, без пробелов, `?`, `#`; `exclude_paths` ≤ 20, те же правила; `ends_at > starts_at`. Нераспознанный `kind`/`style`/`type` — 400 от `JsonBody`.
+
+**Санитизация `content_html`** (`banners::sanitize_html`, `ammonia`; и у `slides[].content_html`): теги `p, br, h2, h3, h4, strong, em, b, i, u, s, span, ul, ol, li, a, img, small, mark` (прочие снимаются, текст остаётся; `script`/`style` — с содержимым); атрибуты `a[href]` (`http(s)://` или `/…`, не `//`; `rel`/`target` не ставятся — их выставляет фронт), `img[src]` (только `https://`), `img[alt, width, height]` (размеры — до 5 цифр), `class` — только классы `text-*`/`font-*` (в т.ч. `text-center|left|right`), остальные вырезаются; `style`, `on*`, `iframe`, `form` — вырезаются. Пусто после очистки — `NULL`.
 | POST | `/admin/search/reindex` | Перестроить поисковый индекс без простоя (`?force=true` — без проверки размера, `SEARCH_REINDEX_MIN_PERCENT`: 80, в dev 0) → `ReindexResult`; `409` — уже идёт или новый индекс слишком мал |
 | POST | `/admin/search/reindex/stream` | То же потоком `text/event-stream` ([«Перестройка поиска»](#перестройка-поиска-)) |
 | POST | `/admin/tmdb/stats/stream` | «Обновить рейтинги»: дампы TMDB (popularity) и IMDb (рейтинг) → `entity_stats`, пересчёт балла, перестройка поиска; потоком; `done.stats`. `409` — уже идёт долгая операция ([«Сортировка и активные»](#сортировка-и-активные-)) |
@@ -1407,7 +1427,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
 | `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), `GET /search` (фильтры — `filters_of`), `GET /search/studios` |
 | `studios.rs` | Студии: `sync(db, ids, companies)` (из `metadata.studios` и `production_companies` ответа TMDB, если передан), `refs` (ссылки в карточке), `GET /studios/{slug}` (данные компании из TMDB при первом открытии), `metadata_filter` для `GET /entities?studio=` |
-| `banners.rs` | Баннеры страниц: `Banner`, `PAGES`, проверки полей, `GET /banners` |
+| `banners.rs` | Баннеры: `Banner`, `BannerKind`/`BannerSlide`/`BannerButton`/`BannerTarget`, `PAGES`, `THEMES`, `Draft::validate` (проверки с `field`), `sanitize_html` (ammonia), сопоставление путей (`glob`, `/admin/*`), `GET /banners` |
 | `people_search.rs` | Индекс `people` (`PersonDoc`, `settings`, `fill`, `update_index`), известность `refresh_fame` → `person_stats`, `GET /search/people` |
 | `tmdb.rs` | Операции админки: «Обновить рейтинги» (дампы TMDB и IMDb), «Пересобрать активные» |
 | `archive/enrich.rs` | Полные данные TMDB: `tmdb_get` (общий запрос с ключом; и для студий), `fetch_movie`, `film_fields`, `film_credits`, `slugify`, `insert_film` (фильм с `external_ids.tmdb`, статистика, студии, жанры, люди, титры) |

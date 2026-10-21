@@ -5839,6 +5839,14 @@
             "description": "Описание ошибки (английский текст для логов; формулировка может меняться).",
             "example": "unauthorized"
           },
+          "field": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Только для 400 [`AppError::Invalid`]: поле запроса с ошибкой (`content_html`, `slides[1].title`).",
+            "example": "content_html"
+          },
           "retry_after": {
             "type": [
               "integer",

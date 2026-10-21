@@ -30,6 +30,12 @@ allow = [
     "BSL-1.0",
 ]
 confidence-threshold = 0.9
+# MPL-2.0 (файловый copyleft): только транзитивные зависимости ammonia (санитизация HTML баннеров),
+# используем без изменений — обязательств для нашего кода нет. Исключение точечное, по крейтам.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "cssparser" },
+    { allow = ["MPL-2.0"], crate = "dtoa-short" },
+]
 
 # Наши crate'ы (publish = false) не проверяем: у них license = "proprietary".
 [licenses.private]

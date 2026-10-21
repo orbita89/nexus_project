@@ -32,6 +32,8 @@ csv = { workspace = true }
 # Возврат из архива: лимит авто-возвратов в час и slug людей из имени (NFKD).
 governor = { workspace = true }
 unicode-normalization = { workspace = true }
+# content_html баннеров: allowlist-санитизация на сервере (catalog::banners).
+ammonia = { workspace = true }
 
 [dev-dependencies]
 shared = { workspace = true, features = ["mock"] }

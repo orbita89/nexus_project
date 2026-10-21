@@ -189,42 +189,51 @@
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Все баннеры (и неактивные, и вне окна показа) по странице, затем `position`.",
+        "summary": "Все баннеры (и неактивные, и вне окна показа): `priority desc`, затем `position`.",
         "operationId": "admin_list_banners",
         "parameters": [
           {
-            "name": "page",
-            "in": "path",
-            "description": "Только эта страница; без него — все.",
-            "required": true,
+            "name": "target",
+            "in": "query",
+            "description": "Цель: `all`, страница (`home`, `films`, …) или `path` — баннеры с такой целью.",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Совместимость: то же, что `target=<page>`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Подстрока заголовка (без учёта регистра).",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           },
           {
             "name": "limit",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "format": "int64"
             }
           },
           {
             "name": "offset",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "format": "int64"
             }
           }
@@ -241,7 +250,7 @@
             }
           },
           "400": {
-            "description": "Неизвестная страница",
+            "description": "Неизвестный target/page",
             "content": {
               "application/json": {
                 "schema": {
@@ -305,7 +314,7 @@
             }
           },
           "400": {
-            "description": "Неверные поля",
+            "description": "Неверные поля (`field` — какое)",
             "content": {
               "application/json": {
                 "schema": {
@@ -406,7 +415,7 @@
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Изменить баннер: переданные поля заменяются, `null` очищает необязательное.",
+        "summary": "Изменить баннер: переданные поля заменяются (массивы — целиком), `null` очищает\nнеобязательное; итог проверяется целиком, как при создании.",
         "operationId": "update_banner",
         "parameters": [
           {
@@ -442,7 +451,7 @@
             }
           },
           "400": {
-            "description": "Неверные поля",
+            "description": "Неверные поля (`field` — какое)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2642,14 +2651,23 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Баннеры страницы сайта: активные, сейчас в окне показа (`starts_at`/`ends_at`, пустые — без\nграницы), по `position`, затем старые сверху; до 20.",
+        "summary": "Баннеры страницы сайта: активные, сейчас в окне показа (`starts_at`/`ends_at`, пустые — без\nграницы), совпал хотя бы один target и не совпал `exclude_paths` (`/admin/*` — всегда пусто);\n`priority desc`, затем `position`; до 20. `Cache-Control: public, max-age=60`.",
         "operationId": "list_banners",
         "parameters": [
           {
+            "name": "path",
+            "in": "query",
+            "description": "Путь страницы сайта: `/films/dune-2021` (query и `#` отбрасываются). Нужен `path` или `page`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "page",
-            "in": "path",
-            "description": "Страница: `home`, `films`, `series`, `books`, `games`, `people`.",
-            "required": true,
+            "in": "query",
+            "description": "Совместимость: `home`, `films`, `series`, `books`, `games`, `people` (= путь `/`, `/films`, …).",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -2658,6 +2676,14 @@
         "responses": {
           "200": {
             "description": "Баннеры страницы",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "public, max-age=60"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2670,7 +2696,7 @@
             }
           },
           "400": {
-            "description": "Неизвестная страница",
+            "description": "Нет path/page, неизвестная page или path не с `/`",
             "content": {
               "application/json": {
                 "schema": {
@@ -3716,15 +3742,32 @@
         "type": "object",
         "required": [
           "id",
-          "page",
+          "kind",
           "title",
-          "image_url",
+          "slides",
+          "buttons",
+          "targets",
+          "exclude_paths",
+          "priority",
           "position",
           "is_active",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "buttons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BannerButton"
+            }
+          },
+          "content_html": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Санитизированный HTML (allowlist)."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -3736,15 +3779,29 @@
             ],
             "format": "date-time"
           },
+          "exclude_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Шаблоны путей, где баннер не показывать (`/admin/*` исключён всегда)."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
           },
           "image_url": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обязателен только при `kind=image`."
           },
           "is_active": {
             "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/BannerKind"
           },
           "link_url": {
             "type": [
@@ -3754,12 +3811,27 @@
             "description": "`http(s)://...` или путь сайта `/films/dune-2021`."
           },
           "page": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Переходный период: первый `targets[].page` или `null`.",
             "example": "films"
           },
           "position": {
             "type": "integer",
             "format": "int32"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Больше — выше в списке."
+          },
+          "slides": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BannerSlide"
+            }
           },
           "starts_at": {
             "type": [
@@ -3774,6 +3846,20 @@
               "null"
             ]
           },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BannerTarget"
+            }
+          },
+          "theme": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Пресет оформления (`banners::THEMES`).",
+            "example": "halloween"
+          },
           "title": {
             "type": "string"
           },
@@ -3782,6 +3868,132 @@
             "format": "date-time"
           }
         }
+      },
+      "BannerButton": {
+        "type": "object",
+        "required": [
+          "label",
+          "url",
+          "style"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "1..60 символов."
+          },
+          "style": {
+            "$ref": "#/components/schemas/ButtonStyle"
+          },
+          "url": {
+            "type": "string",
+            "description": "`http(s)://` или путь `/…` (не `//`)."
+          }
+        }
+      },
+      "BannerKind": {
+        "type": "string",
+        "enum": [
+          "image",
+          "html",
+          "slides"
+        ]
+      },
+      "BannerSlide": {
+        "type": "object",
+        "properties": {
+          "content_html": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Санитизируется как `Banner.content_html`."
+          },
+          "image_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`http(s)://`."
+          },
+          "link_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`http(s)://` или путь `/…` (не `//`)."
+          },
+          "subtitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "≤ 300."
+          }
+        }
+      },
+      "BannerTarget": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Все страницы сайта.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "all"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Страница: `home` (`/`), `films` (`/films`), `series`, `books`, `games`, `people`.",
+            "required": [
+              "page",
+              "type"
+            ],
+            "properties": {
+              "page": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "page"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Шаблон пути: начинается с `/`, `*` — любой хвост (`/collections/*`), без `?` и `#`, ≤ 200.",
+            "required": [
+              "pattern",
+              "type"
+            ],
+            "properties": {
+              "pattern": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "path"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Где показывать баннер."
       },
       "BookMetadata": {
         "type": "object",
@@ -3849,14 +4061,33 @@
         },
         "additionalProperties": false
       },
+      "ButtonStyle": {
+        "type": "string",
+        "enum": [
+          "primary",
+          "secondary",
+          "ghost"
+        ]
+      },
       "CreateBanner": {
         "type": "object",
         "required": [
-          "page",
-          "title",
-          "image_url"
+          "title"
         ],
         "properties": {
+          "buttons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BannerButton"
+            },
+            "description": "0..3."
+          },
+          "content_html": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ends_at": {
             "type": [
               "string",
@@ -3864,8 +4095,18 @@
             ],
             "format": "date-time"
           },
+          "exclude_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "image_url": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обязателен при `kind=image`."
           },
           "is_active": {
             "type": [
@@ -3874,6 +4115,17 @@
             ],
             "description": "По умолчанию `true`."
           },
+          "kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BannerKind",
+                "description": "По умолчанию `image`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "link_url": {
             "type": [
               "string",
@@ -3881,7 +4133,11 @@
             ]
           },
           "page": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Устаревшее: то же, что `targets: [{\"type\":\"page\",\"page\":...}]`."
           },
           "position": {
             "type": [
@@ -3891,6 +4147,21 @@
             "format": "int32",
             "description": "По умолчанию 0."
           },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "По умолчанию 0."
+          },
+          "slides": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BannerSlide"
+            },
+            "description": "1..10 при `kind=slides`."
+          },
           "starts_at": {
             "type": [
               "string",
@@ -3899,6 +4170,22 @@
             "format": "date-time"
           },
           "subtitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "targets": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BannerTarget"
+            },
+            "description": "1..20. Можно не передавать, если передан устаревший `page`."
+          },
+          "theme": {
             "type": [
               "string",
               "null"
@@ -4495,6 +4782,14 @@
             "description": "Описание ошибки (английский текст для логов; формулировка может меняться).",
             "example": "unauthorized"
           },
+          "field": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Только для 400 [`AppError::Invalid`]: поле запроса с ошибкой (`content_html`, `slides[1].title`).",
+            "example": "content_html"
+          },
           "retry_after": {
             "type": [
               "integer",
@@ -5015,15 +5310,32 @@
               "type": "object",
               "required": [
                 "id",
-                "page",
+                "kind",
                 "title",
-                "image_url",
+                "slides",
+                "buttons",
+                "targets",
+                "exclude_paths",
+                "priority",
                 "position",
                 "is_active",
                 "created_at",
                 "updated_at"
               ],
               "properties": {
+                "buttons": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BannerButton"
+                  }
+                },
+                "content_html": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Санитизированный HTML (allowlist)."
+                },
                 "created_at": {
                   "type": "string",
                   "format": "date-time"
@@ -5035,15 +5347,29 @@
                   ],
                   "format": "date-time"
                 },
+                "exclude_paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Шаблоны путей, где баннер не показывать (`/admin/*` исключён всегда)."
+                },
                 "id": {
                   "type": "string",
                   "format": "uuid"
                 },
                 "image_url": {
-                  "type": "string"
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Обязателен только при `kind=image`."
                 },
                 "is_active": {
                   "type": "boolean"
+                },
+                "kind": {
+                  "$ref": "#/components/schemas/BannerKind"
                 },
                 "link_url": {
                   "type": [
@@ -5053,12 +5379,27 @@
                   "description": "`http(s)://...` или путь сайта `/films/dune-2021`."
                 },
                 "page": {
-                  "type": "string",
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Переходный период: первый `targets[].page` или `null`.",
                   "example": "films"
                 },
                 "position": {
                   "type": "integer",
                   "format": "int32"
+                },
+                "priority": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "Больше — выше в списке."
+                },
+                "slides": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BannerSlide"
+                  }
                 },
                 "starts_at": {
                   "type": [
@@ -5072,6 +5413,20 @@
                     "string",
                     "null"
                   ]
+                },
+                "targets": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BannerTarget"
+                  }
+                },
+                "theme": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Пресет оформления (`banners::THEMES`).",
+                  "example": "halloween"
                 },
                 "title": {
                   "type": "string"
@@ -6318,14 +6673,38 @@
       },
       "UpdateBanner": {
         "type": "object",
-        "description": "Переданные поля заменяются, `null` очищает необязательное.",
+        "description": "Переданные поля заменяются (массивы `slides`, `buttons`, `targets`, `exclude_paths` —\nцеликом), `null` очищает необязательное.",
         "properties": {
+          "buttons": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BannerButton"
+            }
+          },
+          "content_html": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ends_at": {
             "type": [
               "string",
               "null"
             ],
             "format": "date-time"
+          },
+          "exclude_paths": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           },
           "image_url": {
             "type": [
@@ -6339,6 +6718,16 @@
               "null"
             ]
           },
+          "kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BannerKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "link_url": {
             "type": [
               "string",
@@ -6349,7 +6738,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Устаревшее: заменяет `targets` на `[{\"type\":\"page\",\"page\":...}]` (если `targets` не передан)."
           },
           "position": {
             "type": [
@@ -6357,6 +6747,22 @@
               "null"
             ],
             "format": "int32"
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "slides": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BannerSlide"
+            }
           },
           "starts_at": {
             "type": [
@@ -6366,6 +6772,21 @@
             "format": "date-time"
           },
           "subtitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "targets": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BannerTarget"
+            }
+          },
+          "theme": {
             "type": [
               "string",
               "null"

@@ -88,6 +88,8 @@ flate2 = "1"
 tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression"] }
 # Дамп сущностей для сборки архива (TSV, потоковое чтение).
 csv = "1"
+# Санитизация HTML баннеров каталога (allowlist тегов/атрибутов).
+ammonia = "4"
 
 [profile.dev]
 # Меньше отладочной информации -> заметно быстрее линковка и меньше target/ при hot-reload.

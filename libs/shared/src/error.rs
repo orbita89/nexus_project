@@ -19,6 +19,10 @@ pub struct ErrorBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 80)]
     pub retry_after: Option<u64>,
+    /// Только для 400 [`AppError::Invalid`]: поле запроса с ошибкой (`content_html`, `slides[1].title`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "content_html")]
+    pub field: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +32,10 @@ pub enum AppError {
 
     #[error("{0}")]
     BadRequest(String),
+
+    /// 400 `validation` с именем поля в теле (`field`). Создаётся через [`AppError::on_field`].
+    #[error("{message}")]
+    Invalid { field: String, message: String },
 
     #[error("unauthorized")]
     Unauthorized,
@@ -78,11 +86,22 @@ impl AppError {
         }
     }
 
+    /// [`AppError::BadRequest`] → [`AppError::Invalid`] с полем `field`; остальные — без изменений.
+    pub fn on_field(self, field: impl Into<String>) -> Self {
+        match self {
+            AppError::BadRequest(message) => AppError::Invalid {
+                field: field.into(),
+                message,
+            },
+            other => other,
+        }
+    }
+
     /// Машинный код ответа: уточнённый через [`with_code`](Self::with_code) или общий для варианта.
     pub fn code(&self) -> &'static str {
         match self {
             AppError::NotFound => "not_found",
-            AppError::BadRequest(_) => "validation",
+            AppError::BadRequest(_) | AppError::Invalid { .. } => "validation",
             AppError::Unauthorized => "unauthorized",
             AppError::Forbidden => "forbidden",
             AppError::EmailNotVerified => "email_not_verified",
@@ -114,6 +133,15 @@ impl AppError {
             AppError::Coded { source, .. } => return source.respond(code),
             AppError::NotFound => (StatusCode::NOT_FOUND, text),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            AppError::Invalid { field, message } => {
+                let body = ErrorBody {
+                    error: message,
+                    code: Some(code.to_string()),
+                    retry_after: None,
+                    field: Some(field),
+                };
+                return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+            }
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, text),
             AppError::Forbidden | AppError::EmailNotVerified => (StatusCode::FORBIDDEN, text),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m),
@@ -122,6 +150,7 @@ impl AppError {
                     error: text,
                     code: Some(code.to_string()),
                     retry_after: Some(retry_after_secs),
+                    field: None,
                 };
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
@@ -152,6 +181,7 @@ impl AppError {
             error: message,
             code: Some(code.to_string()),
             retry_after: None,
+            field: None,
         };
         (status, Json(body)).into_response()
     }
