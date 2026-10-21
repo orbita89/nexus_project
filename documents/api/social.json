@@ -299,7 +299,7 @@
         "tags": [
           "social-admin"
         ],
-        "summary": "Пометить публичную коллекцию особой, поменять её порядок или адрес.",
+        "summary": "Пометить публичную коллекцию особой, поменять её порядок, адрес или оформление (обои, обложка,\nтема).",
         "operationId": "admin_feature_collection",
         "parameters": [
           {
@@ -336,7 +336,7 @@
             }
           },
           "400": {
-            "description": "Коллекция приватная; неверный slug (формат, UUID, служебное слово)",
+            "description": "Коллекция приватная (`collection_private`); неверные поля (`validation` с `field`): slug — формат, UUID, служебное слово; `wallpaper_url`, `cover_url` — не https-URL или длиннее 2048; `theme` — не `^[a-z0-9-]{1,32}$`",
             "content": {
               "application/json": {
                 "schema": {
@@ -396,7 +396,7 @@
         "tags": [
           "social-admin"
         ],
-        "summary": "Снять с коллекции отметку «особая». slug уходит в историю: старый адрес ведёт на\n`/collections/{id}`, другой коллекции он не достанется.",
+        "summary": "Снять с коллекции отметку «особая». slug уходит в историю: старый адрес ведёт на\n`/collections/{id}`, другой коллекции он не достанется. Оформление сбрасывается.",
         "operationId": "admin_unfeature_collection",
         "parameters": [
           {
@@ -436,6 +436,194 @@
           },
           "404": {
             "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/admin/collections/{id}/items/{slug}": {
+      "put": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Добавить произведение в любую особую коллекцию или изменить его позицию и заметку.",
+        "operationId": "admin_put_collection_item",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id особой коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "requestBody": {
+          "description": "Можно не передавать тело: добавить в конец без заметки",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutCollectionItem"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionItem"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Добавлено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Коллекция не особая (`not_featured`), неверные поля или уже 500 произведений",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции или сущности",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Убрать произведение из любой особой коллекции.",
+        "operationId": "admin_delete_collection_item",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id особой коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Убрано"
+          },
+          "400": {
+            "description": "Коллекция не особая (`not_featured`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции, сущности или её нет в коллекции",
             "content": {
               "application/json": {
                 "schema": {
@@ -5729,6 +5917,13 @@
             ],
             "description": "Есть ли в коллекции сущность из `?contains=`; без параметра поля нет."
           },
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обложка карточки особой (16:9, от 1280 px); у обычной — `null`."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -5783,6 +5978,14 @@
             "description": "Читаемый адрес особой коллекции (`/collections/{slug}`); у обычной — `null`.",
             "example": "russkiy-top-2021"
           },
+          "theme": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Тема оформления особой — id пресета фронтенда (`halloween`, `new-year`, ...); неизвестную\nфронтенд игнорирует. У обычной — `null`.",
+            "example": "halloween"
+          },
           "title": {
             "type": "string",
             "example": "Лучшая фантастика"
@@ -5790,6 +5993,13 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "wallpaper_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обои особой: широкий фон шапки страницы (21:9 или 16:9, от 1920 px); у обычной — `null`."
           }
         }
       },
@@ -5849,6 +6059,26 @@
         ],
         "description": "Коллекция с содержимым по порядку."
       },
+      "CollectionEntity": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EntityRef"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "overview": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Краткое описание: без HTML, до 1000 символов; `null` — описания нет."
+              }
+            }
+          }
+        ],
+        "description": "Сущность в коллекции: ссылка на карточку и краткое описание."
+      },
       "CollectionItem": {
         "type": "object",
         "description": "Произведение в коллекции.",
@@ -5863,7 +6093,7 @@
             "format": "date-time"
           },
           "entity": {
-            "$ref": "#/components/schemas/EntityRef"
+            "$ref": "#/components/schemas/CollectionEntity"
           },
           "note": {
             "type": [
@@ -6143,6 +6373,13 @@
         "type": "object",
         "description": "Пометить коллекцию особой.",
         "properties": {
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обложка карточки: https-URL до 2048 символов. Не передано — не меняется, `null` — убрать."
+          },
           "position": {
             "type": [
               "integer",
@@ -6159,6 +6396,21 @@
             ],
             "description": "Адрес `/collections/{slug}`: a-z, 0-9, дефисы между ними, 3–100, не UUID и не служебное\nслово. Без него — при первой пометке транслит названия (занят — `-2`, `-3`…), при\nповторном PUT — не меняется.",
             "example": "russkiy-top-2021"
+          },
+          "theme": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Тема: `^[a-z0-9-]{1,32}$`. Не передано — не меняется, `null` — убрать.",
+            "example": "halloween"
+          },
+          "wallpaper_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обои: https-URL до 2048 символов. Не передано — не меняется, `null` — убрать."
           }
         }
       },
@@ -6424,6 +6676,13 @@
                   ],
                   "description": "Есть ли в коллекции сущность из `?contains=`; без параметра поля нет."
                 },
+                "cover_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Обложка карточки особой (16:9, от 1280 px); у обычной — `null`."
+                },
                 "created_at": {
                   "type": "string",
                   "format": "date-time"
@@ -6478,6 +6737,14 @@
                   "description": "Читаемый адрес особой коллекции (`/collections/{slug}`); у обычной — `null`.",
                   "example": "russkiy-top-2021"
                 },
+                "theme": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Тема оформления особой — id пресета фронтенда (`halloween`, `new-year`, ...); неизвестную\nфронтенд игнорирует. У обычной — `null`.",
+                  "example": "halloween"
+                },
                 "title": {
                   "type": "string",
                   "example": "Лучшая фантастика"
@@ -6485,6 +6752,13 @@
                 "updated_at": {
                   "type": "string",
                   "format": "date-time"
+                },
+                "wallpaper_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Обои особой: широкий фон шапки страницы (21:9 или 16:9, от 1920 px); у обычной — `null`."
                 }
               }
             }

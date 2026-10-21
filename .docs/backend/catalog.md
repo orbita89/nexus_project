@@ -366,7 +366,7 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 
 | Что | Где | Назначение |
 |---|---|---|
-| `EntityDirectory` (реализует `catalog`: `PgEntityDirectory`) | `shared::directory`, `state.entities` | `social`/другие читают сущности без JOIN к `entities`. `by_slug`, `by_slugs` — только активные (адрес пришёл с сайта: скрытая → 404), `by_ids` — все (уже сохранённое: коллекции, ленты, интересы не теряют элементы) |
+| `EntityDirectory` (реализует `catalog`: `PgEntityDirectory`) | `shared::directory`, `state.entities` | `social`/другие читают сущности без JOIN к `entities`. `by_slug`, `by_slugs` — только активные (адрес пришёл с сайта: скрытая → 404), `by_ids` — все (уже сохранённое: коллекции, ленты, интересы не теряют элементы); `overviews(ids)` — краткие описания (`entities.description` без HTML, до 1000 символов по границе предложения или слова, `catalog::directory::overview`) одним запросом — для детали коллекции |
 | `EntityRatings` (реализует `catalog`: `PgEntityRatings`) | `shared::directory`, `state.ratings` | `social` пишет сводки оценок для сортировок `popular`/`rating` |
 | Поиск | `shared::search` (HTTP API Meilisearch через reqwest, без SDK) | индекс `entities`, `update_index`, перестройка |
 | ISR-вебхук фронтенда | `shared::isr` (`POST {ISR_URL}/_isr/revalidate`) | пересборка статики после правок |

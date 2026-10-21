@@ -67,6 +67,68 @@ impl EntityDirectory for PgEntityDirectory {
             .map(|row| (row.slug.clone(), row))
             .collect())
     }
+
+    async fn overviews(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, String>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // С запасом на теги и пробелы: обрезка — в `overview`.
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, left(description, 3000) FROM entities
+             WHERE id = ANY($1) AND description IS NOT NULL",
+        )
+        .bind(ids)
+        .fetch_all(&self.db)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, text)| Some((id, overview(&text)?)))
+            .collect())
+    }
+}
+
+/// Длина краткого описания (`EntityDirectory::overviews`).
+pub const MAX_OVERVIEW: usize = 1000;
+
+/// Краткое описание: без HTML-тегов, пробелы схлопнуты, не длиннее [`MAX_OVERVIEW`] символов —
+/// по концу предложения, если он не раньше середины, иначе по слову, с «…». Пустое — `None`.
+pub fn overview(text: &str) -> Option<String> {
+    let mut plain = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                plain.push(' ');
+            }
+            _ if !in_tag => plain.push(c),
+            _ => {}
+        }
+    }
+    let plain = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    if plain.is_empty() {
+        return None;
+    }
+    if plain.chars().count() <= MAX_OVERVIEW {
+        return Some(plain);
+    }
+    let cut: String = plain.chars().take(MAX_OVERVIEW - 1).collect();
+    let half = cut.len() / 2;
+    let sentence = cut
+        .rmatch_indices(['.', '!', '?'])
+        .map(|(i, _)| i)
+        .find(|&i| i >= half);
+    Some(match sentence {
+        Some(i) => cut[..=i].to_string(),
+        None => {
+            let word = cut.rfind(' ').unwrap_or(cut.len());
+            format!(
+                "{}…",
+                cut[..word].trim_end_matches([',', ';', ':', '-', ' '])
+            )
+        }
+    })
 }
 
 pub struct PgPersonDirectory {
@@ -196,5 +258,35 @@ impl EntityRatings for PgEntityRatings {
         upsert(&mut *tx, stats).await?;
         tx.commit().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod overview_tests {
+    use super::*;
+
+    #[test]
+    fn plain_and_short() {
+        assert_eq!(
+            overview("  <p>Пол  Атрейдес</p><br>едет  на Арракис. "),
+            Some("Пол Атрейдес едет на Арракис.".into())
+        );
+        assert_eq!(overview(" <br> "), None);
+    }
+
+    #[test]
+    fn long_is_cut_by_sentence_or_word() {
+        let sentences = "Первое предложение довольно длинное. ".repeat(40);
+        let got = overview(&sentences).unwrap();
+        assert!(
+            got.chars().count() <= MAX_OVERVIEW && got.ends_with('.'),
+            "{got}"
+        );
+        let words = "слово ".repeat(400);
+        let got = overview(&words).unwrap();
+        assert!(
+            got.chars().count() <= MAX_OVERVIEW && got.ends_with("слово…"),
+            "{got}"
+        );
     }
 }

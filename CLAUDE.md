@@ -15,7 +15,7 @@ Workspace: `app/` (bin `nexus`), `modules/{auth,catalog,social,realtime}` (one c
 
 - Modules depend ONLY on `libs/shared`. NEVER add another module crate to `[dependencies]`.
 - Own tables only. NEVER SELECT/UPDATE or JOIN a foreign table (`users`, `entities`, ...). FK columns to foreign tables may exist; the data behind them is read ONLY through `shared::directory` traits held in `AppState`:
-  - `state.entities`: `EntityDirectory` — `by_slug`, `by_ids`, `by_slugs` → `EntityRef` (impl: `catalog`)
+  - `state.entities`: `EntityDirectory` — `by_slug`, `by_ids`, `by_slugs` → `EntityRef`, `overviews` (impl: `catalog`)
   - `state.users`: `UserDirectory` — `by_username`, `by_ids` → `UserRef` (impl: `auth`)
   - `state.interests`: `InterestDirectory` — `entity_ids`, `person_ids`, `tag_ids`, `room_ids`, `entities_in_use`, `people_in_use` (impl: `social`)
   - `state.ratings`: `EntityRatings` — `set`, `replace_all` (impl: `catalog`)

@@ -286,6 +286,14 @@ pub struct Collection {
     /// Читаемый адрес особой коллекции (`/collections/{slug}`); у обычной — `null`.
     #[schema(example = "russkiy-top-2021")]
     pub slug: Option<String>,
+    /// Обои особой: широкий фон шапки страницы (21:9 или 16:9, от 1920 px); у обычной — `null`.
+    pub wallpaper_url: Option<String>,
+    /// Обложка карточки особой (16:9, от 1280 px); у обычной — `null`.
+    pub cover_url: Option<String>,
+    /// Тема оформления особой — id пресета фронтенда (`halloween`, `new-year`, ...); неизвестную
+    /// фронтенд игнорирует. У обычной — `null`.
+    #[schema(example = "halloween")]
+    pub theme: Option<String>,
     /// Сколько произведений.
     #[schema(example = 7)]
     pub items_count: i64,
@@ -307,6 +315,9 @@ pub struct CollectionRow {
     pub is_public: bool,
     pub featured_position: Option<i32>,
     pub slug: Option<String>,
+    pub wallpaper_url: Option<String>,
+    pub cover_url: Option<String>,
+    pub theme: Option<String>,
     pub items_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -315,6 +326,7 @@ pub struct CollectionRow {
 /// Колонки [`CollectionRow`] для `FROM collections c`.
 pub const COLLECTION_COLUMNS: &str =
     "c.id, c.user_id, c.title, c.description, c.is_public, c.featured_position, c.slug,
+    c.wallpaper_url, c.cover_url, c.theme,
     (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id) AS items_count,
     c.created_at, c.updated_at";
 
@@ -329,6 +341,18 @@ pub struct FeatureCollection {
     /// повторном PUT — не меняется.
     #[schema(example = "russkiy-top-2021")]
     pub slug: Option<String>,
+    /// Обои: https-URL до 2048 символов. Не передано — не меняется, `null` — убрать.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>)]
+    pub wallpaper_url: Option<Option<String>>,
+    /// Обложка карточки: https-URL до 2048 символов. Не передано — не меняется, `null` — убрать.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>)]
+    pub cover_url: Option<Option<String>>,
+    /// Тема: `^[a-z0-9-]{1,32}$`. Не передано — не меняется, `null` — убрать.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>, example = "halloween")]
+    pub theme: Option<Option<String>>,
 }
 
 /// Ответ `GET /collections/by-slug/{slug}`: коллекция или куда перенаправить (301 на фронтенде).
@@ -367,12 +391,21 @@ pub struct CollectionDetail {
 /// Произведение в коллекции.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CollectionItem {
-    pub entity: EntityRef,
+    pub entity: CollectionEntity,
     /// Порядок: по возрастанию, при равенстве — по времени добавления.
     pub position: i32,
     /// Комментарий владельца.
     pub note: Option<String>,
     pub added_at: DateTime<Utc>,
+}
+
+/// Сущность в коллекции: ссылка на карточку и краткое описание.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct CollectionEntity {
+    #[serde(flatten)]
+    pub entity: EntityRef,
+    /// Краткое описание: без HTML, до 1000 символов; `null` — описания нет.
+    pub overview: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]

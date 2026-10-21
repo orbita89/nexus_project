@@ -114,6 +114,10 @@ pub fn router() -> OpenApiRouter<AppState> {
             admin::feature_collection,
             admin::unfeature_collection
         ))
+        .routes(routes!(
+            admin::put_collection_item,
+            admin::delete_collection_item
+        ))
         .routes(routes!(admin::delete_thread))
         .routes(routes!(admin::delete_post))
         .routes(routes!(admin::lock_thread, admin::unlock_thread))

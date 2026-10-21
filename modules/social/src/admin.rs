@@ -2,10 +2,10 @@
 //! помечает коллекции особыми (с читаемым адресом),
 //! закрывает темы.
 
-use crate::collections;
+use crate::collections::{self, Editor};
 use crate::comments;
 use crate::events;
-use crate::models::{Collection, FeatureCollection};
+use crate::models::{Collection, CollectionItem, FeatureCollection, PutCollectionItem};
 use crate::posts;
 use crate::refs;
 use crate::slug;
@@ -17,6 +17,9 @@ use shared::extract::{JsonBody, Path};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use sqlx::PgConnection;
 use uuid::Uuid;
+
+/// Длина URL обоев и обложки особой коллекции.
+const MAX_STYLE_URL: usize = 2048;
 
 /// Удалить любую рецензию.
 #[utoipa::path(
@@ -110,7 +113,8 @@ async fn slug_taken(tx: &mut PgConnection, slug: &str, id: Uuid) -> AppResult<bo
     .await?)
 }
 
-/// Пометить публичную коллекцию особой, поменять её порядок или адрес.
+/// Пометить публичную коллекцию особой, поменять её порядок, адрес или оформление (обои, обложка,
+/// тема).
 #[utoipa::path(
     put, operation_id = "admin_feature_collection", path = "/admin/collections/{id}/featured",
     tag = "social-admin",
@@ -119,7 +123,7 @@ async fn slug_taken(tx: &mut PgConnection, slug: &str, id: Uuid) -> AppResult<bo
     request_body(content = FeatureCollection, description = "Можно не передавать тело: в конец, slug — транслит названия"),
     responses(
         (status = 200, description = "Особая", body = Collection),
-        (status = 400, description = "Коллекция приватная; неверный slug (формат, UUID, служебное слово)", body = ErrorBody),
+        (status = 400, description = "Коллекция приватная (`collection_private`); неверные поля (`validation` с `field`): slug — формат, UUID, служебное слово; `wallpaper_url`, `cover_url` — не https-URL или длиннее 2048; `theme` — не `^[a-z0-9-]{1,32}$`", body = ErrorBody),
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Нужна роль admin", body = ErrorBody),
         (status = 404, description = "Не найдена", body = ErrorBody),
@@ -133,7 +137,21 @@ pub async fn feature_collection(
     body: Option<JsonBody<FeatureCollection>>,
 ) -> AppResult<Json<Collection>> {
     let req = body.map(|JsonBody(req)| req).unwrap_or_default();
-    let wanted = req.slug.as_deref().map(slug::validate).transpose()?;
+    let wanted = req
+        .slug
+        .as_deref()
+        .map(slug::validate)
+        .transpose()
+        .map_err(|e| e.on_field("slug"))?;
+    let wallpaper = req
+        .wallpaper_url
+        .map(|value| style_url("wallpaper_url", value))
+        .transpose()?;
+    let cover = req
+        .cover_url
+        .map(|value| style_url("cover_url", value))
+        .transpose()?;
+    let theme = req.theme.map(style_theme).transpose()?;
 
     let mut tx = state.db.begin().await?;
     // Выбор и запись slug — по очереди: две коллекции не займут один адрес.
@@ -147,9 +165,10 @@ pub async fn feature_collection(
             .await?;
     let (is_public, current, title) = found.ok_or(AppError::NotFound)?;
     if !is_public {
-        return Err(AppError::BadRequest(
-            "featured collection must be public".into(),
-        ));
+        return Err(
+            AppError::BadRequest("featured collection must be public".into())
+                .with_code("collection_private"),
+        );
     }
     let new_slug = match (wanted, current.clone()) {
         (Some(wanted), _) => {
@@ -188,16 +207,26 @@ pub async fn feature_collection(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    // Оформление: не передано — не меняется (`$4`/`$6`/`$8` = false), `null` — сбрасывается.
     sqlx::query(
         "UPDATE collections SET slug = $3,
              featured_position = COALESCE($2, featured_position,
                  (SELECT COALESCE(max(featured_position) + 1, 0) FROM collections
-                  WHERE featured_position IS NOT NULL))
+                  WHERE featured_position IS NOT NULL)),
+             wallpaper_url = CASE WHEN $4 THEN $5 ELSE wallpaper_url END,
+             cover_url = CASE WHEN $6 THEN $7 ELSE cover_url END,
+             theme = CASE WHEN $8 THEN $9 ELSE theme END
          WHERE id = $1",
     )
     .bind(id)
     .bind(req.position)
     .bind(&new_slug)
+    .bind(wallpaper.is_some())
+    .bind(wallpaper.flatten())
+    .bind(cover.is_some())
+    .bind(cover.flatten())
+    .bind(theme.is_some())
+    .bind(theme.flatten())
     .execute(&mut *tx)
     .await
     .map_err(collections::featured_must_be_public)?;
@@ -210,7 +239,7 @@ pub async fn feature_collection(
 }
 
 /// Снять с коллекции отметку «особая». slug уходит в историю: старый адрес ведёт на
-/// `/collections/{id}`, другой коллекции он не достанется.
+/// `/collections/{id}`, другой коллекции он не достанется. Оформление сбрасывается.
 #[utoipa::path(
     delete, operation_id = "admin_unfeature_collection", path = "/admin/collections/{id}/featured",
     tag = "social-admin",
@@ -245,13 +274,115 @@ pub async fn unfeature_collection(
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("UPDATE collections SET featured_position = NULL, slug = NULL WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE collections SET featured_position = NULL, slug = NULL,
+             wallpaper_url = NULL, cover_url = NULL, theme = NULL
+         WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     tracing::info!(admin_id = %admin.id, collection_id = %id, "collection unfeatured by admin");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// URL оформления (обои, обложка): https, до 2048 символов; `null` — убрать.
+fn style_url(field: &str, value: Option<String>) -> AppResult<Option<String>> {
+    let value = value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if let Some(url) = &value {
+        let ok = url.len() <= MAX_STYLE_URL
+            && url
+                .strip_prefix("https://")
+                .is_some_and(|rest| !rest.is_empty() && !rest.contains(char::is_whitespace));
+        if !ok {
+            return Err(AppError::Invalid {
+                field: field.into(),
+                message: format!("{field} must be an https URL up to {MAX_STYLE_URL} chars"),
+            });
+        }
+    }
+    Ok(value)
+}
+
+/// Тема оформления: `^[a-z0-9-]{1,32}$`; `null` — убрать.
+fn style_theme(value: Option<String>) -> AppResult<Option<String>> {
+    let value = value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if let Some(theme) = &value {
+        let ok = theme.len() <= 32
+            && theme
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !ok {
+            return Err(AppError::Invalid {
+                field: "theme".into(),
+                message: "theme must be 1-32 chars of a-z, 0-9 and -".into(),
+            });
+        }
+    }
+    Ok(value)
+}
+
+/// Добавить произведение в любую особую коллекцию или изменить его позицию и заметку.
+#[utoipa::path(
+    put, operation_id = "admin_put_collection_item", path = "/admin/collections/{id}/items/{slug}",
+    tag = "social-admin",
+    security(("bearer" = [])),
+    params(
+        ("id" = Uuid, Path, description = "id особой коллекции"),
+        ("slug" = String, Path, description = "slug сущности", example = "dune-2021"),
+    ),
+    request_body(content = PutCollectionItem, description = "Можно не передавать тело: добавить в конец без заметки"),
+    responses(
+        (status = 201, description = "Добавлено", body = CollectionItem),
+        (status = 200, description = "Изменено", body = CollectionItem),
+        (status = 400, description = "Коллекция не особая (`not_featured`), неверные поля или уже 500 произведений", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Нет коллекции или сущности", body = ErrorBody),
+    )
+)]
+pub async fn put_collection_item(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path((id, slug)): Path<(Uuid, String)>,
+    body: Option<JsonBody<PutCollectionItem>>,
+) -> AppResult<(StatusCode, Json<CollectionItem>)> {
+    let req = body.map(|JsonBody(req)| req).unwrap_or_default();
+    let result = collections::put_item_as(&state, Editor::Admin, id, &slug, req).await?;
+    tracing::info!(admin_id = %admin.id, collection_id = %id, %slug, "featured collection item put by admin");
+    Ok(result)
+}
+
+/// Убрать произведение из любой особой коллекции.
+#[utoipa::path(
+    delete, operation_id = "admin_delete_collection_item", path = "/admin/collections/{id}/items/{slug}",
+    tag = "social-admin",
+    security(("bearer" = [])),
+    params(
+        ("id" = Uuid, Path, description = "id особой коллекции"),
+        ("slug" = String, Path, description = "slug сущности", example = "dune-2021"),
+    ),
+    responses(
+        (status = 204, description = "Убрано"),
+        (status = 400, description = "Коллекция не особая (`not_featured`)", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Нет коллекции, сущности или её нет в коллекции", body = ErrorBody),
+    )
+)]
+pub async fn delete_collection_item(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path((id, slug)): Path<(Uuid, String)>,
+) -> AppResult<StatusCode> {
+    let result = collections::delete_item_as(&state, Editor::Admin, id, &slug).await?;
+    tracing::info!(admin_id = %admin.id, collection_id = %id, %slug, "featured collection item removed by admin");
+    Ok(result)
 }
 
 /// Удалить любую тему вместе с сообщениями.

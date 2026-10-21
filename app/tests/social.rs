@@ -2509,6 +2509,203 @@ async fn featured_collection_slugs(pool: PgPool) {
     assert_eq!(list[0]["slug"], "russkiy-top-2021");
 }
 
+/// Оформление особой коллекции (обои, обложка, тема): задаётся в `PUT .../featured`, отсутствующее
+/// поле не меняется, `null` сбрасывает, неверное — 400 с `field`; снятие из особых сбрасывает всё;
+/// приватная — `collection_private`. Описания сущностей в детали коллекции. Админ меняет состав
+/// любой особой коллекции, обычной — 400 `not_featured`.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn featured_collection_style_overviews_and_admin_items(pool: PgPool) {
+    let ctx = Ctx::new(pool.clone());
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let alice = ctx.user("alice").await;
+    let top = ctx.collection(&alice, json!({ "title": "Хеллоуин" })).await;
+    let plain = ctx.collection(&alice, json!({ "title": "Обычная" })).await;
+    let private = ctx
+        .collection(&alice, json!({ "title": "Тайная", "is_public": false }))
+        .await;
+    let featured = format!("/admin/collections/{top}/featured");
+
+    let got = ctx.get_ok(&format!("/collections/{plain}"), None).await;
+    for field in ["wallpaper_url", "cover_url", "theme"] {
+        assert_eq!(got[field], Value::Null, "{field}");
+    }
+
+    let style = json!({
+        "wallpaper_url": "https://cdn.example.com/wall.jpg",
+        "cover_url": "https://cdn.example.com/cover.jpg",
+        "theme": "halloween",
+    });
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &featured,
+            Some(style),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["wallpaper_url"], "https://cdn.example.com/wall.jpg");
+    assert_eq!(got["cover_url"], "https://cdn.example.com/cover.jpg");
+    assert_eq!(got["theme"], "halloween");
+    // Не передано — не меняется; null — сброс.
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &featured,
+            Some(json!({ "cover_url": null, "position": 2 })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["cover_url"], Value::Null);
+    assert_eq!(got["theme"], "halloween");
+    assert_eq!(got["wallpaper_url"], "https://cdn.example.com/wall.jpg");
+    let list = ctx.get_ok("/collections/featured", None).await;
+    assert_eq!(list[0]["theme"], "halloween");
+
+    for (body, field) in [
+        (
+            json!({ "wallpaper_url": "http://cdn.example.com/a.jpg" }),
+            "wallpaper_url",
+        ),
+        (
+            json!({ "cover_url": format!("https://x/{}", "a".repeat(2048)) }),
+            "cover_url",
+        ),
+        (json!({ "theme": "Halloween" }), "theme"),
+        (json!({ "theme": "a".repeat(33) }), "theme"),
+        (json!({ "slug": "ab" }), "slug"),
+    ] {
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::PUT,
+                &featured,
+                Some(body),
+                Some(&admin),
+            )
+            .await;
+        assert_eq!(error["code"], "validation");
+        assert_eq!(error["field"], field);
+    }
+    let error = ctx
+        .expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            &format!("/admin/collections/{private}/featured"),
+            None,
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(error["code"], "collection_private");
+
+    // Описания: одним запросом для всех элементов, без HTML; нет описания — null.
+    sqlx::query(
+        "UPDATE entities SET description = '<p>Пол Атрейдес  едет на Арракис.</p>'
+         WHERE slug = 'dune-2021'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    ctx.add_item(&alice, &top, "dune-2021").await;
+    ctx.add_item(&alice, &top, "dune-part-two-2024").await;
+    let detail = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(detail["items"][0]["entity"]["slug"], "dune-2021");
+    assert_eq!(
+        detail["items"][0]["entity"]["overview"],
+        "Пол Атрейдес едет на Арракис."
+    );
+    assert_eq!(detail["items"][1]["entity"]["overview"], Value::Null);
+
+    // Админ правит состав особой; не admin — 403; обычной — 400 not_featured.
+    let item = |id: &str, slug: &str| format!("/admin/collections/{id}/items/{slug}");
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::PUT,
+        &item(&top, "dune-novel"),
+        None,
+        Some(&alice),
+    )
+    .await;
+    let added = ctx
+        .expect(
+            StatusCode::CREATED,
+            Method::PUT,
+            &item(&top, "dune-novel"),
+            Some(json!({ "note": "Книга", "position": 0 })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(added["entity"]["slug"], "dune-novel");
+    assert_eq!(added["note"], "Книга");
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &item(&top, "dune-novel"),
+        Some(json!({ "position": 9 })),
+        Some(&admin),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &item(&top, "dune-2021"),
+        None,
+        Some(&admin),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        &item(&top, "dune-2021"),
+        None,
+        Some(&admin),
+    )
+    .await;
+    let detail = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(pluck_items(&detail), ["dune-part-two-2024", "dune-novel"]);
+    let error = ctx
+        .expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            &item(&plain, "dune-novel"),
+            None,
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(error["code"], "not_featured");
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        &item("00000000-0000-0000-0000-000000000000", "dune-novel"),
+        None,
+        Some(&admin),
+    )
+    .await;
+
+    // Снята из особых — оформление сброшено.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &featured,
+        None,
+        Some(&admin),
+    )
+    .await;
+    let got = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(got["wallpaper_url"], Value::Null);
+    assert_eq!(got["theme"], Value::Null);
+}
+
+fn pluck_items(detail: &Value) -> Vec<&str> {
+    detail["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["entity"]["slug"].as_str().unwrap())
+        .collect()
+}
+
 // ---------------------------------------------------------------- границы модулей
 
 /// Справочник сущностей, отдающий для `dune-2021` своё название: видно, что social берёт

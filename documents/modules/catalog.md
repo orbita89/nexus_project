@@ -138,6 +138,10 @@ TMDB с русским названием (121 371) и 500 самых попул
 **Индексы:** триграммный GIN по `full_name` — поиск людей по подстроке; `(full_name, id)` — список
 по алфавиту.
 
+Краткие описания сущностей для других модулей — `EntityDirectory::overviews(ids)` (`PgEntityDirectory`):
+`entities.description` без HTML, до 1000 символов по границе предложения или слова
+(`catalog::directory::overview`), одним запросом; ими `social` дополняет элементы коллекции.
+
 Люди и теги для других модулей — справочники `PersonDirectory` (`PgPersonDirectory`, `state.people`:
 `by_slug` — только публичные, `by_ids` — все → `PersonRef` `{id, slug, full_name, photo_url}`) и
 `TagDirectory` (`PgTagDirectory`, `state.tags`: `by_slug`, `by_ids` → `TagRef` `{id, slug, name, kind}`)

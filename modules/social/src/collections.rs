@@ -2,9 +2,9 @@
 //! (для остальных их как будто нет: 404). Менять коллекцию может только владелец.
 
 use crate::models::{
-    Collection, CollectionBySlug, CollectionDetail, CollectionItem, CollectionItemRow,
-    CollectionRow, CreateCollection, PageQuery, PutCollectionItem, ReorderItems, UpdateCollection,
-    UserCollectionsQuery, COLLECTION_COLUMNS, ITEM_COLUMNS,
+    Collection, CollectionBySlug, CollectionDetail, CollectionEntity, CollectionItem,
+    CollectionItemRow, CollectionRow, CreateCollection, PageQuery, PutCollectionItem, ReorderItems,
+    UpdateCollection, UserCollectionsQuery, COLLECTION_COLUMNS, ITEM_COLUMNS,
 };
 use crate::refs;
 use crate::validate::{
@@ -357,15 +357,53 @@ pub async fn put_item(
     body: Option<JsonBody<PutCollectionItem>>,
 ) -> AppResult<(StatusCode, Json<CollectionItem>)> {
     let req = body.map(|JsonBody(req)| req).unwrap_or_default();
+    put_item_as(&state, Editor::Owner(&user), id, &slug, req).await
+}
+
+/// Кто меняет состав коллекции: владелец — свою, admin — любую особую.
+pub(crate) enum Editor<'a> {
+    Owner(&'a AuthUser),
+    Admin,
+}
+
+/// Блокировка коллекции на время правки состава и проверка прав редактора.
+async fn lock_for_edit(db: impl PgExecutor<'_>, id: Uuid, editor: &Editor<'_>) -> AppResult<()> {
+    match editor {
+        Editor::Owner(user) => owned_for_update(db, id, user).await,
+        Editor::Admin => {
+            let featured: Option<Option<i32>> = sqlx::query_scalar(
+                "SELECT featured_position FROM collections WHERE id = $1 FOR UPDATE",
+            )
+            .bind(id)
+            .fetch_optional(db)
+            .await?;
+            match featured {
+                None => Err(AppError::NotFound),
+                Some(None) => Err(AppError::BadRequest("collection is not featured".into())
+                    .with_code("not_featured")),
+                Some(Some(_)) => Ok(()),
+            }
+        }
+    }
+}
+
+/// Добавить произведение или изменить его позицию и заметку (201 / 200).
+pub(crate) async fn put_item_as(
+    state: &AppState,
+    editor: Editor<'_>,
+    id: Uuid,
+    slug: &str,
+    req: PutCollectionItem,
+) -> AppResult<(StatusCode, Json<CollectionItem>)> {
     let note = req
         .note
         .map(|value| validate::optional("note", value, MAX_NOTE))
         .transpose()?;
-    let entity = refs::entity(&state, &slug).await?;
+    let entity = refs::entity(state, slug).await?;
 
     let mut tx = state.db.begin().await?;
     // Блокировка коллекции: параллельные добавления не превысят лимит и не займут одну позицию.
-    owned_for_update(&mut *tx, id, &user).await?;
+    lock_for_edit(&mut *tx, id, &editor).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM collection_items WHERE collection_id = $1 AND entity_id = $2)",
     )
@@ -418,10 +456,15 @@ pub async fn put_item(
     touch(&mut *tx, id).await?;
     tx.commit().await?;
 
+    let overview = state
+        .entities
+        .overviews(&[entity.id])
+        .await?
+        .remove(&entity.id);
     Ok((
         status,
         Json(CollectionItem {
-            entity,
+            entity: CollectionEntity { entity, overview },
             position: row.position,
             note: row.note,
             added_at: row.added_at,
@@ -449,9 +492,19 @@ pub async fn delete_item(
     user: AuthUser,
     Path((id, slug)): Path<(Uuid, String)>,
 ) -> AppResult<StatusCode> {
-    let entity = refs::entity(&state, &slug).await?;
+    delete_item_as(&state, Editor::Owner(&user), id, &slug).await
+}
+
+/// Убрать произведение из коллекции → 204; его там нет — 404.
+pub(crate) async fn delete_item_as(
+    state: &AppState,
+    editor: Editor<'_>,
+    id: Uuid,
+    slug: &str,
+) -> AppResult<StatusCode> {
+    let entity = refs::entity(state, slug).await?;
     let mut tx = state.db.begin().await?;
-    owned_for_update(&mut *tx, id, &user).await?;
+    lock_for_edit(&mut *tx, id, &editor).await?;
     let deleted =
         sqlx::query("DELETE FROM collection_items WHERE collection_id = $1 AND entity_id = $2")
             .bind(id)
@@ -543,6 +596,7 @@ pub(crate) fn featured_must_be_public(error: sqlx::Error) -> AppError {
     match &error {
         sqlx::Error::Database(db) if db.is_check_violation() => {
             AppError::BadRequest("featured collection must be public".into())
+                .with_code("collection_private")
         }
         _ => AppError::Database(error),
     }

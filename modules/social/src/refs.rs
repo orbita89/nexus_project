@@ -5,9 +5,9 @@
 //! удалены прямо сейчас, каскад ещё не дошёл), пропускается.
 
 use crate::models::{
-    Collection, CollectionItem, CollectionItemRow, CollectionRow, Interest, InterestRow, MarkRow,
-    MarkedEntity, Post, PostRow, Review, ReviewComment, ReviewCommentRow, ReviewRow, Thread,
-    ThreadRow,
+    Collection, CollectionEntity, CollectionItem, CollectionItemRow, CollectionRow, Interest,
+    InterestRow, MarkRow, MarkedEntity, Post, PostRow, Review, ReviewComment, ReviewCommentRow,
+    ReviewRow, Thread, ThreadRow,
 };
 use shared::directory::{EntityRef, PersonRef, TagRef, UserRef};
 use shared::{AppError, AppResult, AppState};
@@ -167,6 +167,9 @@ pub async fn collections(state: &AppState, rows: Vec<CollectionRow>) -> AppResul
                 is_featured: row.featured_position.is_some(),
                 featured_position: row.featured_position,
                 slug: row.slug,
+                wallpaper_url: row.wallpaper_url,
+                cover_url: row.cover_url,
+                theme: row.theme,
                 items_count: row.items_count,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
@@ -186,12 +189,18 @@ pub async fn items(
     state: &AppState,
     rows: Vec<CollectionItemRow>,
 ) -> AppResult<Vec<CollectionItem>> {
-    let entities = entities(state, rows.iter().map(|r| r.entity_id).collect()).await?;
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.entity_id).collect();
+    let entities = entities(state, ids.clone()).await?;
+    // Описания — одним запросом на всю коллекцию.
+    let mut overviews = state.entities.overviews(&dedup(ids)).await?;
     Ok(rows
         .into_iter()
         .filter_map(|row| {
             Some(CollectionItem {
-                entity: entities.get(&row.entity_id)?.clone(),
+                entity: CollectionEntity {
+                    entity: entities.get(&row.entity_id)?.clone(),
+                    overview: overviews.remove(&row.entity_id),
+                },
                 position: row.position,
                 note: row.note,
                 added_at: row.added_at,

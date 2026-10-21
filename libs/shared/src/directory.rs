@@ -82,6 +82,11 @@ pub trait EntityDirectory: Send + Sync {
     async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, EntityRef>>;
     /// Сущности по slug'ам (ключ — slug). Несуществующих в ответе нет.
     async fn by_slugs(&self, slugs: &[String]) -> AppResult<HashMap<String, EntityRef>>;
+    /// Краткие описания по id: без HTML, до 1000 символов (по границе предложения или слова).
+    /// Нет описания — нет ключа. По умолчанию пусто (подменные справочники в тестах).
+    async fn overviews(&self, _ids: &[Uuid]) -> AppResult<HashMap<Uuid, String>> {
+        Ok(HashMap::new())
+    }
 }
 
 /// Пользователи. Реализует `auth`.

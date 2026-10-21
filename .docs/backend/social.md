@@ -116,6 +116,8 @@
 | `is_public` | `boolean` | NOT NULL, default `true` | Видна всем или только владельцу |
 | `featured_position` | `integer` | CHECK: `NULL` или `is_public` | Особая коллекция (помечает admin, «Топ‑10»): порядок на главной; `NULL` — обычная |
 | `slug` | `text` | UNIQUE; CHECK `collections_slug_featured_check`: `NULL` или особая | Читаемый адрес особой (`/collections/{slug}`): `^[a-z0-9]+(-[a-z0-9]+)*$`, 3–100, не UUID, не служебное слово (`social::slug::RESERVED`: `featured`, `new`, `by-slug`, `admin`, `create`, `edit`, `search`). Миграция `20261103200000_social_collection_slugs.sql` |
+| `wallpaper_url`, `cover_url` | `text` | CHECK `collections_style_featured_check` (с `theme`): все три `NULL`, если коллекция не особая | Оформление особой: обои (широкий фон шапки, 21:9 / 16:9, от 1920 px) и обложка карточки (16:9, от 1280 px) — https-URL до 2048 символов, как `image_url` баннеров (без upload). Миграция `20261105100000_social_collection_style.sql` |
+| `theme` | `text` | `^[a-z0-9-]{1,32}$` (проверка в коде), без enum | id пресета оформления фронтенда (`default`, `halloween`, `romance`, `new-year`, `horror`, `sci-fi`, `family`, `summer`); неизвестный фронтенд игнорирует |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
 
 **Индексы:** по `user_id` — коллекции пользователя; частичный по `created_at` для публичных —
@@ -304,7 +306,7 @@
 
 | Трейт | Реализует | Методы |
 |---|---|---|
-| `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>`, `by_slugs` → `HashMap<String, EntityRef>`. По slug — только видимые сущности каталога (активные; фильмы из TMDB — вышедшие или «Скоро премьера», либо включённые вручную): невидимая (её нет на сайте) — как неизвестная, эндпоинты по slug сущности отвечают 404, а в `/ratings` её нет. По id — все: коллекции, ленты и интересы со скрытой сущностью её не теряют |
+| `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>`, `by_slugs` → `HashMap<String, EntityRef>`, `overviews(ids)` → `HashMap<Uuid, String>` (краткие описания для детали коллекции). По slug — только видимые сущности каталога (активные; фильмы из TMDB — вышедшие или «Скоро премьера», либо включённые вручную): невидимая (её нет на сайте) — как неизвестная, эндпоинты по slug сущности отвечают 404, а в `/ratings` её нет. По id — все: коллекции, ленты и интересы со скрытой сущностью её не теряют |
 | `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных) |
 | `EntityRatings` | `catalog::directory::PgEntityRatings` | `set`, `replace_all` — `social` сообщает каталогу сводки оценок для сортировок `popular` и `rating` (`social::ratings`: после записи рецензии и при старте) |
 
@@ -412,7 +414,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | GET | `/collections/by-slug/{slug}` | гость | Особая по читаемому адресу: текущий slug → 200 `CollectionDetail` (как `/collections/{id}`); бывший, коллекция всё ещё особая → 200 `{"redirect_slug"}`; бывший, больше не особая, но публичная → 200 `{"redirect_id"}` (фронт делает 301); удалена, приватна, slug неизвестен → 404. Отдельный путь — чтобы не спорить с `/collections/{id}` и `/collections/featured` |
 | POST | `/collections` | user | `{"title", "description"?, "is_public"? = true}` → 201, коллекция с `items` |
 | GET | `/collections/{id}` | гость / владелец | Коллекция с содержимым по порядку |
-| PATCH | `/collections/{id}` | владелец | `title`, `description` (`null` очищает), `is_public`; особую сделать приватной — 400 |
+| PATCH | `/collections/{id}` | владелец | `title`, `description` (`null` очищает), `is_public`; особую сделать приватной — 400 `collection_private` |
 | DELETE | `/collections/{id}` | владелец | → 204 |
 | GET | `/users/{username}/collections` | гость / владелец | Коллекции пользователя, новые сверху; владелец видит и приватные. `?contains={slug}` — у каждой `contains: true/false` (кнопка «В коллекцию» одним запросом); неизвестный slug — 404 |
 | GET | `/entities/{slug}/collections` | гость | Публичные коллекции, где есть сущность |
@@ -426,9 +428,9 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 (`/admin/collections/{id}`), например по запросу правообладателя, но не читать её. Чужую публичную менять нельзя — 403. Эндпоинты «гость / владелец» принимают токен
 необязательно (`Option<AuthUser>`): без заголовка — гость, с недействительным токеном — 401.
 
-Коллекция в ответе: `id`, `owner` (`UserRef`), `title`, `description`, `is_public`, `is_featured`, `featured_position`, `slug` (у обычной оба `null`; фронт рисует особую иначе и строит её адрес `/collections/{slug}`), `items_count`,
+Коллекция в ответе: `id`, `owner` (`UserRef`), `title`, `description`, `is_public`, `is_featured`, `featured_position`, `slug`, `wallpaper_url`, `cover_url`, `theme` (у обычной все `null`; фронт рисует особую иначе и строит её адрес `/collections/{slug}`), `items_count`,
 `preview` (первые 4 произведения по порядку, `EntityRef` — обложки в списке; одним запросом на
-страницу), `contains` (только с `?contains=`), даты; карточка — ещё `items`: `{entity, position, note, added_at}` по `position`, затем по времени
+страницу), `contains` (только с `?contains=`), даты; карточка — ещё `items`: `{entity, position, note, added_at}`, где `entity` — `EntityRef` плюс `overview` (краткое описание: без HTML, до 1000 символов по границе предложения или слова, `null` — нет; одним запросом `EntityDirectory::overviews` на всю коллекцию; тот же вид у ответа `PUT .../items/{slug}`) по `position`, затем по времени
 добавления. Изменение содержимого обновляет `updated_at` коллекции.
 
 ### Форум
@@ -544,8 +546,10 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | DELETE | `/admin/reviews/{id}` | Удалить любую рецензию → 204 (голоса и комментарии — вместе с ней) |
 | DELETE | `/admin/review-comments/{id}` | Удалить любой комментарий к рецензии → 204 |
 | DELETE | `/admin/collections/{id}` | Удалить любую коллекцию, в том числе приватную → 204 |
-| PUT | `/admin/collections/{id}/featured` | Пометить публичную коллекцию особой → 200 (`Collection`); тело `{"position"?, "slug"?}` необязательно — без `position` в конец (уже особая — порядок не меняется); без `slug` при первой пометке — транслит названия (`social::slug::from_title`: «Русский топ 2021» → `russkiy-top-2021`, занят — `-2`, `-3`…), при повторном PUT — не меняется; смена slug — старый в историю, свой бывший можно вернуть. 400 `validation` — приватная, неверный формат, UUID, служебное слово; 409 `conflict` — slug занят другой коллекцией (сейчас или раньше) |
-| DELETE | `/admin/collections/{id}/featured` | Снять отметку → 204 (повторно — тоже); slug уходит в историю (старый адрес ведёт на `/collections/{id}`, другой коллекции не достанется) |
+| PUT | `/admin/collections/{id}/featured` | Пометить публичную коллекцию особой → 200 (`Collection`); тело `{"position"?, "slug"?, "wallpaper_url"?, "cover_url"?, "theme"?}` необязательно — оформление: не передано — не меняется, `null` — убрать (URL — https до 2048, тема — `^[a-z0-9-]{1,32}$`); без `position` в конец (уже особая — порядок не меняется); без `slug` при первой пометке — транслит названия (`social::slug::from_title`: «Русский топ 2021» → `russkiy-top-2021`, занят — `-2`, `-3`…), при повторном PUT — не меняется; смена slug — старый в историю, свой бывший можно вернуть. 400 `collection_private` — приватная; 400 `validation` с `field` (`slug`, `wallpaper_url`, `cover_url`, `theme`) — неверный формат, UUID, служебное слово, не https-URL; 409 `conflict` — slug занят другой коллекцией (сейчас или раньше) |
+| DELETE | `/admin/collections/{id}/featured` | Снять отметку → 204 (повторно — тоже); slug уходит в историю (старый адрес ведёт на `/collections/{id}`, другой коллекции не достанется); оформление сбрасывается |
+| PUT | `/admin/collections/{id}/items/{slug}` | Добавить (201) или изменить (200) произведение в **любой особой** коллекции — как `PUT /collections/{id}/items/{slug}` владельца (`{"note"?, "position"?}`, лимит 500). 400 `not_featured` — коллекция не особая; 404 — нет коллекции или сущности |
+| DELETE | `/admin/collections/{id}/items/{slug}` | Убрать произведение из любой особой → 204. 400 `not_featured`; 404 — нет коллекции, сущности или её нет в коллекции |
 | DELETE | `/admin/threads/{id}` | Удалить любую тему вместе с сообщениями → 204 |
 | DELETE | `/admin/posts/{id}` | Удалить любое сообщение → 204 (с ответами — заглушка, как у автора) |
 | PUT | `/admin/threads/{id}/lock` | Закрыть тему для ответов → 204 (повторно — тоже) |
@@ -604,7 +608,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `feed.rs` | Лента: ярусы, курсор |
 | `events.rs` | События для `realtime` |
 | `directory.rs` | `InterestDirectory` для других модулей |
-| `admin.rs` | Модерация; особые коллекции и их slug |
+| `admin.rs` | Модерация; особые коллекции: slug, оформление, состав любой особой (`collections::Editor::Admin`) |
 | `slug.rs` | slug особых коллекций: проверка формата, транслит названия, служебные слова |
 
 Тесты — `app/tests/social.rs`, `app/tests/chat.rs` (чат: WebSocket + REST), `app/tests/forum.rs`, `app/tests/interests.rs`, `app/tests/feed.rs` (сущности — `app/tests/fixtures/catalog.sql`,
