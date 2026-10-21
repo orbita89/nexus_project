@@ -299,7 +299,7 @@
         "tags": [
           "social-admin"
         ],
-        "summary": "Пометить публичную коллекцию особой или поменять её порядок среди особых.",
+        "summary": "Пометить публичную коллекцию особой, поменять её порядок или адрес.",
         "operationId": "admin_feature_collection",
         "parameters": [
           {
@@ -314,7 +314,7 @@
           }
         ],
         "requestBody": {
-          "description": "Можно не передавать тело: в конец",
+          "description": "Можно не передавать тело: в конец, slug — транслит названия",
           "content": {
             "application/json": {
               "schema": {
@@ -336,7 +336,7 @@
             }
           },
           "400": {
-            "description": "Коллекция приватная",
+            "description": "Коллекция приватная; неверный slug (формат, UUID, служебное слово)",
             "content": {
               "application/json": {
                 "schema": {
@@ -374,6 +374,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "slug занят другой коллекцией (сейчас или раньше)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -386,7 +396,7 @@
         "tags": [
           "social-admin"
         ],
-        "summary": "Снять с коллекции отметку «особая».",
+        "summary": "Снять с коллекции отметку «особая». slug уходит в историю: старый адрес ведёт на\n`/collections/{id}`, другой коллекции он не достанется.",
         "operationId": "admin_unfeature_collection",
         "parameters": [
           {
@@ -1600,6 +1610,49 @@
             "bearer": []
           }
         ]
+      }
+    },
+    "/api/v1/social/collections/by-slug/{slug}": {
+      "get": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Особая коллекция по читаемому адресу (`/collections/{slug}` на сайте). Бывший адрес —\nкуда перенаправить: `redirect_slug` (коллекция всё ещё особая) или `redirect_id` (больше не\nособая, но публичная). Удалена, приватна или slug неизвестен — 404. Доступен гостю.",
+        "operationId": "get_collection_by_slug",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug особой коллекции",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "russkiy-top-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Коллекция (`CollectionDetail`) или `{redirect_slug}` / `{redirect_id}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionBySlug"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого адреса",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/social/collections/featured": {
@@ -5722,6 +5775,14 @@
             },
             "description": "Первые 4 произведения по порядку: обложки в карточке коллекции."
           },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Читаемый адрес особой коллекции (`/collections/{slug}`); у обычной — `null`.",
+            "example": "russkiy-top-2021"
+          },
           "title": {
             "type": "string",
             "example": "Лучшая фантастика"
@@ -5731,6 +5792,40 @@
             "format": "date-time"
           }
         }
+      },
+      "CollectionBySlug": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CollectionDetail",
+            "description": "Текущий slug особой коллекции."
+          },
+          {
+            "type": "object",
+            "description": "Бывший slug, коллекция всё ещё особая: её текущий адрес.",
+            "required": [
+              "redirect_slug"
+            ],
+            "properties": {
+              "redirect_slug": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Бывший slug, коллекция больше не особая, но публичная: `/collections/{id}`.",
+            "required": [
+              "redirect_id"
+            ],
+            "properties": {
+              "redirect_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        ],
+        "description": "Ответ `GET /collections/by-slug/{slug}`: коллекция или куда перенаправить (301 на фронтенде)."
       },
       "CollectionDetail": {
         "allOf": [
@@ -6054,8 +6149,16 @@
               "null"
             ],
             "format": "int32",
-            "description": "Порядок среди особых; без него — в конец.",
+            "description": "Порядок среди особых; без него — в конец (при повторном PUT — не меняется).",
             "example": 0
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Адрес `/collections/{slug}`: a-z, 0-9, дефисы между ними, 3–100, не UUID и не служебное\nслово. Без него — при первой пометке транслит названия (занят — `-2`, `-3`…), при\nповторном PUT — не меняется.",
+            "example": "russkiy-top-2021"
           }
         }
       },
@@ -6366,6 +6469,14 @@
                     "$ref": "#/components/schemas/EntityRef"
                   },
                   "description": "Первые 4 произведения по порядку: обложки в карточке коллекции."
+                },
+                "slug": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Читаемый адрес особой коллекции (`/collections/{slug}`); у обычной — `null`.",
+                  "example": "russkiy-top-2021"
                 },
                 "title": {
                   "type": "string",

@@ -2336,6 +2336,179 @@ async fn admin_features_collections(pool: PgPool) {
     assert_eq!(got["featured_position"], Value::Null);
 }
 
+/// Читаемый адрес особой коллекции: транслит названия при первой пометке, `-2` при коллизии,
+/// свой slug (400 на формат, UUID, служебное слово; 409 — занят), повторный PUT не меняет
+/// адрес, смена и снятие из особых — в историю, `by-slug` отдаёт коллекцию или куда
+/// перенаправить, удалённая коллекция держит адрес навсегда.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn featured_collection_slugs(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let alice = ctx.user("alice").await;
+    let top = ctx
+        .collection(&admin, json!({ "title": "Русский топ 2021" }))
+        .await;
+    let twin = ctx
+        .collection(&alice, json!({ "title": "Русский  топ 2021!" }))
+        .await;
+    let other = ctx.collection(&alice, json!({ "title": "Другая" })).await;
+    let featured = |id: &str| format!("/admin/collections/{id}/featured");
+    let put = |id: String, body: Option<Value>| {
+        let ctx = &ctx;
+        let admin = &admin;
+        async move {
+            ctx.expect(
+                StatusCode::OK,
+                Method::PUT,
+                &featured(&id),
+                body,
+                Some(admin),
+            )
+            .await
+        }
+    };
+
+    // Обычная коллекция без адреса.
+    let got = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(got["slug"], Value::Null);
+
+    // Транслит; коллизия — `-2`.
+    assert_eq!(put(top.clone(), None).await["slug"], "russkiy-top-2021");
+    assert_eq!(put(twin.clone(), None).await["slug"], "russkiy-top-2021-2");
+    // Повторный PUT (порядок) адрес не меняет.
+    let got = put(top.clone(), Some(json!({ "position": 5 }))).await;
+    assert_eq!(got["slug"], "russkiy-top-2021");
+    assert_eq!(got["featured_position"], 5);
+
+    // Неверный slug — 400; занятый — 409.
+    for bad in [
+        "ab",
+        "Top",
+        "a--b",
+        "featured",
+        "by-slug",
+        "0f8fad5b-d9cb-469f-a165-70867728950e",
+    ] {
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::PUT,
+                &featured(&other),
+                Some(json!({ "slug": bad })),
+                Some(&admin),
+            )
+            .await;
+        assert_eq!(error["code"], "validation", "{bad}");
+    }
+    let error = ctx
+        .expect(
+            StatusCode::CONFLICT,
+            Method::PUT,
+            &featured(&other),
+            Some(json!({ "slug": "russkiy-top-2021" })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(error["code"], "conflict");
+
+    // По адресу — коллекция целиком.
+    let by_slug = ctx
+        .get_ok("/collections/by-slug/russkiy-top-2021", None)
+        .await;
+    assert_eq!(by_slug["id"], top.as_str());
+    assert!(by_slug["items"].is_array());
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/collections/by-slug/nope",
+        None,
+        None,
+    )
+    .await;
+
+    // Смена адреса: старый — в историю, ведёт на новый; чужой коллекции не достаётся.
+    let got = put(top.clone(), Some(json!({ "slug": "russian-top-2021" }))).await;
+    assert_eq!(got["slug"], "russian-top-2021");
+    assert_eq!(
+        ctx.get_ok("/collections/by-slug/russkiy-top-2021", None)
+            .await,
+        json!({ "redirect_slug": "russian-top-2021" })
+    );
+    ctx.expect(
+        StatusCode::CONFLICT,
+        Method::PUT,
+        &featured(&other),
+        Some(json!({ "slug": "russkiy-top-2021" })),
+        Some(&admin),
+    )
+    .await;
+    // Свой бывший адрес вернуть можно.
+    let got = put(top.clone(), Some(json!({ "slug": "russkiy-top-2021" }))).await;
+    assert_eq!(got["slug"], "russkiy-top-2021");
+    assert_eq!(
+        ctx.get_ok("/collections/by-slug/russian-top-2021", None)
+            .await,
+        json!({ "redirect_slug": "russkiy-top-2021" })
+    );
+
+    // Снята из особых: адрес — в историю, ведёт на uuid-адрес.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &featured(&top),
+        None,
+        Some(&admin),
+    )
+    .await;
+    let got = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(got["slug"], Value::Null);
+    assert_eq!(
+        ctx.get_ok("/collections/by-slug/russkiy-top-2021", None)
+            .await,
+        json!({ "redirect_id": top })
+    );
+    ctx.expect(
+        StatusCode::CONFLICT,
+        Method::PUT,
+        &featured(&other),
+        Some(json!({ "slug": "russkiy-top-2021" })),
+        Some(&admin),
+    )
+    .await;
+    // Снова особая без slug — транслит, свой бывший адрес свободен для неё.
+    assert_eq!(put(top.clone(), None).await["slug"], "russkiy-top-2021");
+
+    // Удалена: адрес занят навсегда, по нему 404.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/collections/{twin}"),
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/collections/by-slug/russkiy-top-2021-2",
+        None,
+        None,
+    )
+    .await;
+    ctx.expect(
+        StatusCode::CONFLICT,
+        Method::PUT,
+        &featured(&other),
+        Some(json!({ "slug": "russkiy-top-2021-2" })),
+        Some(&admin),
+    )
+    .await;
+
+    // В списке особых — со slug.
+    let list = ctx.get_ok("/collections/featured", None).await;
+    assert_eq!(list[0]["slug"], "russkiy-top-2021");
+}
+
 // ---------------------------------------------------------------- границы модулей
 
 /// Справочник сущностей, отдающий для `dune-2021` своё название: видно, что social берёт

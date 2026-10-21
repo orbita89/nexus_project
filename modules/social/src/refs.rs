@@ -166,6 +166,7 @@ pub async fn collections(state: &AppState, rows: Vec<CollectionRow>) -> AppResul
                 is_public: row.is_public,
                 is_featured: row.featured_position.is_some(),
                 featured_position: row.featured_position,
+                slug: row.slug,
                 items_count: row.items_count,
                 created_at: row.created_at,
                 updated_at: row.updated_at,

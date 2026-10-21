@@ -115,13 +115,32 @@
 | `description` | `text` | | Описание |
 | `is_public` | `boolean` | NOT NULL, default `true` | Видна всем или только владельцу |
 | `featured_position` | `integer` | CHECK: `NULL` или `is_public` | Особая коллекция (помечает admin, «Топ‑10»): порядок на главной; `NULL` — обычная |
+| `slug` | `text` | UNIQUE; CHECK `collections_slug_featured_check`: `NULL` или особая | Читаемый адрес особой (`/collections/{slug}`): `^[a-z0-9]+(-[a-z0-9]+)*$`, 3–100, не UUID, не служебное слово (`social::slug::RESERVED`: `featured`, `new`, `by-slug`, `admin`, `create`, `edit`, `search`). Миграция `20261103200000_social_collection_slugs.sql` |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
 
 **Индексы:** по `user_id` — коллекции пользователя; частичный по `created_at` для публичных —
 лента новых коллекций; частичный (`user_id`, `created_at DESC`) для публичных — коллекции тех, на
 кого подписан, в ленте (миграция `20261011100000_social_feed.sql`); частичный
 `collections_featured_idx` (`featured_position`, `created_at`) для особых (миграция
-`20261102100000_social_featured_collections.sql`).
+`20261103100000_social_featured_collections.sql`).
+
+### `collection_slug_history` ✅ — бывшие адреса особых коллекций
+
+Миграция `20261103200000_social_collection_slugs.sql` (2026-10-21). Особая коллекция открывается по
+читаемому адресу `/collections/{slug}` (обычные — по uuid). Бывший slug (смена адреса, снятие из
+особых, удаление коллекции) остаётся здесь навсегда: старые ссылки не ломаются и не ведут на чужой
+контент.
+
+| Колонка | Тип | Ограничения | Смысл |
+|---|---|---|---|
+| `slug` | `text` | PK | Бывший адрес |
+| `collection_id` | `uuid` | FK → `collections`, ON DELETE SET NULL | Чей был; `NULL` — коллекция удалена (адрес занят, по нему 404) |
+| `created_at` | `timestamptz` | NOT NULL | Когда ушёл в историю |
+
+Индекс `collection_slug_history_collection_idx` (`collection_id`). Триггер `collections_keep_slug`
+(BEFORE DELETE ON `collections`) переносит slug удаляемой коллекции в историю с `collection_id = NULL`.
+Занятость slug — текущий у другой коллекции **или** в истории не своей коллекции; выбор и запись —
+под `pg_advisory_xact_lock('collection-slug')`.
 
 ### `collection_items` ✅ — содержимое коллекций
 
@@ -390,6 +409,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 |---|---|---|---|
 | GET | `/collections` | гость | Новые публичные коллекции |
 | GET | `/collections/featured` | гость | Особые коллекции (помечены admin) по `featured_position` — массив без пагинации |
+| GET | `/collections/by-slug/{slug}` | гость | Особая по читаемому адресу: текущий slug → 200 `CollectionDetail` (как `/collections/{id}`); бывший, коллекция всё ещё особая → 200 `{"redirect_slug"}`; бывший, больше не особая, но публичная → 200 `{"redirect_id"}` (фронт делает 301); удалена, приватна, slug неизвестен → 404. Отдельный путь — чтобы не спорить с `/collections/{id}` и `/collections/featured` |
 | POST | `/collections` | user | `{"title", "description"?, "is_public"? = true}` → 201, коллекция с `items` |
 | GET | `/collections/{id}` | гость / владелец | Коллекция с содержимым по порядку |
 | PATCH | `/collections/{id}` | владелец | `title`, `description` (`null` очищает), `is_public`; особую сделать приватной — 400 |
@@ -406,7 +426,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 (`/admin/collections/{id}`), например по запросу правообладателя, но не читать её. Чужую публичную менять нельзя — 403. Эндпоинты «гость / владелец» принимают токен
 необязательно (`Option<AuthUser>`): без заголовка — гость, с недействительным токеном — 401.
 
-Коллекция в ответе: `id`, `owner` (`UserRef`), `title`, `description`, `is_public`, `is_featured`, `featured_position` (у обычной `null`; фронт рисует особую иначе), `items_count`,
+Коллекция в ответе: `id`, `owner` (`UserRef`), `title`, `description`, `is_public`, `is_featured`, `featured_position`, `slug` (у обычной оба `null`; фронт рисует особую иначе и строит её адрес `/collections/{slug}`), `items_count`,
 `preview` (первые 4 произведения по порядку, `EntityRef` — обложки в списке; одним запросом на
 страницу), `contains` (только с `?contains=`), даты; карточка — ещё `items`: `{entity, position, note, added_at}` по `position`, затем по времени
 добавления. Изменение содержимого обновляет `updated_at` коллекции.
@@ -524,8 +544,8 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | DELETE | `/admin/reviews/{id}` | Удалить любую рецензию → 204 (голоса и комментарии — вместе с ней) |
 | DELETE | `/admin/review-comments/{id}` | Удалить любой комментарий к рецензии → 204 |
 | DELETE | `/admin/collections/{id}` | Удалить любую коллекцию, в том числе приватную → 204 |
-| PUT | `/admin/collections/{id}/featured` | Пометить публичную коллекцию особой → 200 (`Collection`); тело `{"position"?}` необязательно — без него в конец (уже особая — порядок не меняется); приватная → 400 |
-| DELETE | `/admin/collections/{id}/featured` | Снять отметку → 204 (повторно — тоже) |
+| PUT | `/admin/collections/{id}/featured` | Пометить публичную коллекцию особой → 200 (`Collection`); тело `{"position"?, "slug"?}` необязательно — без `position` в конец (уже особая — порядок не меняется); без `slug` при первой пометке — транслит названия (`social::slug::from_title`: «Русский топ 2021» → `russkiy-top-2021`, занят — `-2`, `-3`…), при повторном PUT — не меняется; смена slug — старый в историю, свой бывший можно вернуть. 400 `validation` — приватная, неверный формат, UUID, служебное слово; 409 `conflict` — slug занят другой коллекцией (сейчас или раньше) |
+| DELETE | `/admin/collections/{id}/featured` | Снять отметку → 204 (повторно — тоже); slug уходит в историю (старый адрес ведёт на `/collections/{id}`, другой коллекции не достанется) |
 | DELETE | `/admin/threads/{id}` | Удалить любую тему вместе с сообщениями → 204 |
 | DELETE | `/admin/posts/{id}` | Удалить любое сообщение → 204 (с ответами — заглушка, как у автора) |
 | PUT | `/admin/threads/{id}/lock` | Закрыть тему для ответов → 204 (повторно — тоже) |
@@ -584,7 +604,8 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `feed.rs` | Лента: ярусы, курсор |
 | `events.rs` | События для `realtime` |
 | `directory.rs` | `InterestDirectory` для других модулей |
-| `admin.rs` | Модерация |
+| `admin.rs` | Модерация; особые коллекции и их slug |
+| `slug.rs` | slug особых коллекций: проверка формата, транслит названия, служебные слова |
 
 Тесты — `app/tests/social.rs`, `app/tests/chat.rs` (чат: WebSocket + REST), `app/tests/forum.rs`, `app/tests/interests.rs`, `app/tests/feed.rs` (сущности — `app/tests/fixtures/catalog.sql`,
 пользователи — через dev login). Живые проверки — `http/social.http` и `http/forum.http`: всё, что

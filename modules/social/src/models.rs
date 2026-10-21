@@ -283,6 +283,9 @@ pub struct Collection {
     pub is_featured: bool,
     /// Порядок среди особых; у обычной — `null`.
     pub featured_position: Option<i32>,
+    /// Читаемый адрес особой коллекции (`/collections/{slug}`); у обычной — `null`.
+    #[schema(example = "russkiy-top-2021")]
+    pub slug: Option<String>,
     /// Сколько произведений.
     #[schema(example = 7)]
     pub items_count: i64,
@@ -303,6 +306,7 @@ pub struct CollectionRow {
     pub description: Option<String>,
     pub is_public: bool,
     pub featured_position: Option<i32>,
+    pub slug: Option<String>,
     pub items_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -310,16 +314,33 @@ pub struct CollectionRow {
 
 /// Колонки [`CollectionRow`] для `FROM collections c`.
 pub const COLLECTION_COLUMNS: &str =
-    "c.id, c.user_id, c.title, c.description, c.is_public, c.featured_position,
+    "c.id, c.user_id, c.title, c.description, c.is_public, c.featured_position, c.slug,
     (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id) AS items_count,
     c.created_at, c.updated_at";
 
 /// Пометить коллекцию особой.
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct FeatureCollection {
-    /// Порядок среди особых; без него — в конец.
+    /// Порядок среди особых; без него — в конец (при повторном PUT — не меняется).
     #[schema(example = 0)]
     pub position: Option<i32>,
+    /// Адрес `/collections/{slug}`: a-z, 0-9, дефисы между ними, 3–100, не UUID и не служебное
+    /// слово. Без него — при первой пометке транслит названия (занят — `-2`, `-3`…), при
+    /// повторном PUT — не меняется.
+    #[schema(example = "russkiy-top-2021")]
+    pub slug: Option<String>,
+}
+
+/// Ответ `GET /collections/by-slug/{slug}`: коллекция или куда перенаправить (301 на фронтенде).
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum CollectionBySlug {
+    /// Текущий slug особой коллекции.
+    Collection(Box<CollectionDetail>),
+    /// Бывший slug, коллекция всё ещё особая: её текущий адрес.
+    RedirectSlug { redirect_slug: String },
+    /// Бывший slug, коллекция больше не особая, но публичная: `/collections/{id}`.
+    RedirectId { redirect_id: Uuid },
 }
 
 #[derive(Debug, Deserialize, IntoParams)]

@@ -2,8 +2,8 @@
 //! (для остальных их как будто нет: 404). Менять коллекцию может только владелец.
 
 use crate::models::{
-    Collection, CollectionDetail, CollectionItem, CollectionItemRow, CollectionRow,
-    CreateCollection, PageQuery, PutCollectionItem, ReorderItems, UpdateCollection,
+    Collection, CollectionBySlug, CollectionDetail, CollectionItem, CollectionItemRow,
+    CollectionRow, CreateCollection, PageQuery, PutCollectionItem, ReorderItems, UpdateCollection,
     UserCollectionsQuery, COLLECTION_COLUMNS, ITEM_COLUMNS,
 };
 use crate::refs;
@@ -47,6 +47,49 @@ pub async fn list_featured(State(state): State<AppState>) -> AppResult<Json<Vec<
     .fetch_all(&state.db)
     .await?;
     Ok(Json(refs::collections(&state, rows).await?))
+}
+
+/// Особая коллекция по читаемому адресу (`/collections/{slug}` на сайте). Бывший адрес —
+/// куда перенаправить: `redirect_slug` (коллекция всё ещё особая) или `redirect_id` (больше не
+/// особая, но публичная). Удалена, приватна или slug неизвестен — 404. Доступен гостю.
+#[utoipa::path(
+    get, operation_id = "get_collection_by_slug", path = "/collections/by-slug/{slug}", tag = "collections",
+    params(("slug" = String, Path, description = "slug особой коллекции", example = "russkiy-top-2021")),
+    responses(
+        (status = 200, description = "Коллекция (`CollectionDetail`) или `{redirect_slug}` / `{redirect_id}`", body = CollectionBySlug),
+        (status = 404, description = "Нет такого адреса", body = ErrorBody),
+    )
+)]
+pub async fn get_by_slug(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> AppResult<Json<CollectionBySlug>> {
+    let row: Option<CollectionRow> = sqlx::query_as(&format!(
+        "SELECT {COLLECTION_COLUMNS} FROM collections c WHERE c.slug = $1"
+    ))
+    .bind(&slug)
+    .fetch_optional(&state.db)
+    .await?;
+    if let Some(row) = row {
+        return Ok(Json(CollectionBySlug::Collection(Box::new(
+            detail(&state, row).await?,
+        ))));
+    }
+    let old: Option<(Option<String>, Uuid, bool)> = sqlx::query_as(
+        "SELECT c.slug, c.id, c.is_public FROM collection_slug_history h
+         JOIN collections c ON c.id = h.collection_id
+         WHERE h.slug = $1",
+    )
+    .bind(&slug)
+    .fetch_optional(&state.db)
+    .await?;
+    match old {
+        Some((Some(current), _, _)) => Ok(Json(CollectionBySlug::RedirectSlug {
+            redirect_slug: current,
+        })),
+        Some((None, id, true)) => Ok(Json(CollectionBySlug::RedirectId { redirect_id: id })),
+        _ => Err(AppError::NotFound),
+    }
 }
 
 /// Коллекции пользователя, новые сверху. Владелец видит и свои приватные. `?contains={slug}` —

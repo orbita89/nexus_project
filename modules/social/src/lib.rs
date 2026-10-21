@@ -25,6 +25,7 @@ pub mod reactions;
 mod refs;
 pub mod reviews;
 pub mod rooms;
+mod slug;
 pub mod threads;
 mod validate;
 pub mod votes;
@@ -66,6 +67,7 @@ pub fn router() -> OpenApiRouter<AppState> {
             collections::delete
         ))
         .routes(routes!(collections::list_featured))
+        .routes(routes!(collections::get_by_slug))
         .routes(routes!(collections::list_for_user))
         .routes(routes!(collections::list_for_entity))
         .routes(routes!(collections::reorder))

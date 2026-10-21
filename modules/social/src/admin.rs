@@ -1,5 +1,5 @@
 //! Модерация: admin удаляет любую рецензию, комментарий к ней, коллекцию, тему и сообщение,
-//! помечает коллекции особыми,
+//! помечает коллекции особыми (с читаемым адресом),
 //! закрывает темы.
 
 use crate::collections;
@@ -8,12 +8,14 @@ use crate::events;
 use crate::models::{Collection, FeatureCollection};
 use crate::posts;
 use crate::refs;
+use crate::slug;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path};
 use shared::{AdminUser, AppError, AppResult, AppState};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 /// Удалить любую рецензию.
@@ -95,19 +97,33 @@ pub async fn delete_collection(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Пометить публичную коллекцию особой или поменять её порядок среди особых.
+/// Занят ли slug другой коллекцией: текущий адрес или бывший (история, в том числе удалённых).
+async fn slug_taken(tx: &mut PgConnection, slug: &str, id: Uuid) -> AppResult<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM collections WHERE slug = $1 AND id <> $2)
+             OR EXISTS (SELECT 1 FROM collection_slug_history
+                        WHERE slug = $1 AND collection_id IS DISTINCT FROM $2)",
+    )
+    .bind(slug)
+    .bind(id)
+    .fetch_one(tx)
+    .await?)
+}
+
+/// Пометить публичную коллекцию особой, поменять её порядок или адрес.
 #[utoipa::path(
     put, operation_id = "admin_feature_collection", path = "/admin/collections/{id}/featured",
     tag = "social-admin",
     security(("bearer" = [])),
     params(("id" = Uuid, Path, description = "id коллекции")),
-    request_body(content = FeatureCollection, description = "Можно не передавать тело: в конец"),
+    request_body(content = FeatureCollection, description = "Можно не передавать тело: в конец, slug — транслит названия"),
     responses(
         (status = 200, description = "Особая", body = Collection),
-        (status = 400, description = "Коллекция приватная", body = ErrorBody),
+        (status = 400, description = "Коллекция приватная; неверный slug (формат, UUID, служебное слово)", body = ErrorBody),
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Нужна роль admin", body = ErrorBody),
         (status = 404, description = "Не найдена", body = ErrorBody),
+        (status = 409, description = "slug занят другой коллекцией (сейчас или раньше)", body = ErrorBody),
     )
 )]
 pub async fn feature_collection(
@@ -117,28 +133,84 @@ pub async fn feature_collection(
     body: Option<JsonBody<FeatureCollection>>,
 ) -> AppResult<Json<Collection>> {
     let req = body.map(|JsonBody(req)| req).unwrap_or_default();
-    let updated = sqlx::query(
-        "UPDATE collections SET featured_position = COALESCE($2, featured_position,
-             (SELECT COALESCE(max(featured_position) + 1, 0) FROM collections
-              WHERE featured_position IS NOT NULL))
+    let wanted = req.slug.as_deref().map(slug::validate).transpose()?;
+
+    let mut tx = state.db.begin().await?;
+    // Выбор и запись slug — по очереди: две коллекции не займут один адрес.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('collection-slug', 0))")
+        .execute(&mut *tx)
+        .await?;
+    let found: Option<(bool, Option<String>, String)> =
+        sqlx::query_as("SELECT is_public, slug, title FROM collections WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let (is_public, current, title) = found.ok_or(AppError::NotFound)?;
+    if !is_public {
+        return Err(AppError::BadRequest(
+            "featured collection must be public".into(),
+        ));
+    }
+    let new_slug = match (wanted, current.clone()) {
+        (Some(wanted), _) => {
+            if slug_taken(&mut tx, &wanted, id).await? {
+                return Err(AppError::Conflict(format!(
+                    "slug {wanted} is already taken"
+                )));
+            }
+            wanted
+        }
+        (None, Some(current)) => current,
+        (None, None) => {
+            let base = slug::from_title(&title);
+            let mut candidate = base.clone();
+            let mut n = 2;
+            while slug_taken(&mut tx, &candidate, id).await? {
+                candidate = format!("{base}-{n}");
+                n += 1;
+            }
+            candidate
+        }
+    };
+    if let Some(old) = current.filter(|old| *old != new_slug) {
+        sqlx::query(
+            "INSERT INTO collection_slug_history (slug, collection_id) VALUES ($1, $2)
+             ON CONFLICT (slug) DO UPDATE SET collection_id = EXCLUDED.collection_id",
+        )
+        .bind(&old)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // Свой бывший адрес можно вернуть: из истории он уходит.
+    sqlx::query("DELETE FROM collection_slug_history WHERE slug = $1 AND collection_id = $2")
+        .bind(&new_slug)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE collections SET slug = $3,
+             featured_position = COALESCE($2, featured_position,
+                 (SELECT COALESCE(max(featured_position) + 1, 0) FROM collections
+                  WHERE featured_position IS NOT NULL))
          WHERE id = $1",
     )
     .bind(id)
     .bind(req.position)
-    .execute(&state.db)
+    .bind(&new_slug)
+    .execute(&mut *tx)
     .await
     .map_err(collections::featured_must_be_public)?;
-    if updated.rows_affected() == 0 {
-        return Err(AppError::NotFound);
-    }
-    tracing::info!(admin_id = %admin.id, collection_id = %id, "collection featured by admin");
+    tx.commit().await?;
+    tracing::info!(admin_id = %admin.id, collection_id = %id, slug = %new_slug, "collection featured by admin");
     let row = collections::load(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     Ok(Json(refs::collection(&state, row).await?))
 }
 
-/// Снять с коллекции отметку «особая».
+/// Снять с коллекции отметку «особая». slug уходит в историю: старый адрес ведёт на
+/// `/collections/{id}`, другой коллекции он не достанется.
 #[utoipa::path(
     delete, operation_id = "admin_unfeature_collection", path = "/admin/collections/{id}/featured",
     tag = "social-admin",
@@ -156,13 +228,28 @@ pub async fn unfeature_collection(
     AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let updated = sqlx::query("UPDATE collections SET featured_position = NULL WHERE id = $1")
+    let mut tx = state.db.begin().await?;
+    let current: Option<Option<String>> =
+        sqlx::query_scalar("SELECT slug FROM collections WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let current = current.ok_or(AppError::NotFound)?;
+    if let Some(old) = &current {
+        sqlx::query(
+            "INSERT INTO collection_slug_history (slug, collection_id) VALUES ($1, $2)
+             ON CONFLICT (slug) DO UPDATE SET collection_id = EXCLUDED.collection_id",
+        )
+        .bind(old)
         .bind(id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
-    if updated.rows_affected() == 0 {
-        return Err(AppError::NotFound);
     }
+    sqlx::query("UPDATE collections SET featured_position = NULL, slug = NULL WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     tracing::info!(admin_id = %admin.id, collection_id = %id, "collection unfeatured by admin");
     Ok(StatusCode::NO_CONTENT)
 }
