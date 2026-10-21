@@ -294,6 +294,18 @@ pub struct Collection {
     /// фронтенд игнорирует. У обычной — `null`.
     #[schema(example = "halloween")]
     pub theme: Option<String>,
+    /// Где обои: `header` — только в шапке, `page` — фоном всей страницы.
+    #[schema(example = "header")]
+    pub wallpaper_mode: String,
+    /// Затемнение обоев, % (0–100); `null` — по теме на фронтенде.
+    pub wallpaper_dim: Option<i16>,
+    /// Размытие обоев, px (0–20).
+    pub wallpaper_blur: i16,
+    /// Декоративные эффекты темы (капли крови, снег…).
+    pub effects: bool,
+    /// Свой акцентный цвет `#rrggbb` поверх цвета темы; `null` — цвет темы.
+    #[schema(example = "#b3001b")]
+    pub accent_color: Option<String>,
     /// Сколько произведений.
     #[schema(example = 7)]
     pub items_count: i64,
@@ -318,6 +330,11 @@ pub struct CollectionRow {
     pub wallpaper_url: Option<String>,
     pub cover_url: Option<String>,
     pub theme: Option<String>,
+    pub wallpaper_mode: String,
+    pub wallpaper_dim: Option<i16>,
+    pub wallpaper_blur: i16,
+    pub effects: bool,
+    pub accent_color: Option<String>,
     pub items_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -326,7 +343,8 @@ pub struct CollectionRow {
 /// Колонки [`CollectionRow`] для `FROM collections c`.
 pub const COLLECTION_COLUMNS: &str =
     "c.id, c.user_id, c.title, c.description, c.is_public, c.featured_position, c.slug,
-    c.wallpaper_url, c.cover_url, c.theme,
+    c.wallpaper_url, c.cover_url, c.theme, c.wallpaper_mode, c.wallpaper_dim, c.wallpaper_blur,
+    c.effects, c.accent_color,
     (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id) AS items_count,
     c.created_at, c.updated_at";
 
@@ -353,6 +371,27 @@ pub struct FeatureCollection {
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<String>, example = "halloween")]
     pub theme: Option<Option<String>>,
+    /// `header` или `page`; `null` — `header`. Не передано — не меняется.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>, example = "page")]
+    pub wallpaper_mode: Option<Option<serde_json::Value>>,
+    /// Целое 0–100; `null` — по теме. Не передано — не меняется.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<i32>, example = 60)]
+    pub wallpaper_dim: Option<Option<serde_json::Value>>,
+    /// Целое 0–20; `null` — 0. Не передано — не меняется.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<i32>, example = 4)]
+    pub wallpaper_blur: Option<Option<serde_json::Value>>,
+    /// Эффекты темы; `null` — `true`. Не передано — не меняется.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<bool>, example = true)]
+    pub effects: Option<Option<serde_json::Value>>,
+    /// `#rrggbb` (регистр не важен, хранится в нижнем); `null` — цвет темы. Не передано — не
+    /// меняется.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>, example = "#b3001b")]
+    pub accent_color: Option<Option<serde_json::Value>>,
 }
 
 /// Ответ `GET /collections/by-slug/{slug}`: коллекция или куда перенаправить (301 на фронтенде).

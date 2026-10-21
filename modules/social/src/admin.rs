@@ -12,6 +12,7 @@ use crate::slug;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+use serde_json::Value;
 use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path};
 use shared::{AdminUser, AppError, AppResult, AppState};
@@ -123,7 +124,7 @@ async fn slug_taken(tx: &mut PgConnection, slug: &str, id: Uuid) -> AppResult<bo
     request_body(content = FeatureCollection, description = "Можно не передавать тело: в конец, slug — транслит названия"),
     responses(
         (status = 200, description = "Особая", body = Collection),
-        (status = 400, description = "Коллекция приватная (`collection_private`); неверные поля (`validation` с `field`): slug — формат, UUID, служебное слово; `wallpaper_url`, `cover_url` — не https-URL или длиннее 2048; `theme` — не `^[a-z0-9-]{1,32}$`", body = ErrorBody),
+        (status = 400, description = "Коллекция приватная (`collection_private`); неверные поля (`validation` с `field`): slug — формат, UUID, служебное слово; `wallpaper_url`, `cover_url` — не https-URL или длиннее 2048; `theme` — не `^[a-z0-9-]{1,32}$`; `wallpaper_mode` — не `header`/`page`; `wallpaper_dim` — не целое 0–100; `wallpaper_blur` — не целое 0–20; `effects` — не boolean; `accent_color` — не `#rrggbb`", body = ErrorBody),
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Нужна роль admin", body = ErrorBody),
         (status = 404, description = "Не найдена", body = ErrorBody),
@@ -152,6 +153,18 @@ pub async fn feature_collection(
         .map(|value| style_url("cover_url", value))
         .transpose()?;
     let theme = req.theme.map(style_theme).transpose()?;
+    // Оформление страницы: `null` — значение по умолчанию (у `wallpaper_dim`, `accent_color` — NULL).
+    let mode = req.wallpaper_mode.map(style_mode).transpose()?;
+    let dim = req
+        .wallpaper_dim
+        .map(|value| style_int("wallpaper_dim", value, 100))
+        .transpose()?;
+    let blur = req
+        .wallpaper_blur
+        .map(|value| style_int("wallpaper_blur", value, 20).map(|blur| blur.unwrap_or(0)))
+        .transpose()?;
+    let effects = req.effects.map(style_effects).transpose()?;
+    let accent = req.accent_color.map(style_accent).transpose()?;
 
     let mut tx = state.db.begin().await?;
     // Выбор и запись slug — по очереди: две коллекции не займут один адрес.
@@ -215,7 +228,12 @@ pub async fn feature_collection(
                   WHERE featured_position IS NOT NULL)),
              wallpaper_url = CASE WHEN $4 THEN $5 ELSE wallpaper_url END,
              cover_url = CASE WHEN $6 THEN $7 ELSE cover_url END,
-             theme = CASE WHEN $8 THEN $9 ELSE theme END
+             theme = CASE WHEN $8 THEN $9 ELSE theme END,
+             wallpaper_mode = COALESCE($10, wallpaper_mode),
+             wallpaper_dim = CASE WHEN $11 THEN $12 ELSE wallpaper_dim END,
+             wallpaper_blur = COALESCE($13, wallpaper_blur),
+             effects = COALESCE($14, effects),
+             accent_color = CASE WHEN $15 THEN $16 ELSE accent_color END
          WHERE id = $1",
     )
     .bind(id)
@@ -227,6 +245,13 @@ pub async fn feature_collection(
     .bind(cover.flatten())
     .bind(theme.is_some())
     .bind(theme.flatten())
+    .bind(mode)
+    .bind(dim.is_some())
+    .bind(dim.flatten())
+    .bind(blur)
+    .bind(effects)
+    .bind(accent.is_some())
+    .bind(accent.flatten())
     .execute(&mut *tx)
     .await
     .map_err(collections::featured_must_be_public)?;
@@ -276,7 +301,9 @@ pub async fn unfeature_collection(
     }
     sqlx::query(
         "UPDATE collections SET featured_position = NULL, slug = NULL,
-             wallpaper_url = NULL, cover_url = NULL, theme = NULL
+             wallpaper_url = NULL, cover_url = NULL, theme = NULL,
+             wallpaper_mode = 'header', wallpaper_dim = NULL, wallpaper_blur = 0,
+             effects = true, accent_color = NULL
          WHERE id = $1",
     )
     .bind(id)
@@ -305,6 +332,62 @@ fn style_url(field: &str, value: Option<String>) -> AppResult<Option<String>> {
         }
     }
     Ok(value)
+}
+
+fn invalid(field: &str, message: &str) -> AppError {
+    AppError::Invalid {
+        field: field.into(),
+        message: format!("{field} {message}"),
+    }
+}
+
+/// Где обои: `header` или `page`; `null` — `header`.
+fn style_mode(value: Option<Value>) -> AppResult<String> {
+    match value {
+        None => Ok("header".into()),
+        Some(Value::String(mode)) if mode == "header" || mode == "page" => Ok(mode),
+        Some(_) => Err(invalid("wallpaper_mode", "must be \"header\" or \"page\"")),
+    }
+}
+
+/// Целое 0..=max; `null` — `None`.
+fn style_int(field: &str, value: Option<Value>, max: i16) -> AppResult<Option<i16>> {
+    match value {
+        None => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .filter(|n| (0..=i64::from(max)).contains(n))
+            .map(|n| Some(n as i16))
+            .ok_or_else(|| invalid(field, &format!("must be an integer 0-{max}"))),
+    }
+}
+
+/// Эффекты темы: boolean; `null` — `true`.
+fn style_effects(value: Option<Value>) -> AppResult<bool> {
+    match value {
+        None => Ok(true),
+        Some(Value::Bool(on)) => Ok(on),
+        Some(_) => Err(invalid("effects", "must be a boolean")),
+    }
+}
+
+/// Акцентный цвет `#rrggbb` (в нижнем регистре); `null` — убрать.
+fn style_accent(value: Option<Value>) -> AppResult<Option<String>> {
+    match value {
+        None => Ok(None),
+        Some(Value::String(color)) => {
+            let color = color.trim().to_ascii_lowercase();
+            let ok = color.len() == 7
+                && color.starts_with('#')
+                && color[1..].bytes().all(|b| b.is_ascii_hexdigit());
+            if ok {
+                Ok(Some(color))
+            } else {
+                Err(invalid("accent_color", "must be #rrggbb"))
+            }
+        }
+        Some(_) => Err(invalid("accent_color", "must be #rrggbb")),
+    }
 }
 
 /// Тема оформления: `^[a-z0-9-]{1,32}$`; `null` — убрать.

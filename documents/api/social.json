@@ -336,7 +336,7 @@
             }
           },
           "400": {
-            "description": "Коллекция приватная (`collection_private`); неверные поля (`validation` с `field`): slug — формат, UUID, служебное слово; `wallpaper_url`, `cover_url` — не https-URL или длиннее 2048; `theme` — не `^[a-z0-9-]{1,32}$`",
+            "description": "Коллекция приватная (`collection_private`); неверные поля (`validation` с `field`): slug — формат, UUID, служебное слово; `wallpaper_url`, `cover_url` — не https-URL или длиннее 2048; `theme` — не `^[a-z0-9-]{1,32}$`; `wallpaper_mode` — не `header`/`page`; `wallpaper_dim` — не целое 0–100; `wallpaper_blur` — не целое 0–20; `effects` — не boolean; `accent_color` — не `#rrggbb`",
             "content": {
               "application/json": {
                 "schema": {
@@ -5904,12 +5904,23 @@
           "title",
           "is_public",
           "is_featured",
+          "wallpaper_mode",
+          "wallpaper_blur",
+          "effects",
           "items_count",
           "preview",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "accent_color": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Свой акцентный цвет `#rrggbb` поверх цвета темы; `null` — цвет темы.",
+            "example": "#b3001b"
+          },
           "contains": {
             "type": [
               "boolean",
@@ -5933,6 +5944,10 @@
               "string",
               "null"
             ]
+          },
+          "effects": {
+            "type": "boolean",
+            "description": "Декоративные эффекты темы (капли крови, снег…)."
           },
           "featured_position": {
             "type": [
@@ -5993,6 +6008,24 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "wallpaper_blur": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Размытие обоев, px (0–20)."
+          },
+          "wallpaper_dim": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Затемнение обоев, % (0–100); `null` — по теме на фронтенде."
+          },
+          "wallpaper_mode": {
+            "type": "string",
+            "description": "Где обои: `header` — только в шапке, `page` — фоном всей страницы.",
+            "example": "header"
           },
           "wallpaper_url": {
             "type": [
@@ -6373,12 +6406,28 @@
         "type": "object",
         "description": "Пометить коллекцию особой.",
         "properties": {
+          "accent_color": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`#rrggbb` (регистр не важен, хранится в нижнем); `null` — цвет темы. Не передано — не\nменяется.",
+            "example": "#b3001b"
+          },
           "cover_url": {
             "type": [
               "string",
               "null"
             ],
             "description": "Обложка карточки: https-URL до 2048 символов. Не передано — не меняется, `null` — убрать."
+          },
+          "effects": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Эффекты темы; `null` — `true`. Не передано — не меняется.",
+            "example": true
           },
           "position": {
             "type": [
@@ -6404,6 +6453,32 @@
             ],
             "description": "Тема: `^[a-z0-9-]{1,32}$`. Не передано — не меняется, `null` — убрать.",
             "example": "halloween"
+          },
+          "wallpaper_blur": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Целое 0–20; `null` — 0. Не передано — не меняется.",
+            "example": 4
+          },
+          "wallpaper_dim": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Целое 0–100; `null` — по теме. Не передано — не меняется.",
+            "example": 60
+          },
+          "wallpaper_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`header` или `page`; `null` — `header`. Не передано — не меняется.",
+            "example": "page"
           },
           "wallpaper_url": {
             "type": [
@@ -6663,12 +6738,23 @@
                 "title",
                 "is_public",
                 "is_featured",
+                "wallpaper_mode",
+                "wallpaper_blur",
+                "effects",
                 "items_count",
                 "preview",
                 "created_at",
                 "updated_at"
               ],
               "properties": {
+                "accent_color": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Свой акцентный цвет `#rrggbb` поверх цвета темы; `null` — цвет темы.",
+                  "example": "#b3001b"
+                },
                 "contains": {
                   "type": [
                     "boolean",
@@ -6692,6 +6778,10 @@
                     "string",
                     "null"
                   ]
+                },
+                "effects": {
+                  "type": "boolean",
+                  "description": "Декоративные эффекты темы (капли крови, снег…)."
                 },
                 "featured_position": {
                   "type": [
@@ -6752,6 +6842,24 @@
                 "updated_at": {
                   "type": "string",
                   "format": "date-time"
+                },
+                "wallpaper_blur": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "Размытие обоев, px (0–20)."
+                },
+                "wallpaper_dim": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "Затемнение обоев, % (0–100); `null` — по теме на фронтенде."
+                },
+                "wallpaper_mode": {
+                  "type": "string",
+                  "description": "Где обои: `header` — только в шапке, `page` — фоном всей страницы.",
+                  "example": "header"
                 },
                 "wallpaper_url": {
                   "type": [

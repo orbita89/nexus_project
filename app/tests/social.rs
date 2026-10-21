@@ -2697,6 +2697,107 @@ async fn featured_collection_style_overviews_and_admin_items(pool: PgPool) {
     assert_eq!(got["theme"], Value::Null);
 }
 
+/// Оформление страницы особой коллекции: значения по умолчанию, установка, частичное изменение,
+/// `null` — значение по умолчанию, ошибки с `field` (в том числе неверный тип), сброс при снятии
+/// из особых.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn featured_collection_page_style(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let alice = ctx.user("alice").await;
+    let top = ctx.collection(&alice, json!({ "title": "Ужасы" })).await;
+    let featured = format!("/admin/collections/{top}/featured");
+    let defaults = |got: &Value| {
+        assert_eq!(got["wallpaper_mode"], "header");
+        assert_eq!(got["wallpaper_dim"], Value::Null);
+        assert_eq!(got["wallpaper_blur"], 0);
+        assert_eq!(got["effects"], true);
+        assert_eq!(got["accent_color"], Value::Null);
+    };
+    defaults(&ctx.get_ok(&format!("/collections/{top}"), None).await);
+
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &featured,
+            Some(json!({
+                "theme": "horror",
+                "wallpaper_mode": "page",
+                "wallpaper_dim": 60,
+                "wallpaper_blur": 4,
+                "effects": false,
+                "accent_color": "#B3001B",
+            })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["wallpaper_mode"], "page");
+    assert_eq!(got["wallpaper_dim"], 60);
+    assert_eq!(got["wallpaper_blur"], 4);
+    assert_eq!(got["effects"], false);
+    assert_eq!(got["accent_color"], "#b3001b");
+
+    // Не передано — не меняется; null — по умолчанию.
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &featured,
+            Some(json!({ "wallpaper_dim": null, "effects": null, "wallpaper_blur": 20 })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["wallpaper_dim"], Value::Null);
+    assert_eq!(got["effects"], true);
+    assert_eq!(got["wallpaper_blur"], 20);
+    assert_eq!(got["wallpaper_mode"], "page");
+    assert_eq!(got["accent_color"], "#b3001b");
+    let list = ctx.get_ok("/collections/featured", None).await;
+    assert_eq!(list[0]["wallpaper_mode"], "page");
+
+    for (body, field) in [
+        (json!({ "wallpaper_mode": "full" }), "wallpaper_mode"),
+        (json!({ "wallpaper_mode": 1 }), "wallpaper_mode"),
+        (json!({ "wallpaper_dim": 101 }), "wallpaper_dim"),
+        (json!({ "wallpaper_dim": 50.5 }), "wallpaper_dim"),
+        (json!({ "wallpaper_dim": "50" }), "wallpaper_dim"),
+        (json!({ "wallpaper_blur": -1 }), "wallpaper_blur"),
+        (json!({ "wallpaper_blur": 21 }), "wallpaper_blur"),
+        (json!({ "effects": "yes" }), "effects"),
+        (json!({ "accent_color": "red" }), "accent_color"),
+        (json!({ "accent_color": "#b3001" }), "accent_color"),
+        (json!({ "accent_color": "#gg0000" }), "accent_color"),
+    ] {
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::PUT,
+                &featured,
+                Some(body),
+                Some(&admin),
+            )
+            .await;
+        assert_eq!(error["code"], "validation");
+        assert_eq!(error["field"], field);
+    }
+    let got = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(
+        got["wallpaper_blur"], 20,
+        "rejected request changes nothing"
+    );
+
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &featured,
+        None,
+        Some(&admin),
+    )
+    .await;
+    defaults(&ctx.get_ok(&format!("/collections/{top}"), None).await);
+}
+
 fn pluck_items(detail: &Value) -> Vec<&str> {
     detail["items"]
         .as_array()
