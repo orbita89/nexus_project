@@ -109,7 +109,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(posts::update, posts::delete))
         .routes(routes!(admin::delete_review))
         .routes(routes!(admin::delete_review_comment))
-        .routes(routes!(admin::delete_collection))
+        .routes(routes!(admin::update_collection, admin::delete_collection))
         .routes(routes!(
             admin::feature_collection,
             admin::unfeature_collection

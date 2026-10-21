@@ -2798,6 +2798,180 @@ async fn featured_collection_page_style(pool: PgPool) {
     defaults(&ctx.get_ok(&format!("/collections/{top}"), None).await);
 }
 
+/// Админ меняет название и описание чужой коллекции (не admin — 403, нет — 404, неверное поле —
+/// 400 с `field`, `is_public` — 400); режим шапки особой: по умолчанию `styled`, установка,
+/// `null` — `styled`, неверное значение — 400, сброс при снятии из особых.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn admin_edits_collection_and_header_mode(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let alice = ctx.user("alice").await;
+    let top = ctx
+        .collection(&alice, json!({ "title": "Дюна", "description": "Старое" }))
+        .await;
+    let path = format!("/admin/collections/{top}");
+
+    let body = json!({ "title": "Дюна во всех видах", "description": "Книги и экранизации" });
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::PATCH,
+        &path,
+        Some(body.clone()),
+        Some(&alice),
+    )
+    .await;
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PATCH,
+            &path,
+            Some(body),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["title"], "Дюна во всех видах");
+    assert_eq!(got["description"], "Книги и экранизации");
+    assert_eq!(got["is_public"], true);
+    // Не передано — не меняется; null — очищает.
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PATCH,
+            &path,
+            Some(json!({ "description": null })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["title"], "Дюна во всех видах");
+    assert_eq!(got["description"], Value::Null);
+    for (body, field) in [
+        (json!({ "title": "  " }), "title"),
+        (json!({ "description": "x".repeat(2001) }), "description"),
+    ] {
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::PATCH,
+                &path,
+                Some(body),
+                Some(&admin),
+            )
+            .await;
+        assert_eq!(error["code"], "validation");
+        assert_eq!(error["field"], field);
+    }
+    ctx.expect(
+        StatusCode::BAD_REQUEST,
+        Method::PATCH,
+        &path,
+        Some(json!({ "is_public": false })),
+        Some(&admin),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::PATCH,
+        "/admin/collections/00000000-0000-0000-0000-000000000000",
+        Some(json!({ "title": "x" })),
+        Some(&admin),
+    )
+    .await;
+
+    let featured = format!("{path}/featured");
+    let got = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(got["header_mode"], "styled");
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &featured,
+            Some(json!({ "header_mode": "plain" })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["header_mode"], "plain");
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &featured,
+            Some(json!({ "theme": "horror" })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["header_mode"], "plain", "absent field keeps the value");
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &featured,
+            Some(json!({ "header_mode": "none" })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["header_mode"], "none");
+    let list = ctx.get_ok("/collections/featured", None).await;
+    assert_eq!(list[0]["header_mode"], "none");
+    for bad in [json!("hero"), json!(1)] {
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::PUT,
+                &featured,
+                Some(json!({ "header_mode": bad })),
+                Some(&admin),
+            )
+            .await;
+        assert_eq!(error["field"], "header_mode");
+    }
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &featured,
+            Some(json!({ "header_mode": null })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["header_mode"], "styled");
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &featured,
+        Some(json!({ "header_mode": "none" })),
+        Some(&admin),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &featured,
+        None,
+        Some(&admin),
+    )
+    .await;
+    let got = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(got["header_mode"], "styled");
+
+    // Админское удаление на том же пути, что и PATCH.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &path,
+        None,
+        Some(&admin),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::PATCH,
+        &path,
+        Some(json!({ "title": "x" })),
+        Some(&admin),
+    )
+    .await;
+}
+
 fn pluck_items(detail: &Value) -> Vec<&str> {
     detail["items"]
         .as_array()

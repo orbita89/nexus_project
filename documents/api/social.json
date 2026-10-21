@@ -292,6 +292,92 @@
             "bearer": []
           }
         ]
+      },
+      "patch": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Изменить название и описание любой коллекции (например, чужой особой). Видимость здесь не\nменяется: `is_public` в теле — 400.",
+        "operationId": "admin_update_collection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminUpdateCollection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Collection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля (`validation` с `field`: `title` 1–200, `description` до 2000) или лишнее поле (`is_public`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/social/admin/collections/{id}/featured": {
@@ -336,7 +422,7 @@
             }
           },
           "400": {
-            "description": "Коллекция приватная (`collection_private`); неверные поля (`validation` с `field`): slug — формат, UUID, служебное слово; `wallpaper_url`, `cover_url` — не https-URL или длиннее 2048; `theme` — не `^[a-z0-9-]{1,32}$`; `wallpaper_mode` — не `header`/`page`; `wallpaper_dim` — не целое 0–100; `wallpaper_blur` — не целое 0–20; `effects` — не boolean; `accent_color` — не `#rrggbb`",
+            "description": "Коллекция приватная (`collection_private`); неверные поля (`validation` с `field`): slug — формат, UUID, служебное слово; `wallpaper_url`, `cover_url` — не https-URL или длиннее 2048; `theme` — не `^[a-z0-9-]{1,32}$`; `wallpaper_mode` — не `header`/`page`; `wallpaper_dim` — не целое 0–100; `wallpaper_blur` — не целое 0–20; `effects` — не boolean; `accent_color` — не `#rrggbb`; `header_mode` — не `styled`/`plain`/`none`",
             "content": {
               "application/json": {
                 "schema": {
@@ -5614,6 +5700,27 @@
   },
   "components": {
     "schemas": {
+      "AdminUpdateCollection": {
+        "type": "object",
+        "description": "Админ меняет название и описание любой коллекции (`is_public` здесь не меняется — 400).",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "До 2000 символов. Не передано — не меняется, `null` — очищается."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "1–200 символов. Не передано — не меняется."
+          }
+        },
+        "additionalProperties": false
+      },
       "ChatHistory": {
         "type": "object",
         "description": "Страница истории: старые сверху, последнее — самое новое.",
@@ -5907,6 +6014,7 @@
           "wallpaper_mode",
           "wallpaper_blur",
           "effects",
+          "header_mode",
           "items_count",
           "preview",
           "created_at",
@@ -5956,6 +6064,11 @@
             ],
             "format": "int32",
             "description": "Порядок среди особых; у обычной — `null`."
+          },
+          "header_mode": {
+            "type": "string",
+            "description": "Шапка страницы особой: `styled` — в теме и с обоями, `plain` — нейтральная, `none` — без\nшапки (заголовок над списком).",
+            "example": "styled"
           },
           "id": {
             "type": "string",
@@ -6429,6 +6542,14 @@
             "description": "Эффекты темы; `null` — `true`. Не передано — не меняется.",
             "example": true
           },
+          "header_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`styled`, `plain` или `none`; `null` — `styled`. Не передано — не меняется.",
+            "example": "plain"
+          },
           "position": {
             "type": [
               "integer",
@@ -6741,6 +6862,7 @@
                 "wallpaper_mode",
                 "wallpaper_blur",
                 "effects",
+                "header_mode",
                 "items_count",
                 "preview",
                 "created_at",
@@ -6790,6 +6912,11 @@
                   ],
                   "format": "int32",
                   "description": "Порядок среди особых; у обычной — `null`."
+                },
+                "header_mode": {
+                  "type": "string",
+                  "description": "Шапка страницы особой: `styled` — в теме и с обоями, `plain` — нейтральная, `none` — без\nшапки (заголовок над списком).",
+                  "example": "styled"
                 },
                 "id": {
                   "type": "string",

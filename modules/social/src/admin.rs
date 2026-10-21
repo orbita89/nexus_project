@@ -1,14 +1,17 @@
 //! Модерация: admin удаляет любую рецензию, комментарий к ней, коллекцию, тему и сообщение,
-//! помечает коллекции особыми (с читаемым адресом),
+//! помечает коллекции особыми (с читаемым адресом), меняет название и описание любой коллекции,
 //! закрывает темы.
 
 use crate::collections::{self, Editor};
 use crate::comments;
 use crate::events;
-use crate::models::{Collection, CollectionItem, FeatureCollection, PutCollectionItem};
+use crate::models::{
+    AdminUpdateCollection, Collection, CollectionItem, FeatureCollection, PutCollectionItem,
+};
 use crate::posts;
 use crate::refs;
 use crate::slug;
+use crate::validate::{self, MAX_COLLECTION_DESCRIPTION, MAX_COLLECTION_TITLE};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
@@ -124,7 +127,7 @@ async fn slug_taken(tx: &mut PgConnection, slug: &str, id: Uuid) -> AppResult<bo
     request_body(content = FeatureCollection, description = "Можно не передавать тело: в конец, slug — транслит названия"),
     responses(
         (status = 200, description = "Особая", body = Collection),
-        (status = 400, description = "Коллекция приватная (`collection_private`); неверные поля (`validation` с `field`): slug — формат, UUID, служебное слово; `wallpaper_url`, `cover_url` — не https-URL или длиннее 2048; `theme` — не `^[a-z0-9-]{1,32}$`; `wallpaper_mode` — не `header`/`page`; `wallpaper_dim` — не целое 0–100; `wallpaper_blur` — не целое 0–20; `effects` — не boolean; `accent_color` — не `#rrggbb`", body = ErrorBody),
+        (status = 400, description = "Коллекция приватная (`collection_private`); неверные поля (`validation` с `field`): slug — формат, UUID, служебное слово; `wallpaper_url`, `cover_url` — не https-URL или длиннее 2048; `theme` — не `^[a-z0-9-]{1,32}$`; `wallpaper_mode` — не `header`/`page`; `wallpaper_dim` — не целое 0–100; `wallpaper_blur` — не целое 0–20; `effects` — не boolean; `accent_color` — не `#rrggbb`; `header_mode` — не `styled`/`plain`/`none`", body = ErrorBody),
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Нужна роль admin", body = ErrorBody),
         (status = 404, description = "Не найдена", body = ErrorBody),
@@ -165,6 +168,7 @@ pub async fn feature_collection(
         .transpose()?;
     let effects = req.effects.map(style_effects).transpose()?;
     let accent = req.accent_color.map(style_accent).transpose()?;
+    let header = req.header_mode.map(style_header).transpose()?;
 
     let mut tx = state.db.begin().await?;
     // Выбор и запись slug — по очереди: две коллекции не займут один адрес.
@@ -233,7 +237,8 @@ pub async fn feature_collection(
              wallpaper_dim = CASE WHEN $11 THEN $12 ELSE wallpaper_dim END,
              wallpaper_blur = COALESCE($13, wallpaper_blur),
              effects = COALESCE($14, effects),
-             accent_color = CASE WHEN $15 THEN $16 ELSE accent_color END
+             accent_color = CASE WHEN $15 THEN $16 ELSE accent_color END,
+             header_mode = COALESCE($17, header_mode)
          WHERE id = $1",
     )
     .bind(id)
@@ -252,6 +257,7 @@ pub async fn feature_collection(
     .bind(effects)
     .bind(accent.is_some())
     .bind(accent.flatten())
+    .bind(header)
     .execute(&mut *tx)
     .await
     .map_err(collections::featured_must_be_public)?;
@@ -303,7 +309,7 @@ pub async fn unfeature_collection(
         "UPDATE collections SET featured_position = NULL, slug = NULL,
              wallpaper_url = NULL, cover_url = NULL, theme = NULL,
              wallpaper_mode = 'header', wallpaper_dim = NULL, wallpaper_blur = 0,
-             effects = true, accent_color = NULL
+             effects = true, accent_color = NULL, header_mode = 'styled'
          WHERE id = $1",
     )
     .bind(id)
@@ -312,6 +318,60 @@ pub async fn unfeature_collection(
     tx.commit().await?;
     tracing::info!(admin_id = %admin.id, collection_id = %id, "collection unfeatured by admin");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Изменить название и описание любой коллекции (например, чужой особой). Видимость здесь не
+/// меняется: `is_public` в теле — 400.
+#[utoipa::path(
+    patch, operation_id = "admin_update_collection", path = "/admin/collections/{id}",
+    tag = "social-admin",
+    security(("bearer" = [])),
+    params(("id" = Uuid, Path, description = "id коллекции")),
+    request_body = AdminUpdateCollection,
+    responses(
+        (status = 200, description = "Изменена", body = Collection),
+        (status = 400, description = "Неверные поля (`validation` с `field`: `title` 1–200, `description` до 2000) или лишнее поле (`is_public`)", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Не найдена", body = ErrorBody),
+    )
+)]
+pub async fn update_collection(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<Uuid>,
+    JsonBody(req): JsonBody<AdminUpdateCollection>,
+) -> AppResult<Json<Collection>> {
+    let title = req
+        .title
+        .map(|title| validate::required("title", &title, MAX_COLLECTION_TITLE))
+        .transpose()
+        .map_err(|e| e.on_field("title"))?;
+    let description = req
+        .description
+        .map(|value| validate::optional("description", value, MAX_COLLECTION_DESCRIPTION))
+        .transpose()
+        .map_err(|e| e.on_field("description"))?;
+    let updated = sqlx::query(
+        "UPDATE collections SET
+            title = COALESCE($2, title),
+            description = CASE WHEN $3 THEN $4 ELSE description END
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(title)
+    .bind(description.is_some())
+    .bind(description.flatten())
+    .execute(&state.db)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    tracing::info!(admin_id = %admin.id, collection_id = %id, "collection updated by admin");
+    let row = collections::load(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(refs::collection(&state, row).await?))
 }
 
 /// URL оформления (обои, обложка): https, до 2048 символов; `null` — убрать.
@@ -347,6 +407,20 @@ fn style_mode(value: Option<Value>) -> AppResult<String> {
         None => Ok("header".into()),
         Some(Value::String(mode)) if mode == "header" || mode == "page" => Ok(mode),
         Some(_) => Err(invalid("wallpaper_mode", "must be \"header\" or \"page\"")),
+    }
+}
+
+/// Режим шапки: `styled`, `plain` или `none`; `null` — `styled`.
+fn style_header(value: Option<Value>) -> AppResult<String> {
+    match value {
+        None => Ok("styled".into()),
+        Some(Value::String(mode)) if ["styled", "plain", "none"].contains(&mode.as_str()) => {
+            Ok(mode)
+        }
+        Some(_) => Err(invalid(
+            "header_mode",
+            "must be \"styled\", \"plain\" or \"none\"",
+        )),
     }
 }
 

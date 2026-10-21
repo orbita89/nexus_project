@@ -306,6 +306,10 @@ pub struct Collection {
     /// Свой акцентный цвет `#rrggbb` поверх цвета темы; `null` — цвет темы.
     #[schema(example = "#b3001b")]
     pub accent_color: Option<String>,
+    /// Шапка страницы особой: `styled` — в теме и с обоями, `plain` — нейтральная, `none` — без
+    /// шапки (заголовок над списком).
+    #[schema(example = "styled")]
+    pub header_mode: String,
     /// Сколько произведений.
     #[schema(example = 7)]
     pub items_count: i64,
@@ -335,6 +339,7 @@ pub struct CollectionRow {
     pub wallpaper_blur: i16,
     pub effects: bool,
     pub accent_color: Option<String>,
+    pub header_mode: String,
     pub items_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -344,7 +349,7 @@ pub struct CollectionRow {
 pub const COLLECTION_COLUMNS: &str =
     "c.id, c.user_id, c.title, c.description, c.is_public, c.featured_position, c.slug,
     c.wallpaper_url, c.cover_url, c.theme, c.wallpaper_mode, c.wallpaper_dim, c.wallpaper_blur,
-    c.effects, c.accent_color,
+    c.effects, c.accent_color, c.header_mode,
     (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id) AS items_count,
     c.created_at, c.updated_at";
 
@@ -392,6 +397,22 @@ pub struct FeatureCollection {
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<String>, example = "#b3001b")]
     pub accent_color: Option<Option<serde_json::Value>>,
+    /// `styled`, `plain` или `none`; `null` — `styled`. Не передано — не меняется.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>, example = "plain")]
+    pub header_mode: Option<Option<serde_json::Value>>,
+}
+
+/// Админ меняет название и описание любой коллекции (`is_public` здесь не меняется — 400).
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminUpdateCollection {
+    /// 1–200 символов. Не передано — не меняется.
+    pub title: Option<String>,
+    /// До 2000 символов. Не передано — не меняется, `null` — очищается.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>)]
+    pub description: Option<Option<String>>,
 }
 
 /// Ответ `GET /collections/by-slug/{slug}`: коллекция или куда перенаправить (301 на фронтенде).
