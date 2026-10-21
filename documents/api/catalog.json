@@ -3772,6 +3772,13 @@
             "type": "string",
             "format": "date-time"
           },
+          "custom_html": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Готовая вёрстка при `kind=custom` (мягкая санитизация: свои стили, `<style>`, svg;\nбез скриптов). Фронт показывает в `<iframe sandbox srcdoc>`."
+          },
           "ends_at": {
             "type": [
               "string",
@@ -3895,7 +3902,8 @@
         "enum": [
           "image",
           "html",
-          "slides"
+          "slides",
+          "custom"
         ]
       },
       "BannerSlide": {
@@ -3941,7 +3949,7 @@
         "oneOf": [
           {
             "type": "object",
-            "description": "Все страницы сайта.",
+            "description": "Главные страницы разделов: `/`, `/films`, `/series`, `/books`, `/games`, `/people`.",
             "required": [
               "type"
             ],
@@ -4087,6 +4095,13 @@
               "string",
               "null"
             ]
+          },
+          "custom_html": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обязателен при `kind=custom` (≤ 100 000 символов, мягкая санитизация)."
           },
           "ends_at": {
             "type": [
@@ -5339,6 +5354,13 @@
                 "created_at": {
                   "type": "string",
                   "format": "date-time"
+                },
+                "custom_html": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Готовая вёрстка при `kind=custom` (мягкая санитизация: свои стили, `<style>`, svg;\nбез скриптов). Фронт показывает в `<iframe sandbox srcdoc>`."
                 },
                 "ends_at": {
                   "type": [
@@ -6685,6 +6707,12 @@
             }
           },
           "content_html": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "custom_html": {
             "type": [
               "string",
               "null"

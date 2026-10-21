@@ -40,14 +40,18 @@ pub const MAX_PATTERN: usize = 200;
 pub const MAX_LABEL: usize = 60;
 /// Лимит `content_html` после санитизации (символы).
 pub const MAX_HTML: usize = 20_000;
+/// Лимит `custom_html` (символы; до и после санитизации).
+pub const MAX_CUSTOM_HTML: usize = 100_000;
+/// Пути, где показывается цель `{type:"all"}`: главные страницы разделов.
+pub const ALL_PATHS: [&str; 6] = ["/", "/films", "/series", "/books", "/games", "/people"];
 /// Разделы, где баннеры не показываются никогда (кроме `exclude_paths` баннера).
 const ALWAYS_EXCLUDED: [&str; 1] = ["/admin/*"];
 
 /// Колонки ответа; `page` — первый `targets[].page` (переходный период).
 pub(crate) const COLUMNS: &str = "id, \
      (SELECT t->>'page' FROM jsonb_array_elements(targets) t WHERE t->>'type' = 'page' LIMIT 1) \
-     AS page, kind, title, subtitle, image_url, link_url, content_html, slides, buttons, theme, \
-     targets, exclude_paths, priority, position, is_active, starts_at, ends_at, created_at, \
+     AS page, kind, title, subtitle, image_url, link_url, content_html, custom_html, slides, buttons, \
+     theme, targets, exclude_paths, priority, position, is_active, starts_at, ends_at, created_at, \
      updated_at";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -59,6 +63,9 @@ pub enum BannerKind {
     Html,
     /// Слайды `slides` (1..10).
     Slides,
+    /// Готовая вёрстка `custom_html` (свои стили и кнопки); прочие поля показа не используются,
+    /// `title` — подпись для админки.
+    Custom,
 }
 
 impl BannerKind {
@@ -67,6 +74,17 @@ impl BannerKind {
             BannerKind::Image => "image",
             BannerKind::Html => "html",
             BannerKind::Slides => "slides",
+            BannerKind::Custom => "custom",
+        }
+    }
+
+    /// Из значения колонки `kind` (неизвестное — `image`).
+    pub fn parse(value: &str) -> BannerKind {
+        match value {
+            "html" => BannerKind::Html,
+            "slides" => BannerKind::Slides,
+            "custom" => BannerKind::Custom,
+            _ => BannerKind::Image,
         }
     }
 }
@@ -105,7 +123,7 @@ pub struct BannerButton {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum BannerTarget {
-    /// Все страницы сайта.
+    /// Главные страницы разделов: `/`, `/films`, `/series`, `/books`, `/games`, `/people`.
     All,
     /// Страница: `home` (`/`), `films` (`/films`), `series`, `books`, `games`, `people`.
     Page { page: String },
@@ -129,6 +147,9 @@ pub struct Banner {
     pub link_url: Option<String>,
     /// Санитизированный HTML (allowlist).
     pub content_html: Option<String>,
+    /// Готовая вёрстка при `kind=custom` (мягкая санитизация: свои стили, `<style>`, svg;
+    /// без скриптов). Фронт показывает в `<iframe sandbox srcdoc>`.
+    pub custom_html: Option<String>,
     #[schema(value_type = Vec<BannerSlide>)]
     pub slides: SqlJson<Vec<BannerSlide>>,
     #[schema(value_type = Vec<BannerButton>)]
@@ -167,6 +188,7 @@ pub(crate) struct Draft {
     pub image_url: Option<String>,
     pub link_url: Option<String>,
     pub content_html: Option<String>,
+    pub custom_html: Option<String>,
     pub slides: Vec<BannerSlide>,
     pub buttons: Vec<BannerButton>,
     pub theme: Option<String>,
@@ -202,6 +224,13 @@ impl Draft {
             return Err(invalid(
                 "content_html",
                 "content_html must not be empty for kind=html",
+            ));
+        }
+        let custom_html = sanitize_custom_html("custom_html", self.custom_html)?;
+        if self.kind == BannerKind::Custom && custom_html.is_none() {
+            return Err(invalid(
+                "custom_html",
+                "custom_html must not be empty for kind=custom",
             ));
         }
 
@@ -303,6 +332,7 @@ impl Draft {
             image_url,
             link_url,
             content_html,
+            custom_html,
             slides,
             buttons,
             theme,
@@ -463,6 +493,342 @@ pub(crate) fn sanitize_html(
     Ok(Some(clean.to_string()))
 }
 
+/// Ссылка в `custom_html`: `http(s)://…` или путь `/…`; у `img[src]` ещё `data:image/*`,
+/// у svg `use[href]` — `#id`.
+fn custom_url(element: &str, attribute: &str, value: &str) -> bool {
+    let v = value.trim();
+    safe_href(v)
+        || (element == "img"
+            && attribute == "src"
+            && v.get(..11)
+                .is_some_and(|p| p.eq_ignore_ascii_case("data:image/")))
+        || (element == "use" && v.starts_with('#'))
+}
+
+/// `srcset`: каждый кандидат — `http(s)://…` или `/…`.
+fn safe_srcset(value: &str) -> bool {
+    value.split(',').all(|candidate| {
+        candidate
+            .split_ascii_whitespace()
+            .next()
+            .is_some_and(safe_href)
+    })
+}
+
+/// Удалить все вхождения `needle` (ASCII, без учёта регистра).
+fn remove_ci(css: &str, needle: &str) -> String {
+    let lower = css.to_ascii_lowercase();
+    let mut out = String::with_capacity(css.len());
+    let mut last = 0;
+    for (i, _) in lower.match_indices(needle) {
+        if i >= last {
+            out.push_str(&css[last..i]);
+            last = i + needle.len();
+        }
+    }
+    out.push_str(&css[last..]);
+    out
+}
+
+/// `@import …` целиком (до `;` или конца строки).
+fn strip_imports(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(i) = rest.to_ascii_lowercase().find("@import") {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let end = tail.find([';', '\n']).map_or(tail.len(), |e| e + 1);
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `url(…)` сохраняет аргумент только `http(s)://…` или `/…`, иначе — `url()`.
+fn strip_urls(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(i) = rest.to_ascii_lowercase().find("url(") {
+        out.push_str(&rest[..i + 4]);
+        let tail = &rest[i + 4..];
+        let end = tail.find(')').unwrap_or(tail.len());
+        let arg = tail[..end].trim().trim_matches(['"', '\'']).trim();
+        if safe_href(arg) && !arg.contains(['"', '\'', '(', ' ']) {
+            out.push_str(arg);
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Очистка CSS (`style="…"` и `<style>`): убираются комментарии и `\`-экраны, вырезаются
+/// `expression(`, `javascript:`, `vbscript:`, `behavior:`, `-moz-binding`, `@import …;`,
+/// аргумент `url(…)` не `http(s)://` / `/…`. Повторяется до неподвижной точки.
+pub(crate) fn sanitize_css(css: &str) -> String {
+    let mut css = css.replace(['\\', '\0'], "");
+    loop {
+        let mut next = String::with_capacity(css.len());
+        let mut rest = css.as_str();
+        while let Some(i) = rest.find("/*") {
+            next.push_str(&rest[..i]);
+            let after = &rest[i + 2..];
+            rest = after.find("*/").map_or("", |e| &after[e + 2..]);
+        }
+        next.push_str(rest);
+        for needle in [
+            "expression(",
+            "javascript:",
+            "vbscript:",
+            "behavior:",
+            "-moz-binding",
+        ] {
+            next = remove_ci(&next, needle);
+        }
+        next = strip_urls(&strip_imports(&next));
+        if next == css {
+            return css;
+        }
+        css = next;
+    }
+}
+
+/// Содержимое каждого `<style>…</style>` (как его сериализует ammonia) — через [`sanitize_css`].
+fn sanitize_style_blocks(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find("<style") {
+        let Some(open) = rest[i..].find('>') else {
+            break;
+        };
+        let body_start = i + open + 1;
+        out.push_str(&rest[..body_start]);
+        let body = &rest[body_start..];
+        let end = body.find("</style").unwrap_or(body.len());
+        out.push_str(&sanitize_css(&body[..end]));
+        rest = &body[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Мягкая санитизация `custom_html` (ammonia, отдельный builder): теги вёрстки (`div, section,
+/// article, header, footer, nav, aside, main, p, span, h1-h6, a, img, picture, source, figure,
+/// ul/ol/li, table…`, `svg` с фигурами и градиентами) и `<style>`; атрибуты `class, style, id,
+/// href, src, srcset, alt, width, height, aria-*, data-*, target, rel` (+ `title, role, lang,
+/// dir, sizes, media, type, loading, decoding, colspan, rowspan` и атрибуты рисования svg).
+/// `script, iframe, object, embed, form, input, base, meta, link` (и `noscript, template,
+/// textarea, select, button, frame, frameset, applet`) вырезаются с содержимым, `on*` — всегда;
+/// URL — только `http(s)://` и `/…` (`data:image/*` — только `img[src]`, `#id` — svg `use`);
+/// CSS — [`sanitize_css`]. Пусто — `None`; > 100 000 символов (до или после) — 400.
+pub(crate) fn sanitize_custom_html(
+    field: &str,
+    value: Option<String>,
+) -> Result<Option<String>, AppError> {
+    let Some(raw) = value else { return Ok(None) };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let too_long = || {
+        invalid(
+            field,
+            format!("{field} must be at most {MAX_CUSTOM_HTML} chars"),
+        )
+    };
+    if raw.chars().count() > MAX_CUSTOM_HTML {
+        return Err(too_long());
+    }
+    let tags: HashSet<&str> = [
+        "div",
+        "section",
+        "article",
+        "header",
+        "footer",
+        "nav",
+        "aside",
+        "main",
+        "p",
+        "span",
+        "br",
+        "hr",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "strong",
+        "em",
+        "b",
+        "i",
+        "u",
+        "s",
+        "small",
+        "mark",
+        "sub",
+        "sup",
+        "del",
+        "ins",
+        "abbr",
+        "time",
+        "blockquote",
+        "q",
+        "cite",
+        "code",
+        "pre",
+        "ul",
+        "ol",
+        "li",
+        "dl",
+        "dt",
+        "dd",
+        "a",
+        "img",
+        "picture",
+        "source",
+        "figure",
+        "figcaption",
+        "table",
+        "thead",
+        "tbody",
+        "tfoot",
+        "tr",
+        "th",
+        "td",
+        "caption",
+        "colgroup",
+        "col",
+        "wbr",
+        "style",
+        "svg",
+        "g",
+        "path",
+        "circle",
+        "ellipse",
+        "line",
+        "polyline",
+        "polygon",
+        "rect",
+        "text",
+        "tspan",
+        "defs",
+        "linearGradient",
+        "radialGradient",
+        "stop",
+        "clipPath",
+        "mask",
+        "pattern",
+        "symbol",
+        "use",
+        "title",
+        "desc",
+    ]
+    .into_iter()
+    .collect();
+    let generic: HashSet<&str> = [
+        "class",
+        "style",
+        "id",
+        "href",
+        "src",
+        "srcset",
+        "alt",
+        "width",
+        "height",
+        "target",
+        "rel",
+        "title",
+        "role",
+        "lang",
+        "dir",
+        "sizes",
+        "media",
+        "type",
+        "loading",
+        "decoding",
+        "colspan",
+        "rowspan",
+        "viewBox",
+        "xmlns",
+        "fill",
+        "fill-opacity",
+        "fill-rule",
+        "clip-rule",
+        "clip-path",
+        "mask",
+        "stroke",
+        "stroke-width",
+        "stroke-linecap",
+        "stroke-linejoin",
+        "stroke-opacity",
+        "stroke-dasharray",
+        "d",
+        "cx",
+        "cy",
+        "r",
+        "rx",
+        "ry",
+        "x",
+        "y",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "points",
+        "transform",
+        "opacity",
+        "offset",
+        "stop-color",
+        "stop-opacity",
+        "gradientUnits",
+        "gradientTransform",
+        "preserveAspectRatio",
+        "font-size",
+        "font-weight",
+        "text-anchor",
+        "dominant-baseline",
+    ]
+    .into_iter()
+    .collect();
+    let removed: HashSet<&str> = [
+        "script", "iframe", "object", "embed", "form", "input", "base", "meta", "link", "noscript",
+        "template", "textarea", "select", "button", "frame", "frameset", "applet",
+    ]
+    .into_iter()
+    .collect();
+    let clean = ammonia::Builder::default()
+        .tags(tags)
+        .tag_attributes(HashMap::new())
+        .generic_attributes(generic)
+        .generic_attribute_prefixes(["data-", "aria-"].into_iter().collect())
+        .clean_content_tags(removed)
+        .url_schemes(["http", "https", "data"].into_iter().collect())
+        .link_rel(None)
+        .strip_comments(true)
+        .attribute_filter(|element, attribute, value| match attribute {
+            "href" | "src" | "xlink:href" => {
+                custom_url(element, attribute, value).then_some(Cow::Borrowed(value))
+            }
+            "srcset" => safe_srcset(value).then_some(Cow::Borrowed(value)),
+            "style" => Some(Cow::Owned(sanitize_css(value))),
+            "target" => matches!(value.trim(), "_blank" | "_self" | "_top" | "_parent")
+                .then_some(Cow::Borrowed(value)),
+            _ if attribute.to_ascii_lowercase().starts_with("on") => None,
+            _ => Some(Cow::Borrowed(value)),
+        })
+        .clean(&raw)
+        .to_string();
+    let clean = sanitize_style_blocks(&clean);
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return Ok(None);
+    }
+    if clean.chars().count() > MAX_CUSTOM_HTML {
+        return Err(too_long());
+    }
+    Ok(Some(clean.to_string()))
+}
+
 /// Путь без query/`#` и без хвостового `/` (кроме корня).
 fn normalize_path(path: &str) -> String {
     let path = path.split(['?', '#']).next().unwrap_or("");
@@ -529,7 +895,7 @@ fn shows_on(banner: &Banner, path: &str) -> bool {
     }
     let page = page_of_path(path);
     banner.targets.iter().any(|t| match t {
-        BannerTarget::All => true,
+        BannerTarget::All => ALL_PATHS.contains(&path),
         BannerTarget::Page { page: p } => page == Some(p.as_str()),
         BannerTarget::Path { pattern } => pattern_matches(pattern, path),
     })

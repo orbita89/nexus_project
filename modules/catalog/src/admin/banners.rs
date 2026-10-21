@@ -42,6 +42,8 @@ pub struct CreateBanner {
     pub image_url: Option<String>,
     pub link_url: Option<String>,
     pub content_html: Option<String>,
+    /// Обязателен при `kind=custom` (≤ 100 000 символов, мягкая санитизация).
+    pub custom_html: Option<String>,
     /// 1..10 при `kind=slides`.
     #[serde(default)]
     pub slides: Vec<BannerSlide>,
@@ -83,6 +85,9 @@ pub struct UpdateBanner {
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<String>)]
     pub content_html: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>)]
+    pub custom_html: Option<Option<String>>,
     pub slides: Option<Vec<BannerSlide>>,
     pub buttons: Option<Vec<BannerButton>>,
     #[serde(default, deserialize_with = "nullable")]
@@ -179,8 +184,8 @@ async fn save(
         None => format!(
             "INSERT INTO banners (kind, title, subtitle, image_url, link_url, content_html, slides,
                                   buttons, theme, targets, exclude_paths, priority, position,
-                                  is_active, starts_at, ends_at)
-             SELECT $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+                                  is_active, starts_at, ends_at, custom_html)
+             SELECT $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
              WHERE $1::uuid IS NULL
              RETURNING {COLUMNS}"
         ),
@@ -188,7 +193,7 @@ async fn save(
             "UPDATE banners SET kind = $2, title = $3, subtitle = $4, image_url = $5,
                 link_url = $6, content_html = $7, slides = $8, buttons = $9, theme = $10,
                 targets = $11, exclude_paths = $12, priority = $13, position = $14,
-                is_active = $15, starts_at = $16, ends_at = $17
+                is_active = $15, starts_at = $16, ends_at = $17, custom_html = $18
              WHERE id = $1 RETURNING {COLUMNS}"
         ),
     };
@@ -210,6 +215,7 @@ async fn save(
         .bind(d.is_active)
         .bind(d.starts_at)
         .bind(d.ends_at)
+        .bind(d.custom_html)
         .fetch_optional(executor)
         .await
 }
@@ -252,6 +258,7 @@ pub async fn create(
         image_url: req.image_url,
         link_url: req.link_url,
         content_html: req.content_html,
+        custom_html: req.custom_html,
         slides: req.slides,
         buttons: req.buttons,
         theme: req.theme,
@@ -301,11 +308,7 @@ pub async fn update(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(AppError::NotFound)?;
-    let kind = req.kind.unwrap_or(match current.kind.as_str() {
-        "html" => BannerKind::Html,
-        "slides" => BannerKind::Slides,
-        _ => BannerKind::Image,
-    });
+    let kind = req.kind.unwrap_or_else(|| BannerKind::parse(&current.kind));
     let draft = Draft {
         kind,
         title: req.title.unwrap_or(current.title),
@@ -313,6 +316,7 @@ pub async fn update(
         image_url: req.image_url.unwrap_or(current.image_url),
         link_url: req.link_url.unwrap_or(current.link_url),
         content_html: req.content_html.unwrap_or(current.content_html),
+        custom_html: req.custom_html.unwrap_or(current.custom_html),
         slides: req.slides.unwrap_or(current.slides.0),
         buttons: req.buttons.unwrap_or(current.buttons.0),
         theme: req.theme.unwrap_or(current.theme),
