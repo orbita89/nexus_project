@@ -135,7 +135,8 @@ pub async fn rooms(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Channel, St
         .collect())
 }
 
-/// Все каналы интересов пользователя: сущности, люди, теги и свои комнаты, в которые вступил.
+/// Все каналы интересов пользователя: сущности, люди, теги, свои комнаты, в которые вступил,
+/// и системные комнаты чата — в них состоят все.
 pub async fn interests(state: &AppState, user_id: Uuid) -> AppResult<Vec<(Channel, String)>> {
     let mut channels = entities(state, &state.interests.entity_ids(user_id).await?).await?;
     channels.extend(people(state, &state.interests.person_ids(user_id).await?).await?);

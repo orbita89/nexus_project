@@ -1,5 +1,5 @@
 //! Чат по интересам: комната на каждую сущность (`entity:<slug>`), человека (`person:<slug>`) и
-//! тег (`tag:<slug>`) каталога и свои комнаты админа (`room:<slug>`, см. `rooms`).
+//! тег (`tag:<slug>`) каталога, системные комнаты и свои комнаты (`room:<slug>`, см. `rooms`).
 //!
 //! Отправка и «прочитано» — по WebSocket: `realtime` принимает `chat.send` / `chat.read` и
 //! вызывает [`PgChat`] через `shared::directory::Chat` (`state.chat`). Здесь же REST: мои чаты
@@ -102,7 +102,8 @@ pub struct ChatMessage {
     pub deleted: bool,
 }
 
-/// Своя комната (админа): название, описание, счётчики.
+/// Комната со slug: системная (вкладка панели), заведённая админом или своя комната
+/// пользователя — название, описание, счётчики.
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
 pub struct CustomRoom {
     pub id: Uuid,
@@ -111,23 +112,57 @@ pub struct CustomRoom {
     #[schema(example = "Киберпанк")]
     pub title: String,
     pub description: Option<String>,
+    /// Участников. У системной комнаты — все пользователи сайта.
     pub members_count: i64,
     pub messages_count: i32,
     pub created_at: DateTime<Utc>,
-    /// Вступил ли текущий пользователь; `null` — гость.
+    /// Системная комната: в ней состоят все, её нельзя покинуть, изменить и удалить.
+    pub system: bool,
+    /// Владелец, который может править и удалять комнату; `null` — системная или админская.
+    #[sqlx(skip)]
+    pub owner: Option<UserRef>,
+    /// Вступил ли текущий пользователь; `null` — гость. В системной — всегда `true`.
     #[sqlx(skip)]
     pub joined: Option<bool>,
+    #[serde(skip)]
+    pub owner_id: Option<Uuid>,
 }
 
-/// Своя комната по id, иначе 404.
-pub(crate) async fn custom_room(db: &sqlx::PgPool, id: Uuid) -> AppResult<CustomRoom> {
-    sqlx::query_as(&format!(
+/// Комната по id, иначе 404. Владелец и участники системной — [`fill_rooms`].
+pub(crate) async fn custom_room(state: &AppState, id: Uuid) -> AppResult<CustomRoom> {
+    let mut rooms = [sqlx::query_as(&format!(
         "SELECT {CUSTOM_COLUMNS} FROM chat_rooms r WHERE r.id = $1 AND r.slug IS NOT NULL"
     ))
     .bind(id)
-    .fetch_optional(db)
+    .fetch_optional(&state.db)
     .await?
-    .ok_or(AppError::NotFound)
+    .ok_or(AppError::NotFound)?];
+    fill_rooms(state, &mut rooms).await?;
+    let [room] = rooms;
+    Ok(room)
+}
+
+/// Владельцы одним запросом и `members_count` системных комнат (участник — каждый
+/// пользователь, строк в `chat_room_members` для них нет).
+pub(crate) async fn fill_rooms(state: &AppState, rooms: &mut [CustomRoom]) -> AppResult<()> {
+    let owner_ids: Vec<Uuid> = rooms.iter().filter_map(|room| room.owner_id).collect();
+    let owners = if owner_ids.is_empty() {
+        HashMap::new()
+    } else {
+        state.users.by_ids(&owner_ids).await?
+    };
+    let members = if rooms.iter().any(|room| room.system) {
+        state.users.count().await?
+    } else {
+        0
+    };
+    for room in rooms {
+        room.owner = room.owner_id.and_then(|id| owners.get(&id).cloned());
+        if room.system {
+            room.members_count = members;
+        }
+    }
+    Ok(())
 }
 
 /// Комната для открытой панели чата: что это, последнее сообщение и состояние текущего
@@ -161,10 +196,11 @@ pub struct ChatRoomMe {
     pub last_read_id: Option<Uuid>,
 }
 
-/// Колонки [`CustomRoom`] из `chat_rooms r`.
+/// Колонки [`CustomRoom`] из `chat_rooms r`. У системной комнаты `members_count` здесь 0 —
+/// его заполняет [`fill_rooms`].
 pub(crate) const CUSTOM_COLUMNS: &str = "r.id, r.slug, r.title, r.description,
      (SELECT count(*) FROM chat_room_members cm WHERE cm.room_id = r.id) AS members_count,
-     r.messages_count, r.created_at";
+     r.messages_count, r.created_at, r.system, r.owner_id";
 
 /// Комната в списке «мои чаты». Заполнено ровно одно из `entity`, `person`, `tag`, `custom` —
 /// по `kind`.
@@ -500,7 +536,11 @@ pub async fn list_own(
              WHERE i.user_id = $1
              UNION ALL
              SELECT 'room', cm.room_id, cm.created_at, cm.room_id
-             FROM chat_room_members cm WHERE cm.user_id = $1)
+             FROM chat_room_members cm JOIN chat_rooms cr ON cr.id = cm.room_id
+             WHERE cm.user_id = $1 AND NOT cr.system
+             UNION ALL
+             -- В системных комнатах состоят все: своих строк в chat_room_members у них нет.
+             SELECT 'room', sr.id, sr.created_at, sr.id FROM chat_rooms sr WHERE sr.system)
          SELECT mine.kind, mine.target_id, r.last_message_id,
                 (SELECT count(*) FROM (
                      SELECT 1 FROM chat_messages m
@@ -512,7 +552,10 @@ pub async fn list_own(
          FROM mine
          LEFT JOIN chat_rooms r ON r.id = mine.room_id
          LEFT JOIN chat_reads rd ON rd.user_id = $1 AND rd.room_id = r.id
-         ORDER BY r.last_message_at DESC NULLS LAST, mine.created_at DESC, mine.target_id",
+         ORDER BY coalesce(r.system, false) DESC,
+                  -- Системные — вкладки панели: порядок заведения, он же порядок вкладок.
+                  CASE WHEN r.system THEN mine.created_at END,
+                  r.last_message_at DESC NULLS LAST, mine.created_at DESC, mine.target_id",
     )
     .bind(user.id)
     .bind(MAX_UNREAD)
@@ -542,23 +585,25 @@ pub async fn list_own(
     let entities = refs::entities(&state, ids_of("entity")).await?;
     let people = refs::people(&state, ids_of("person")).await?;
     let tags = refs::tags(&state, ids_of("tag")).await?;
-    let custom: HashMap<Uuid, CustomRoom> = sqlx::query_as::<_, CustomRoom>(&format!(
+    let mut custom_rows: Vec<CustomRoom> = sqlx::query_as::<_, CustomRoom>(&format!(
         "SELECT {CUSTOM_COLUMNS} FROM chat_rooms r WHERE r.id = ANY($1)"
     ))
     .bind(ids_of("room"))
     .fetch_all(&state.db)
-    .await?
-    .into_iter()
-    .map(|room| {
-        (
-            room.id,
-            CustomRoom {
-                joined: Some(true),
-                ..room
-            },
-        )
-    })
-    .collect();
+    .await?;
+    fill_rooms(&state, &mut custom_rows).await?;
+    let custom: HashMap<Uuid, CustomRoom> = custom_rows
+        .into_iter()
+        .map(|room| {
+            (
+                room.id,
+                CustomRoom {
+                    joined: Some(true),
+                    ..room
+                },
+            )
+        })
+        .collect();
 
     Ok(Json(
         rows.into_iter()
@@ -657,7 +702,7 @@ pub async fn info(
             room
         }
         "room" => {
-            let found = custom_room(&state.db, custom_room_id(&state.db, &slug).await?).await?;
+            let found = custom_room(&state, custom_room_id(&state.db, &slug).await?).await?;
             let room = (ChatRoom::Room(found.id), found.slug.clone());
             custom = Some(found);
             room
@@ -699,6 +744,8 @@ pub async fn info(
             .bind(room_parts(room).1)
             .fetch_one(&state.db)
             .await?;
+            // В системной комнате состоят все: строк в chat_room_members для неё нет.
+            let member = member || custom.as_ref().is_some_and(|room| room.system);
             let (muted, unread, last_read_id) = match room_id {
                 None => (false, 0, None),
                 Some(room_id) => {

@@ -103,9 +103,11 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(chat::history))
         .routes(routes!(chat::get, chat::update, chat::delete))
         .routes(routes!(chat::mute, chat::unmute))
-        .routes(routes!(rooms::list))
-        .routes(routes!(rooms::get))
+        .routes(routes!(rooms::list, rooms::create_own))
+        .routes(routes!(rooms::get, rooms::update_own, rooms::delete_own))
         .routes(routes!(rooms::join, rooms::leave))
+        .routes(routes!(rooms::report))
+        .routes(routes!(rooms::list_reported))
         .routes(routes!(rooms::create))
         .routes(routes!(rooms::update, rooms::delete))
         .routes(routes!(

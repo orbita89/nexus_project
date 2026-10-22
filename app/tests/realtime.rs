@@ -369,7 +369,10 @@ async fn auth_adds_personal_channel_and_interests(pool: PgPool) {
     let authenticated = client.auth(&user.token).await;
     assert_eq!(authenticated["user_id"], user.id.to_string());
     assert!(authenticated["expires_at"].is_string());
-    assert_eq!(names(&authenticated), ["user:me", "entity:witcher-3"]);
+    // Плюс системные комнаты чата: они подписаны у всех (`room:general` и остальные).
+    let channels = names(&authenticated);
+    assert!(channels.starts_with(&["user:me", "entity:witcher-3"]));
+    assert!(channels.contains(&"room:general"));
 
     // Интерес: рецензия на «Ведьмака» приходит без ручной подписки.
     ctx.review(&other, "witcher-3").await;

@@ -96,6 +96,9 @@ pub trait UserDirectory: Send + Sync {
     async fn by_username(&self, username: &str) -> AppResult<Option<UserRef>>;
     /// Пользователи по id, включая заблокированных: их рецензии и коллекции остаются видны.
     async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, UserRef>>;
+    /// Сколько активных пользователей всего. Нужно `social`: участник системной комнаты чата —
+    /// каждый, строк в `chat_room_members` для неё нет, а `members_count` отдавать надо.
+    async fn count(&self) -> AppResult<i64>;
 }
 
 /// Люди каталога. Реализует `catalog`. По slug — только публичные (есть работы в видимых

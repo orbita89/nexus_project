@@ -17,6 +17,7 @@ pub const MAX_CHAT_BODY: usize = 2_000;
 pub const MAX_ROOM_SLUG: usize = 80;
 pub const MAX_ROOM_TITLE: usize = 100;
 pub const MAX_ROOM_DESCRIPTION: usize = 500;
+pub const MAX_REPORT_REASON: usize = 500;
 
 fn bad(message: String) -> AppError {
     AppError::BadRequest(message)

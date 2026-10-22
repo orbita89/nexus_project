@@ -41,4 +41,12 @@ impl UserDirectory for PgUserDirectory {
         .await?;
         Ok(rows.into_iter().map(|row| (row.id, row)).collect())
     }
+
+    async fn count(&self) -> AppResult<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT count(*) FROM users WHERE is_active")
+                .fetch_one(&self.db)
+                .await?,
+        )
+    }
 }

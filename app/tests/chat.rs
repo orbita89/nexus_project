@@ -20,6 +20,19 @@ const SOCIAL: &str = "/api/v1/social";
 const ROOM: &str = "entity:dune-2021";
 const WAIT: Duration = Duration::from_secs(5);
 const QUIET: Duration = Duration::from_millis(300);
+/// Комнаты из миграции `20261111100000`: 5 системных + 10 основных.
+const SEEDED_ROOMS: i64 = 15;
+const SYSTEM_ROOMS: usize = 5;
+
+/// Каналы из ответа `authenticated`.
+fn subscribed(auth: &Value) -> Vec<&str> {
+    auth["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|channel| channel.as_str().unwrap())
+        .collect()
+}
 
 struct Ctx {
     state: AppState,
@@ -106,7 +119,17 @@ impl Ctx {
             .await;
     }
 
+    /// «Мои чаты» без системных комнат: они есть у всех и всегда идут первыми, остальные
+    /// проверки про них не знают (см. [`system_rooms`]).
     async fn chats(&self, user: &User) -> Vec<Value> {
+        let chats = self.all_chats(user).await;
+        chats
+            .into_iter()
+            .filter(|chat| chat["custom"]["system"] != json!(true))
+            .collect()
+    }
+
+    async fn all_chats(&self, user: &User) -> Vec<Value> {
         let chats = self
             .api(StatusCode::OK, Method::GET, "/chats", None, Some(user))
             .await;
@@ -554,10 +577,8 @@ async fn person_and_tag_rooms(pool: PgPool) {
             "authenticated",
         )
         .await;
-    assert_eq!(
-        auth["channels"],
-        json!(["user:me", "person:denis-villeneuve"])
-    );
+    // Кроме системных комнат, которые подписаны у всех.
+    assert!(subscribed(&auth).contains(&"person:denis-villeneuve"));
     ctx.api(
         StatusCode::NO_CONTENT,
         Method::PUT,
@@ -700,7 +721,10 @@ async fn admin_rooms(pool: PgPool) {
     let list = ctx
         .api(StatusCode::OK, Method::GET, "/chat/rooms", None, None)
         .await;
-    assert_eq!(list["total"], 1);
+    assert_eq!(list["total"], SEEDED_ROOMS + 1);
+    // Системные комнаты — первыми.
+    assert_eq!(list["items"][0]["slug"], "general");
+    assert_eq!(list["items"][0]["system"], true);
     assert_eq!(
         ctx.api(
             StatusCode::OK,
@@ -779,7 +803,7 @@ async fn admin_rooms(pool: PgPool) {
             "authenticated",
         )
         .await;
-    assert_eq!(auth["channels"], json!(["user:me", "room:cyberpunk-fans"]));
+    assert!(subscribed(&auth).contains(&"room:cyberpunk-fans"));
 
     let path = "/admin/chat/rooms/cyberpunk-fans";
     let updated = ctx
@@ -943,4 +967,333 @@ async fn room_info_for_viewer(pool: PgPool) {
     assert_eq!(info["me"]["member"], true);
     assert_eq!(info["custom"]["joined"], true);
     assert_eq!(ctx.chats(&bob).await[0]["custom"]["joined"], true);
+}
+
+/// Системные комнаты: участник — каждый, они первыми в «моих чатах», канал подписан без
+/// `subscribe`, выйти и изменить нельзя, гость читает.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn system_rooms(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let admin = ctx.login("admin", "admin").await;
+    let alice = ctx.login("alice", "user").await;
+
+    let chats = ctx.all_chats(&alice).await;
+    let system: Vec<&str> = chats
+        .iter()
+        .take(SYSTEM_ROOMS)
+        .map(|chat| chat["custom"]["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(system, ["general", "movies", "series", "books", "games"]);
+    assert!(chats.iter().take(SYSTEM_ROOMS).all(|chat| {
+        chat["custom"]["system"] == json!(true) && chat["custom"]["joined"] == json!(true)
+    }));
+    // Участников у системной столько же, сколько пользователей (строк chat_room_members нет).
+    assert_eq!(chats[0]["custom"]["members_count"], 2);
+    assert_eq!(chats[0]["custom"]["owner"], Value::Null);
+
+    // Гость читает системную комнату и видит её в каталоге комнат.
+    let room = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/rooms/general",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(room["system"], true);
+    assert_eq!(room["joined"], Value::Null);
+    ctx.api(
+        StatusCode::OK,
+        Method::GET,
+        "/chat/room/general/messages",
+        None,
+        None,
+    )
+    .await;
+    let info = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/room/general",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(info["me"]["member"], true);
+
+    // Вступить — 204 без записи, выйти, изменить, удалить и пожаловаться нельзя.
+    for (status, method, path, body, user) in [
+        (
+            StatusCode::NO_CONTENT,
+            Method::PUT,
+            "/chat/rooms/general/membership",
+            None,
+            &alice,
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            Method::DELETE,
+            "/chat/rooms/general/membership",
+            None,
+            &alice,
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            Method::PATCH,
+            "/chat/rooms/general",
+            Some(json!({ "title": "Своё" })),
+            &alice,
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            Method::DELETE,
+            "/chat/rooms/general",
+            None,
+            &alice,
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            Method::POST,
+            "/chat/rooms/general/report",
+            Some(json!({ "reason": "Не нравится" })),
+            &alice,
+        ),
+        // Админу системная тоже закрыта.
+        (
+            StatusCode::FORBIDDEN,
+            Method::PATCH,
+            "/admin/chat/rooms/general",
+            Some(json!({ "title": "Своё" })),
+            &admin,
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            Method::DELETE,
+            "/admin/chat/rooms/general",
+            None,
+            &admin,
+        ),
+    ] {
+        ctx.api(status, method, path, body, Some(user)).await;
+    }
+    assert_eq!(ctx.all_chats(&alice).await.len(), SYSTEM_ROOMS);
+
+    // Канал системной комнаты подписан без subscribe.
+    let mut ws = ctx.client().await;
+    let auth = ws
+        .request(
+            json!({ "type": "auth", "token": alice.token }),
+            "authenticated",
+        )
+        .await;
+    assert!(subscribed(&auth).contains(&"room:general"));
+}
+
+/// Своя комната пользователя: создание, владелец, правка и удаление владельцем, лимиты,
+/// зарезервированные слаги и жалобы.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn own_rooms(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let admin = ctx.login("admin", "admin").await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    let body =
+        json!({ "slug": "cyberpunk-fans", "title": " Киберпанк ", "description": "Обо всём" });
+    // Гостю — 401.
+    ctx.api(
+        StatusCode::UNAUTHORIZED,
+        Method::POST,
+        "/chat/rooms",
+        Some(body.clone()),
+        None,
+    )
+    .await;
+    let room = ctx
+        .api(
+            StatusCode::CREATED,
+            Method::POST,
+            "/chat/rooms",
+            Some(body.clone()),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(room["title"], "Киберпанк");
+    assert_eq!(room["system"], false);
+    assert_eq!(room["owner"]["id"], alice.id);
+    // Автор — сразу участник: комната в его чатах, канал подписан.
+    assert_eq!(room["members_count"], 1);
+    assert_eq!(ctx.chats(&alice).await[0]["room"], "room:cyberpunk-fans");
+
+    // Занятый и зарезервированный слаг — 409, кривой — 400.
+    ctx.api(
+        StatusCode::CONFLICT,
+        Method::POST,
+        "/chat/rooms",
+        Some(body),
+        Some(&bob),
+    )
+    .await;
+    for slug in ["general", "offtop", "admin", "search"] {
+        ctx.api(
+            StatusCode::CONFLICT,
+            Method::POST,
+            "/chat/rooms",
+            Some(json!({ "slug": slug, "title": "Своё" })),
+            Some(&bob),
+        )
+        .await;
+    }
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        "/chat/rooms",
+        Some(json!({ "slug": "Не Слаг", "title": "Своё" })),
+        Some(&bob),
+    )
+    .await;
+
+    // Третья за сутки исчерпывает суточный лимит → 429 с retry_after.
+    for n in 2..=3 {
+        ctx.api(
+            StatusCode::CREATED,
+            Method::POST,
+            "/chat/rooms",
+            Some(json!({ "slug": format!("room-{n}"), "title": format!("Комната {n}") })),
+            Some(&alice),
+        )
+        .await;
+    }
+    let limited = ctx
+        .api(
+            StatusCode::TOO_MANY_REQUESTS,
+            Method::POST,
+            "/chat/rooms",
+            Some(json!({ "slug": "room-4", "title": "Комната 4" })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(limited["code"], "rate_limited");
+    assert!(limited["retry_after"].as_u64().unwrap() > 0);
+
+    // Чужую комнату не изменить и не удалить.
+    let path = "/chat/rooms/cyberpunk-fans";
+    ctx.api(
+        StatusCode::FORBIDDEN,
+        Method::PATCH,
+        path,
+        Some(json!({ "title": "Моё" })),
+        Some(&bob),
+    )
+    .await;
+    ctx.api(
+        StatusCode::FORBIDDEN,
+        Method::DELETE,
+        path,
+        None,
+        Some(&bob),
+    )
+    .await;
+
+    // Жалоба: повторная не создаёт дубля, админ видит список.
+    let report = "/chat/rooms/cyberpunk-fans/report";
+    for _ in 0..2 {
+        ctx.api(
+            StatusCode::NO_CONTENT,
+            Method::POST,
+            report,
+            Some(json!({ "reason": "Реклама" })),
+            Some(&bob),
+        )
+        .await;
+    }
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        report,
+        Some(json!({ "reason": " " })),
+        Some(&bob),
+    )
+    .await;
+    let reported = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/admin/chat/rooms/reports",
+            None,
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(reported["total"], 1);
+    assert_eq!(reported["items"][0]["reports_count"], 1);
+    assert_eq!(reported["items"][0]["room"]["slug"], "cyberpunk-fans");
+    ctx.api(
+        StatusCode::FORBIDDEN,
+        Method::GET,
+        "/admin/chat/rooms/reports",
+        None,
+        Some(&bob),
+    )
+    .await;
+
+    // Владелец правит и удаляет свою.
+    let updated = ctx
+        .api(
+            StatusCode::OK,
+            Method::PATCH,
+            path,
+            Some(json!({ "title": "Киберпанк 2077", "description": "" })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(updated["title"], "Киберпанк 2077");
+    assert_eq!(updated["description"], Value::Null);
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        path,
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.api(StatusCode::NOT_FOUND, Method::GET, path, None, None)
+        .await;
+    // Удалённая освободила место: можно завести взамен (суточный лимит считает заведённые).
+    ctx.api(
+        StatusCode::TOO_MANY_REQUESTS,
+        Method::POST,
+        "/chat/rooms",
+        Some(json!({ "slug": "cyberpunk-fans", "title": "Снова" })),
+        Some(&alice),
+    )
+    .await;
+
+    // Админ правит и удаляет чужую комнату, у его собственной владельца нет.
+    let admins = ctx
+        .api(
+            StatusCode::CREATED,
+            Method::POST,
+            "/admin/chat/rooms",
+            Some(json!({ "slug": "staff", "title": "Площадка" })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(admins["owner"], Value::Null);
+    ctx.api(
+        StatusCode::OK,
+        Method::PATCH,
+        "/chat/rooms/room-2",
+        Some(json!({ "title": "Поправил админ" })),
+        Some(&admin),
+    )
+    .await;
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        "/chat/rooms/room-2",
+        None,
+        Some(&admin),
+    )
+    .await;
 }

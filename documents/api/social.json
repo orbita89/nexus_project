@@ -15,7 +15,7 @@
         "tags": [
           "social-admin"
         ],
-        "summary": "Создать свою комнату.",
+        "summary": "Завести комнату от имени площадки: `owner_id` пуст, правит её только админ.",
         "operationId": "admin_create_chat_room",
         "requestBody": {
           "content": {
@@ -86,12 +86,80 @@
         ]
       }
     },
+    "/api/v1/social/admin/chat/rooms/reports": {
+      "get": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Комнаты с жалобами: больше жалоб — выше.",
+        "operationId": "admin_list_reported_chat_rooms",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница комнат с жалобами",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ReportedRoom"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/admin/chat/rooms/{slug}": {
       "delete": {
         "tags": [
           "social-admin"
         ],
-        "summary": "Удалить свою комнату вместе с сообщениями и участниками → 204.",
+        "summary": "Удалить любую несистемную комнату вместе с сообщениями и участниками → 204.",
         "operationId": "admin_delete_chat_room",
         "parameters": [
           {
@@ -120,7 +188,7 @@
             }
           },
           "403": {
-            "description": "Нужна роль admin",
+            "description": "Нужна роль admin или комната системная (`room_is_system`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -150,7 +218,7 @@
         "tags": [
           "social-admin"
         ],
-        "summary": "Изменить название или описание своей комнаты (slug не меняется: это адрес канала).",
+        "summary": "Изменить название или описание любой несистемной комнаты (slug не меняется).",
         "operationId": "admin_update_chat_room",
         "parameters": [
           {
@@ -206,7 +274,7 @@
             }
           },
           "403": {
-            "description": "Нужна роль admin",
+            "description": "Нужна роль admin или комната системная (`room_is_system`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1711,7 +1779,7 @@
         "tags": [
           "chat"
         ],
-        "summary": "Свои комнаты: больше участников — выше. Вошедшему — `joined` (вступил ли).",
+        "summary": "Комнаты: системные сверху, дальше — где больше участников. Вошедшему — `joined` (вступил ли).",
         "operationId": "list_chat_rooms",
         "parameters": [
           {
@@ -1757,6 +1825,80 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Завести свою комнату: автор становится владельцем и участником.",
+        "operationId": "create_chat_room",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRoom"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomRoom"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный slug, название или описание",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят или зарезервирован (`slug_taken`); уже 5 своих комнат (`room_limit`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Больше 3 комнат в сутки (`Retry-After`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/social/chat/rooms/{slug}": {
@@ -1764,7 +1906,7 @@
         "tags": [
           "chat"
         ],
-        "summary": "Своя комната по slug. Вошедшему — `joined` (вступил ли).",
+        "summary": "Комната по slug. Вошедшему — `joined` (вступил ли).",
         "operationId": "get_chat_room",
         "parameters": [
           {
@@ -1810,6 +1952,151 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Удалить свою комнату вместе с сообщениями и участниками → 204: владелец или админ.",
+        "operationId": "delete_chat_room",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "cyberpunk-fans"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужая комната или системная (`room_is_system`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Изменить свою комнату: владелец или админ.",
+        "operationId": "update_chat_room",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "cyberpunk-fans"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRoom"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomRoom"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверное название или описание",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужая комната или системная (`room_is_system`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/social/chat/rooms/{slug}/membership": {
@@ -1817,7 +2104,7 @@
         "tags": [
           "chat"
         ],
-        "summary": "Вступить в комнату → 204 (повторно — тоже 204): она в «моих чатах», канал подписан.",
+        "summary": "Вступить в комнату → 204 (повторно — тоже 204): она в «моих чатах», канал подписан.\nВ системной все состоят и так — 204 без записи.",
         "operationId": "join_chat_room",
         "parameters": [
           {
@@ -1866,7 +2153,7 @@
         "tags": [
           "chat"
         ],
-        "summary": "Выйти из комнаты → 204 (даже если не был участником).",
+        "summary": "Выйти из комнаты → 204 (даже если не был участником). Системную покинуть нельзя — 403.",
         "operationId": "leave_chat_room",
         "parameters": [
           {
@@ -1886,6 +2173,97 @@
           },
           "401": {
             "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Системную комнату нельзя покинуть",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/chat/rooms/{slug}/report": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Пожаловаться на комнату → 204. Повторная жалоба того же пользователя обновляет причину,\nдубля не создаёт.",
+        "operationId": "report_chat_room",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "cyberpunk-fans"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportRoom"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Жалоба принята"
+          },
+          "400": {
+            "description": "Пустая или слишком длинная причина",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "На системную комнату жаловаться нечего",
             "content": {
               "application/json": {
                 "schema": {
@@ -7216,14 +7594,15 @@
       },
       "CustomRoom": {
         "type": "object",
-        "description": "Своя комната (админа): название, описание, счётчики.",
+        "description": "Комната со slug: системная (вкладка панели), заведённая админом или своя комната\nпользователя — название, описание, счётчики.",
         "required": [
           "id",
           "slug",
           "title",
           "members_count",
           "messages_count",
-          "created_at"
+          "created_at",
+          "system"
         ],
         "properties": {
           "created_at": {
@@ -7245,19 +7624,35 @@
               "boolean",
               "null"
             ],
-            "description": "Вступил ли текущий пользователь; `null` — гость."
+            "description": "Вступил ли текущий пользователь; `null` — гость. В системной — всегда `true`."
           },
           "members_count": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Участников. У системной комнаты — все пользователи сайта."
           },
           "messages_count": {
             "type": "integer",
             "format": "int32"
           },
+          "owner": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UserRef",
+                "description": "Владелец, который может править и удалять комнату; `null` — системная или админская."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "slug": {
             "type": "string",
             "example": "cyberpunk-fans"
+          },
+          "system": {
+            "type": "boolean",
+            "description": "Системная комната: в ней состоят все, её нельзя покинуть, изменить и удалить."
           },
           "title": {
             "type": "string",
@@ -7951,14 +8346,15 @@
             "type": "array",
             "items": {
               "type": "object",
-              "description": "Своя комната (админа): название, описание, счётчики.",
+              "description": "Комната со slug: системная (вкладка панели), заведённая админом или своя комната\nпользователя — название, описание, счётчики.",
               "required": [
                 "id",
                 "slug",
                 "title",
                 "members_count",
                 "messages_count",
-                "created_at"
+                "created_at",
+                "system"
               ],
               "properties": {
                 "created_at": {
@@ -7980,19 +8376,35 @@
                     "boolean",
                     "null"
                   ],
-                  "description": "Вступил ли текущий пользователь; `null` — гость."
+                  "description": "Вступил ли текущий пользователь; `null` — гость. В системной — всегда `true`."
                 },
                 "members_count": {
                   "type": "integer",
-                  "format": "int64"
+                  "format": "int64",
+                  "description": "Участников. У системной комнаты — все пользователи сайта."
                 },
                 "messages_count": {
                   "type": "integer",
                   "format": "int32"
                 },
+                "owner": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/UserRef",
+                      "description": "Владелец, который может править и удалять комнату; `null` — системная или админская."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "slug": {
                   "type": "string",
                   "example": "cyberpunk-fans"
+                },
+                "system": {
+                  "type": "boolean",
+                  "description": "Системная комната: в ней состоят все, её нельзя покинуть, изменить и удалить."
                 },
                 "title": {
                   "type": "string",
@@ -8302,6 +8714,59 @@
                 "thread_id": {
                   "type": "string",
                   "format": "uuid"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_ReportedRoom": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Комната с жалобами — админский листинг.",
+              "required": [
+                "room",
+                "reports_count",
+                "last_report_at"
+              ],
+              "properties": {
+                "last_report_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "reports_count": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "room": {
+                  "$ref": "#/components/schemas/CustomRoom"
                 }
               }
             }
@@ -8991,6 +9456,41 @@
           }
         },
         "additionalProperties": false
+      },
+      "ReportRoom": {
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Что не так с комнатой, до 500 символов.",
+            "example": "Реклама"
+          }
+        }
+      },
+      "ReportedRoom": {
+        "type": "object",
+        "description": "Комната с жалобами — админский листинг.",
+        "required": [
+          "room",
+          "reports_count",
+          "last_report_at"
+        ],
+        "properties": {
+          "last_report_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reports_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "room": {
+            "$ref": "#/components/schemas/CustomRoom"
+          }
+        }
       },
       "Review": {
         "type": "object",
