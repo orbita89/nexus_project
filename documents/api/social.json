@@ -233,6 +233,67 @@
         ]
       }
     },
+    "/api/v1/social/admin/collection-comments/{id}": {
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Удалить любой комментарий в обсуждении коллекции (с ответами, если он корневой).",
+        "operationId": "admin_delete_collection_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id комментария",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или уже удалён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/admin/collections/{id}": {
       "delete": {
         "tags": [
@@ -297,7 +358,7 @@
         "tags": [
           "social-admin"
         ],
-        "summary": "Изменить название и описание любой коллекции (например, чужой особой). Видимость здесь не\nменяется: `is_public` в теле — 400.",
+        "summary": "Изменить название и описание любой коллекции (например, чужой особой), закрыть или открыть\nеё обсуждение. Видимость здесь не\nменяется: `is_public` в теле — 400.",
         "operationId": "admin_update_collection",
         "parameters": [
           {
@@ -1789,6 +1850,67 @@
         ]
       }
     },
+    "/api/v1/social/collection-comments/{id}": {
+      "delete": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Удалить свой комментарий (с ответами, если он корневой).",
+        "operationId": "delete_collection_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id комментария",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужой комментарий",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или уже удалён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/collections": {
       "get": {
         "tags": [
@@ -2141,6 +2263,185 @@
           },
           "404": {
             "description": "Нет или приватная чужая",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/collections/{id}/comments": {
+      "get": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Обсуждение коллекции по времени: старые сверху, ответы — в той же ленте с `parent_id`.",
+        "operationId": "list_collection_comments",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница комментариев",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_CollectionComment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции или она чужая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Написать в обсуждение коллекции или ответить на комментарий.",
+        "operationId": "create_collection_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCollectionComment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создан",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionComment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`validation` с `field`: `body` — пусто или длиннее 2000; `parent_id` — нет такого (неудалённого) комментария в этой коллекции",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Обсуждение закрыто (`comments_locked`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции или она чужая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Больше 5 комментариев в минуту (`Retry-After`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5704,6 +6005,13 @@
         "type": "object",
         "description": "Админ меняет название и описание любой коллекции (`is_public` здесь не меняется — 400).",
         "properties": {
+          "comments_locked": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Закрыть (`true`) или открыть обсуждение. Не передано — не меняется."
+          },
           "description": {
             "type": [
               "string",
@@ -6015,6 +6323,8 @@
           "wallpaper_blur",
           "effects",
           "header_mode",
+          "comments_count",
+          "comments_locked",
           "items_count",
           "preview",
           "created_at",
@@ -6028,6 +6338,15 @@
             ],
             "description": "Свой акцентный цвет `#rrggbb` поверх цвета темы; `null` — цвет темы.",
             "example": "#b3001b"
+          },
+          "comments_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Комментариев в обсуждении (без удалённых)."
+          },
+          "comments_locked": {
+            "type": "boolean",
+            "description": "Обсуждение закрыто: читать можно, писать — только admin."
           },
           "contains": {
             "type": [
@@ -6183,6 +6502,51 @@
         ],
         "description": "Ответ `GET /collections/by-slug/{slug}`: коллекция или куда перенаправить (301 на фронтенде)."
       },
+      "CollectionComment": {
+        "type": "object",
+        "description": "Комментарий в обсуждении коллекции. Ответ — `parent_id` корневого комментария (один уровень).",
+        "required": [
+          "id",
+          "collection_id",
+          "author",
+          "body",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "author": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "body": {
+            "type": "string",
+            "example": "Добавьте «Бегущего по лезвию»!"
+          },
+          "collection_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Корневой комментарий, на который это ответ; `null` — сам корневой."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "CollectionDetail": {
         "allOf": [
           {
@@ -6279,6 +6643,29 @@
             "type": "string",
             "description": "1–200 символов.",
             "example": "Лучшая фантастика"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateCollectionComment": {
+        "type": "object",
+        "description": "Написать в обсуждение коллекции.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "1–2000 символов после обрезки пробелов.",
+            "example": "Добавьте «Бегущего по лезвию»!"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Ответ на комментарий этой коллекции; ответ на ответ привязывается к его корню."
           }
         },
         "additionalProperties": false
@@ -6863,6 +7250,8 @@
                 "wallpaper_blur",
                 "effects",
                 "header_mode",
+                "comments_count",
+                "comments_locked",
                 "items_count",
                 "preview",
                 "created_at",
@@ -6876,6 +7265,15 @@
                   ],
                   "description": "Свой акцентный цвет `#rrggbb` поверх цвета темы; `null` — цвет темы.",
                   "example": "#b3001b"
+                },
+                "comments_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Комментариев в обсуждении (без удалённых)."
+                },
+                "comments_locked": {
+                  "type": "boolean",
+                  "description": "Обсуждение закрыто: читать можно, писать — только admin."
                 },
                 "contains": {
                   "type": [
@@ -6994,6 +7392,82 @@
                     "null"
                   ],
                   "description": "Обои особой: широкий фон шапки страницы (21:9 или 16:9, от 1920 px); у обычной — `null`."
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_CollectionComment": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Комментарий в обсуждении коллекции. Ответ — `parent_id` корневого комментария (один уровень).",
+              "required": [
+                "id",
+                "collection_id",
+                "author",
+                "body",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "author": {
+                  "$ref": "#/components/schemas/UserRef"
+                },
+                "body": {
+                  "type": "string",
+                  "example": "Добавьте «Бегущего по лезвию»!"
+                },
+                "collection_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "parent_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "Корневой комментарий, на который это ответ; `null` — сам корневой."
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
                 }
               }
             }
@@ -8409,6 +8883,13 @@
         "type": "object",
         "description": "Изменение коллекции: переданные поля заменяются, `null` очищает описание.",
         "properties": {
+          "comments_locked": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Закрыть (`true`) или открыть обсуждение."
+          },
           "description": {
             "type": [
               "string",

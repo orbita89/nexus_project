@@ -176,6 +176,8 @@ pub async fn collections(state: &AppState, rows: Vec<CollectionRow>) -> AppResul
                 effects: row.effects,
                 accent_color: row.accent_color,
                 header_mode: row.header_mode,
+                comments_count: row.comments_count,
+                comments_locked: row.comments_locked,
                 items_count: row.items_count,
                 created_at: row.created_at,
                 updated_at: row.updated_at,

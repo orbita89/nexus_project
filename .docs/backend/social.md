@@ -124,6 +124,7 @@
 | `effects` | `boolean` | NOT NULL, default `true` | Декоративные эффекты темы (капли крови, снег…) |
 | `accent_color` | `text` | CHECK `^#[0-9a-f]{6}$` | Свой акцентный цвет поверх цвета темы; `NULL` — цвет темы |
 | `header_mode` | `text` | NOT NULL, default `styled`, CHECK `styled` / `plain` / `none` | Шапка страницы особой: в теме и с обоями / нейтральная (без темы и обоев, остальное в теме) / без шапки (заголовок над списком). Миграция `20261107100000_social_collection_header_mode.sql` |
+| `comments_locked` | `boolean` | NOT NULL, default `false` | Обсуждение закрыто: читать можно, писать — только admin. Меняют владелец (`PATCH /collections/{id}`) и admin (`PATCH /admin/collections/{id}`). Миграция `20261108100000_social_collection_comments.sql` |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
 
 **Индексы:** по `user_id` — коллекции пользователя; частичный по `created_at` для публичных —
@@ -131,6 +132,26 @@
 кого подписан, в ленте (миграция `20261011100000_social_feed.sql`); частичный
 `collections_featured_idx` (`featured_position`, `created_at`) для особых (миграция
 `20261103100000_social_featured_collections.sql`).
+
+### `collection_comments` ✅ — обсуждение коллекции
+
+Миграция `20261108100000_social_collection_comments.sql` (2026-10-22). По образцу `review_comments`.
+
+| Колонка | Тип | Ограничения | Смысл |
+|---|---|---|---|
+| `id` | `uuid` | PK, `uuidv7()` | |
+| `collection_id` | `uuid` | NOT NULL, FK → `collections` CASCADE | Чьё обсуждение |
+| `author_id` | `uuid` | NOT NULL, FK → `users` CASCADE | Автор |
+| `parent_id` | `uuid` | FK → `collection_comments` CASCADE | Корневой комментарий той же коллекции (проверяет код); `NULL` — сам корневой. Один уровень: ответ на ответ привязывается к корню |
+| `body` | `text` | NOT NULL, CHECK 1–2000 символов | |
+| `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер `set_updated_at` |
+| `deleted_at` | `timestamptz` | | Мягкое удаление: из списка пропадает; удаление корня удаляет и его ответы |
+
+**Индексы:** `collection_comments_collection_idx` (`collection_id`, `created_at`, `id`) WHERE не удалён —
+лента и `comments_count`; `collection_comments_parent_idx` (`parent_id`) — ответы корня;
+`collection_comments_author_idx` (`author_id`, `created_at DESC`) — лимит 5 комментариев в минуту.
+`comments_count` коллекции — подзапрос (не колонка: триггер-счётчик трогал бы `updated_at` коллекции).
+`collections.comments_locked` (`boolean`, NOT NULL, default `false`) — закрытое обсуждение. Событий нет.
 
 ### `collection_slug_history` ✅ — бывшие адреса особых коллекций
 
@@ -418,9 +439,12 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | GET | `/collections` | гость | Новые публичные коллекции |
 | GET | `/collections/featured` | гость | Особые коллекции (помечены admin) по `featured_position` — массив без пагинации |
 | GET | `/collections/by-slug/{slug}` | гость | Особая по читаемому адресу: текущий slug → 200 `CollectionDetail` (как `/collections/{id}`); бывший, коллекция всё ещё особая → 200 `{"redirect_slug"}`; бывший, больше не особая, но публичная → 200 `{"redirect_id"}` (фронт делает 301); удалена, приватна, slug неизвестен → 404. Отдельный путь — чтобы не спорить с `/collections/{id}` и `/collections/featured` |
+| GET | `/collections/{id}/comments` | гость (`Option<AuthUser>`) | Обсуждение: `Page<CollectionComment>` (`?limit=1..100&offset=`), старые сверху (`created_at`, `id`), ответы — в той же ленте с `parent_id` (фронт группирует под корнем). `CollectionComment`: `id`, `collection_id`, `parent_id`, `author` (`UserRef`), `body`, `created_at`, `updated_at`. 404 — нет коллекции или чужая приватная |
+| POST | `/collections/{id}/comments` | user | `{"body", "parent_id"?}` (лишние поля — 400) → 201 `CollectionComment`. Ответ на ответ привязывается к корню. 400 `validation` с `field`: `body` (1–2000 после обрезки), `parent_id` (нет неудалённого комментария в этой коллекции); 403 `comments_locked` — обсуждение закрыто (admin может писать); 404 — нет коллекции или чужая приватная; 429 — больше 5 комментариев в минуту (`Retry-After: 60`) |
+| DELETE | `/collection-comments/{id}` | автор | Удалить свой (корневой — вместе с ответами) → 204; 403 — чужой; 404 — нет или уже удалён |
 | POST | `/collections` | user | `{"title", "description"?, "is_public"? = true}` → 201, коллекция с `items` |
 | GET | `/collections/{id}` | гость / владелец | Коллекция с содержимым по порядку |
-| PATCH | `/collections/{id}` | владелец | `title`, `description` (`null` очищает), `is_public`; особую сделать приватной — 400 `collection_private` |
+| PATCH | `/collections/{id}` | владелец | `title`, `description` (`null` очищает), `is_public`, `comments_locked` (закрыть/открыть обсуждение); особую сделать приватной — 400 `collection_private` |
 | DELETE | `/collections/{id}` | владелец | → 204 |
 | GET | `/users/{username}/collections` | гость / владелец | Коллекции пользователя, новые сверху; владелец видит и приватные. `?contains={slug}` — у каждой `contains: true/false` (кнопка «В коллекцию» одним запросом); неизвестный slug — 404 |
 | GET | `/entities/{slug}/collections` | гость | Публичные коллекции, где есть сущность |
@@ -434,7 +458,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 (`/admin/collections/{id}`), например по запросу правообладателя, но не читать её. Чужую публичную менять нельзя — 403. Эндпоинты «гость / владелец» принимают токен
 необязательно (`Option<AuthUser>`): без заголовка — гость, с недействительным токеном — 401.
 
-Коллекция в ответе: `id`, `owner` (`UserRef`), `title`, `description`, `is_public`, `is_featured`, `featured_position`, `slug`, `wallpaper_url`, `cover_url`, `theme`, `wallpaper_mode`, `wallpaper_dim`, `wallpaper_blur`, `effects`, `accent_color`, `header_mode` (у обычной `null` / значения по умолчанию: `header`, `null`, `0`, `true`, `null`, `styled`; фронт рисует особую иначе и строит её адрес `/collections/{slug}`), `items_count`,
+Коллекция в ответе: `id`, `owner` (`UserRef`), `title`, `description`, `is_public`, `is_featured`, `featured_position`, `slug`, `wallpaper_url`, `cover_url`, `theme`, `wallpaper_mode`, `wallpaper_dim`, `wallpaper_blur`, `effects`, `accent_color`, `header_mode` (у обычной `null` / значения по умолчанию: `header`, `null`, `0`, `true`, `null`, `styled`; фронт рисует особую иначе и строит её адрес `/collections/{slug}`), `comments_count` (комментариев в обсуждении, без удалённых), `comments_locked` (обсуждение закрыто), `items_count`,
 `preview` (первые 4 произведения по порядку, `EntityRef` — обложки в списке; одним запросом на
 страницу), `contains` (только с `?contains=`), даты; карточка — ещё `items`: `{entity, position, note, added_at}`, где `entity` — `EntityRef` плюс `overview` (краткое описание: без HTML, до 1000 символов по границе предложения или слова, `null` — нет; одним запросом `EntityDirectory::overviews` на всю коллекцию; тот же вид у ответа `PUT .../items/{slug}`) по `position`, затем по времени
 добавления. Изменение содержимого обновляет `updated_at` коллекции.
@@ -552,7 +576,8 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | DELETE | `/admin/reviews/{id}` | Удалить любую рецензию → 204 (голоса и комментарии — вместе с ней) |
 | DELETE | `/admin/review-comments/{id}` | Удалить любой комментарий к рецензии → 204 |
 | DELETE | `/admin/collections/{id}` | Удалить любую коллекцию, в том числе приватную → 204 |
-| PATCH | `/admin/collections/{id}` | Изменить название и описание **любой** коллекции (например, чужой особой): `{"title"?, "description"?}` — не передано — не меняется, `description: null` — очистить → 200 `Collection`. 400 `validation` с `field` (`title` 1–200, `description` до 2000); `is_public` (и любое другое поле) — 400: видимость меняет только владелец. 404 — нет коллекции |
+| PATCH | `/admin/collections/{id}` | Изменить название и описание **любой** коллекции (например, чужой особой): `{"title"?, "description"?, "comments_locked"?}` — не передано — не меняется, `description: null` — очистить → 200 `Collection`. 400 `validation` с `field` (`title` 1–200, `description` до 2000); `is_public` (и любое другое поле) — 400: видимость меняет только владелец. 404 — нет коллекции |
+| DELETE | `/admin/collection-comments/{id}` | Удалить любой комментарий обсуждения коллекции (корневой — с ответами) → 204; 404 — нет или уже удалён |
 | PUT | `/admin/collections/{id}/featured` | Пометить публичную коллекцию особой → 200 (`Collection`); тело `{"position"?, "slug"?, "wallpaper_url"?, "cover_url"?, "theme"?, "wallpaper_mode"?, "wallpaper_dim"?, "wallpaper_blur"?, "effects"?, "accent_color"?, "header_mode"?}` необязательно — оформление: не передано — не меняется, `null` — значение по умолчанию (URL, тема, `wallpaper_dim`, `accent_color` — `null`; `wallpaper_mode` — `header`; `wallpaper_blur` — 0; `effects` — `true`; `header_mode` — `styled`). URL — https до 2048, тема — `^[a-z0-9-]{1,32}$`, `wallpaper_mode` — `header`/`page`, `wallpaper_dim` — целое 0–100, `wallpaper_blur` — целое 0–20, `effects` — boolean, `accent_color` — `#rrggbb` (регистр приводится к нижнему), `header_mode` — `styled`/`plain`/`none`; неверный тип — тоже 400 с `field` (поля разбираются как JSON и проверяются в коде); без `position` в конец (уже особая — порядок не меняется); без `slug` при первой пометке — транслит названия (`social::slug::from_title`: «Русский топ 2021» → `russkiy-top-2021`, занят — `-2`, `-3`…), при повторном PUT — не меняется; смена slug — старый в историю, свой бывший можно вернуть. 400 `collection_private` — приватная; 400 `validation` с `field` (`slug`, `wallpaper_url`, `cover_url`, `theme`, `wallpaper_mode`, `wallpaper_dim`, `wallpaper_blur`, `effects`, `accent_color`, `header_mode`) — неверный формат, UUID, служебное слово, не https-URL; 409 `conflict` — slug занят другой коллекцией (сейчас или раньше) |
 | DELETE | `/admin/collections/{id}/featured` | Снять отметку → 204 (повторно — тоже); slug уходит в историю (старый адрес ведёт на `/collections/{id}`, другой коллекции не достанется); оформление сбрасывается (в `NULL` и значения по умолчанию) |
 | PUT | `/admin/collections/{id}/items/{slug}` | Добавить (201) или изменить (200) произведение в **любой особой** коллекции — как `PUT /collections/{id}/items/{slug}` владельца (`{"note"?, "position"?}`, лимит 500). 400 `not_featured` — коллекция не особая; 404 — нет коллекции или сущности |
@@ -615,6 +640,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `feed.rs` | Лента: ярусы, курсор |
 | `events.rs` | События для `realtime` |
 | `directory.rs` | `InterestDirectory` для других модулей |
+| `collection_comments.rs` | Обсуждение коллекции: список, запись (ответы — к корню, лимит частоты, закрытое обсуждение), удаление своего, `remove` для модерации |
 | `admin.rs` | Модерация; правка названия и описания любой коллекции; особые коллекции: slug, оформление, состав любой особой (`collections::Editor::Admin`) |
 | `slug.rs` | slug особых коллекций: проверка формата, транслит названия, служебные слова |
 

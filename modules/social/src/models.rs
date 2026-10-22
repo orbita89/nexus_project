@@ -310,6 +310,10 @@ pub struct Collection {
     /// шапки (заголовок над списком).
     #[schema(example = "styled")]
     pub header_mode: String,
+    /// Комментариев в обсуждении (без удалённых).
+    pub comments_count: i64,
+    /// Обсуждение закрыто: читать можно, писать — только admin.
+    pub comments_locked: bool,
     /// Сколько произведений.
     #[schema(example = 7)]
     pub items_count: i64,
@@ -340,6 +344,8 @@ pub struct CollectionRow {
     pub effects: bool,
     pub accent_color: Option<String>,
     pub header_mode: String,
+    pub comments_count: i64,
+    pub comments_locked: bool,
     pub items_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -350,6 +356,9 @@ pub const COLLECTION_COLUMNS: &str =
     "c.id, c.user_id, c.title, c.description, c.is_public, c.featured_position, c.slug,
     c.wallpaper_url, c.cover_url, c.theme, c.wallpaper_mode, c.wallpaper_dim, c.wallpaper_blur,
     c.effects, c.accent_color, c.header_mode,
+    (SELECT count(*) FROM collection_comments cc
+     WHERE cc.collection_id = c.id AND cc.deleted_at IS NULL) AS comments_count,
+    c.comments_locked,
     (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id) AS items_count,
     c.created_at, c.updated_at";
 
@@ -413,6 +422,47 @@ pub struct AdminUpdateCollection {
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<String>)]
     pub description: Option<Option<String>>,
+    /// Закрыть (`true`) или открыть обсуждение. Не передано — не меняется.
+    pub comments_locked: Option<bool>,
+}
+
+/// Комментарий в обсуждении коллекции. Ответ — `parent_id` корневого комментария (один уровень).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CollectionComment {
+    pub id: Uuid,
+    pub collection_id: Uuid,
+    /// Корневой комментарий, на который это ответ; `null` — сам корневой.
+    pub parent_id: Option<Uuid>,
+    pub author: UserRef,
+    #[schema(example = "Добавьте «Бегущего по лезвию»!")]
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct CollectionCommentRow {
+    pub id: Uuid,
+    pub collection_id: Uuid,
+    pub parent_id: Option<Uuid>,
+    pub author_id: Uuid,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub const COLLECTION_COMMENT_COLUMNS: &str =
+    "id, collection_id, parent_id, author_id, body, created_at, updated_at";
+
+/// Написать в обсуждение коллекции.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateCollectionComment {
+    /// 1–2000 символов после обрезки пробелов.
+    #[schema(example = "Добавьте «Бегущего по лезвию»!")]
+    pub body: String,
+    /// Ответ на комментарий этой коллекции; ответ на ответ привязывается к его корню.
+    pub parent_id: Option<Uuid>,
 }
 
 /// Ответ `GET /collections/by-slug/{slug}`: коллекция или куда перенаправить (301 на фронтенде).
@@ -499,6 +549,8 @@ pub struct UpdateCollection {
     #[schema(value_type = Option<String>)]
     pub description: Option<Option<String>>,
     pub is_public: Option<bool>,
+    /// Закрыть (`true`) или открыть обсуждение.
+    pub comments_locked: Option<bool>,
 }
 
 /// Добавить произведение в коллекцию или изменить пункт.

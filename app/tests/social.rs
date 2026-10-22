@@ -2972,6 +2972,221 @@ async fn admin_edits_collection_and_header_mode(pool: PgPool) {
     .await;
 }
 
+/// Обсуждение коллекции: список (старые сверху, ответы плоско с `parent_id`), запись, ответ на
+/// ответ — к корню, ошибки с `field`, счётчик `comments_count`, приватная — только владельцу,
+/// удаление своего (с ответами) и любого admin'ом, закрытое обсуждение, лимит частоты.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn collection_comments(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+    let top = ctx.collection(&alice, json!({ "title": "Топ" })).await;
+    let private = ctx
+        .collection(&alice, json!({ "title": "Тайная", "is_public": false }))
+        .await;
+    let comments = format!("/collections/{top}/comments");
+    let post = |user: &User, body: Value| {
+        let ctx = &ctx;
+        let comments = comments.clone();
+        let token = user.token.clone();
+        async move {
+            let user = User {
+                token,
+                username: String::new(),
+            };
+            ctx.expect(
+                StatusCode::CREATED,
+                Method::POST,
+                &comments,
+                Some(body),
+                Some(&user),
+            )
+            .await
+        }
+    };
+
+    assert_eq!(ctx.get_ok(&comments, None).await["total"], 0);
+    let root = post(&bob, json!({ "body": "  Отличная подборка  " })).await;
+    assert_eq!(root["body"], "Отличная подборка");
+    assert_eq!(root["parent_id"], Value::Null);
+    assert_eq!(root["author"]["username"], bob.username.as_str());
+    let root_id = root["id"].as_str().unwrap();
+    let reply = post(&alice, json!({ "body": "Спасибо", "parent_id": root_id })).await;
+    assert_eq!(reply["parent_id"], root_id);
+    // Ответ на ответ — к корню.
+    let nested = post(
+        &bob,
+        json!({ "body": "Пожалуйста", "parent_id": reply["id"] }),
+    )
+    .await;
+    assert_eq!(nested["parent_id"], root_id);
+    let other = post(&alice, json!({ "body": "Второй корень" })).await;
+
+    let page = ctx.get_ok(&comments, None).await;
+    assert_eq!(page["total"], 4);
+    assert_eq!(
+        pluck(items(&page), "body"),
+        [
+            "Отличная подборка",
+            "Спасибо",
+            "Пожалуйста",
+            "Второй корень"
+        ]
+    );
+    let page = ctx
+        .get_ok(&format!("{comments}?limit=2&offset=2"), None)
+        .await;
+    assert_eq!(pluck(items(&page), "body"), ["Пожалуйста", "Второй корень"]);
+    let got = ctx.get_ok(&format!("/collections/{top}"), None).await;
+    assert_eq!(got["comments_count"], 4);
+    assert_eq!(got["comments_locked"], false);
+
+    // Ошибки.
+    for (body, field) in [
+        (json!({ "body": " " }), "body"),
+        (json!({ "body": "x".repeat(2001) }), "body"),
+        (
+            json!({ "body": "x", "parent_id": "00000000-0000-0000-0000-000000000000" }),
+            "parent_id",
+        ),
+    ] {
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::POST,
+                &comments,
+                Some(body),
+                Some(&bob),
+            )
+            .await;
+        assert_eq!(error["code"], "validation");
+        assert_eq!(error["field"], field);
+    }
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::POST,
+        &comments,
+        Some(json!({ "body": "x" })),
+        None,
+    )
+    .await;
+    let foreign = format!("/collections/{private}/comments");
+    ctx.expect(StatusCode::NOT_FOUND, Method::GET, &foreign, None, None)
+        .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::POST,
+        &foreign,
+        Some(json!({ "body": "x" })),
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(StatusCode::OK, Method::GET, &foreign, None, Some(&alice))
+        .await;
+
+    // Удаление: чужой — 403; корень — вместе с ответами; admin — любой.
+    let delete = |id: &Value| format!("/collection-comments/{}", id.as_str().unwrap());
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::DELETE,
+        &delete(&root["id"]),
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &delete(&root["id"]),
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        &delete(&reply["id"]),
+        None,
+        Some(&alice),
+    )
+    .await;
+    let page = ctx.get_ok(&comments, None).await;
+    assert_eq!(pluck(items(&page), "body"), ["Второй корень"]);
+    let admin_delete = format!(
+        "/admin/collection-comments/{}",
+        other["id"].as_str().unwrap()
+    );
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::DELETE,
+        &admin_delete,
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &admin_delete,
+        None,
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(
+        ctx.get_ok(&format!("/collections/{top}"), None).await["comments_count"],
+        0
+    );
+
+    // Закрытое обсуждение: читать можно, писать — только admin. Закрывает владелец или admin.
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PATCH,
+            &format!("/collections/{top}"),
+            Some(json!({ "comments_locked": true })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(got["comments_locked"], true);
+    let error = ctx
+        .expect(
+            StatusCode::FORBIDDEN,
+            Method::POST,
+            &comments,
+            Some(json!({ "body": "x" })),
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(error["code"], "comments_locked");
+    ctx.expect(StatusCode::OK, Method::GET, &comments, None, None)
+        .await;
+    post(&admin, json!({ "body": "Обсуждение закрыто" })).await;
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PATCH,
+            &format!("/admin/collections/{top}"),
+            Some(json!({ "comments_locked": false })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(got["comments_locked"], false);
+
+    // Лимит: 5 за минуту (у bob уже 2).
+    for _ in 0..3 {
+        post(&bob, json!({ "body": "ещё" })).await;
+    }
+    ctx.expect(
+        StatusCode::TOO_MANY_REQUESTS,
+        Method::POST,
+        &comments,
+        Some(json!({ "body": "x" })),
+        Some(&bob),
+    )
+    .await;
+}
+
 fn pluck_items(detail: &Value) -> Vec<&str> {
     detail["items"]
         .as_array()

@@ -2,6 +2,7 @@
 //! помечает коллекции особыми (с читаемым адресом), меняет название и описание любой коллекции,
 //! закрывает темы.
 
+use crate::collection_comments;
 use crate::collections::{self, Editor};
 use crate::comments;
 use crate::events;
@@ -74,6 +75,29 @@ pub async fn delete_review_comment(
 ) -> AppResult<StatusCode> {
     let author = comments::remove(&state, id, None).await?;
     tracing::info!(admin_id = %admin.id, comment_id = %id, author_id = %author, "review comment deleted by admin");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Удалить любой комментарий в обсуждении коллекции (с ответами, если он корневой).
+#[utoipa::path(
+    delete, operation_id = "admin_delete_collection_comment", path = "/admin/collection-comments/{id}",
+    tag = "social-admin",
+    security(("bearer" = [])),
+    params(("id" = Uuid, Path, description = "id комментария")),
+    responses(
+        (status = 204, description = "Удалён"),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Нет или уже удалён", body = ErrorBody),
+    )
+)]
+pub async fn delete_collection_comment(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let author = collection_comments::remove(&state, id, None).await?;
+    tracing::info!(admin_id = %admin.id, comment_id = %id, author_id = %author, "collection comment deleted by admin");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -320,7 +344,8 @@ pub async fn unfeature_collection(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Изменить название и описание любой коллекции (например, чужой особой). Видимость здесь не
+/// Изменить название и описание любой коллекции (например, чужой особой), закрыть или открыть
+/// её обсуждение. Видимость здесь не
 /// меняется: `is_public` в теле — 400.
 #[utoipa::path(
     patch, operation_id = "admin_update_collection", path = "/admin/collections/{id}",
@@ -355,13 +380,15 @@ pub async fn update_collection(
     let updated = sqlx::query(
         "UPDATE collections SET
             title = COALESCE($2, title),
-            description = CASE WHEN $3 THEN $4 ELSE description END
+            description = CASE WHEN $3 THEN $4 ELSE description END,
+            comments_locked = COALESCE($5, comments_locked)
          WHERE id = $1",
     )
     .bind(id)
     .bind(title)
     .bind(description.is_some())
     .bind(description.flatten())
+    .bind(req.comments_locked)
     .execute(&state.db)
     .await?;
     if updated.rows_affected() == 0 {

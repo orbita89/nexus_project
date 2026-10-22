@@ -290,7 +290,8 @@ pub async fn update(
         "UPDATE collections SET
             title = COALESCE($2, title),
             description = CASE WHEN $3 THEN $4 ELSE description END,
-            is_public = COALESCE($5, is_public)
+            is_public = COALESCE($5, is_public),
+            comments_locked = COALESCE($6, comments_locked)
          WHERE id = $1",
     )
     .bind(id)
@@ -298,6 +299,7 @@ pub async fn update(
     .bind(description.is_some())
     .bind(description.flatten())
     .bind(req.is_public)
+    .bind(req.comments_locked)
     .execute(&state.db)
     .await
     .map_err(featured_must_be_public)?;
