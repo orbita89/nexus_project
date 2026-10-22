@@ -3439,6 +3439,92 @@ async fn related_collections(pool: PgPool) {
     assert_eq!(titles(&list)[0], "П1");
 }
 
+/// Поиск коллекций в админке: подстрока без учёта регистра, точное и начинающееся совпадение
+/// выше, фильтры `public` / `featured`, `%` и `_` буквально, приватные видны, 400 / 403.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn admin_searches_collections(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let alice = ctx.user("alice").await;
+    let exact = ctx.collection(&alice, json!({ "title": "Дюна" })).await;
+    ctx.collection(&alice, json!({ "title": "Вся Дюна и не только" }))
+        .await;
+    ctx.collection(&alice, json!({ "title": "дюна: книги" }))
+        .await;
+    ctx.collection(
+        &alice,
+        json!({ "title": "Дюна тайная", "is_public": false }),
+    )
+    .await;
+    ctx.collection(&alice, json!({ "title": "Скидки 100%" }))
+        .await;
+    ctx.collection(&alice, json!({ "title": "Скидки 1000" }))
+        .await;
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &format!("/admin/collections/{exact}/featured"),
+        None,
+        Some(&admin),
+    )
+    .await;
+    let search = |query: &str| format!("/admin/collections?{query}");
+
+    let page = ctx
+        .get_ok(&search("q=%D0%B4%D1%8E%D0%BD%D0%B0"), Some(&admin))
+        .await;
+    assert_eq!(page["total"], 4);
+    let titles = pluck(items(&page), "title");
+    assert_eq!(titles[0], "Дюна");
+    assert_eq!(titles.last().unwrap(), &"Вся Дюна и не только");
+    let page = ctx
+        .get_ok(
+            &search("q=%D0%B4%D1%8E%D0%BD%D0%B0&public=true"),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(page["total"], 3);
+    let page = ctx
+        .get_ok(
+            &search("q=%D0%B4%D1%8E%D0%BD%D0%B0&featured=true"),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(pluck(items(&page), "title"), ["Дюна"]);
+    let page = ctx.get_ok(&search("q=100%25"), Some(&admin)).await;
+    assert_eq!(pluck(items(&page), "title"), ["Скидки 100%"]);
+    let page = ctx.get_ok(&search("limit=2"), Some(&admin)).await;
+    assert_eq!(page["total"], 6);
+    assert_eq!(items(&page).len(), 2);
+
+    let error = ctx
+        .expect(
+            StatusCode::BAD_REQUEST,
+            Method::GET,
+            &search(&format!("q={}", "a".repeat(201))),
+            None,
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(error["field"], "q");
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::GET,
+        &search("q=a"),
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::GET,
+        &search("q=a"),
+        None,
+        None,
+    )
+    .await;
+}
+
 fn pluck_items(detail: &Value) -> Vec<&str> {
     detail["items"]
         .as_array()

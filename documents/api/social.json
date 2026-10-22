@@ -294,6 +294,111 @@
         ]
       }
     },
+    "/api/v1/social/admin/collections": {
+      "get": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Поиск любых коллекций (в том числе приватных) по подстроке названия: редактор связанных\nподборок, «Подборки». Сверху — точное совпадение названия, затем начинающиеся с запроса, затем\nбольше произведений, новее.",
+        "operationId": "admin_search_collections",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Подстрока названия, без учёта регистра, до 200 символов; пусто — все.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "public",
+            "in": "query",
+            "description": "Только публичные (`true`) или только приватные (`false`).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "featured",
+            "in": "query",
+            "description": "Только особые (`true`) или только обычные (`false`).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница коллекций",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Collection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`q` длиннее 200 (`validation`, `field: q`), неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/admin/collections/{id}": {
       "delete": {
         "tags": [

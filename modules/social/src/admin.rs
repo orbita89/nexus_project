@@ -7,7 +7,8 @@ use crate::collections::{self, Editor};
 use crate::comments;
 use crate::events;
 use crate::models::{
-    AdminUpdateCollection, Collection, CollectionItem, FeatureCollection, PutCollectionItem,
+    AdminCollectionsQuery, AdminUpdateCollection, Collection, CollectionItem, CollectionRow,
+    FeatureCollection, PutCollectionItem, COLLECTION_COLUMNS,
 };
 use crate::posts;
 use crate::refs;
@@ -18,7 +19,8 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde_json::Value;
 use shared::error::ErrorBody;
-use shared::extract::{JsonBody, Path};
+use shared::extract::{JsonBody, Path, Query};
+use shared::pagination::{page_bounds, Page};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -342,6 +344,83 @@ pub async fn unfeature_collection(
     tx.commit().await?;
     tracing::info!(admin_id = %admin.id, collection_id = %id, "collection unfeatured by admin");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Длина запроса поиска коллекций.
+const MAX_COLLECTION_QUERY: usize = 200;
+
+/// Поиск любых коллекций (в том числе приватных) по подстроке названия: редактор связанных
+/// подборок, «Подборки». Сверху — точное совпадение названия, затем начинающиеся с запроса, затем
+/// больше произведений, новее.
+#[utoipa::path(
+    get, operation_id = "admin_search_collections", path = "/admin/collections", tag = "social-admin",
+    security(("bearer" = [])),
+    params(AdminCollectionsQuery),
+    responses(
+        (status = 200, description = "Страница коллекций", body = Page<Collection>),
+        (status = 400, description = "`q` длиннее 200 (`validation`, `field: q`), неверный параметр", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+    )
+)]
+pub async fn search_collections(
+    State(state): State<AppState>,
+    AdminUser(_admin): AdminUser,
+    Query(query): Query<AdminCollectionsQuery>,
+) -> AppResult<Json<Page<Collection>>> {
+    let (limit, offset) = page_bounds(query.limit, query.offset);
+    let q = query
+        .q
+        .map(|q| q.trim().to_string())
+        .filter(|q| !q.is_empty());
+    if q.as_ref()
+        .is_some_and(|q| q.chars().count() > MAX_COLLECTION_QUERY)
+    {
+        return Err(AppError::Invalid {
+            field: "q".into(),
+            message: format!("q must be at most {MAX_COLLECTION_QUERY} chars"),
+        });
+    }
+    // Подстрока для ILIKE: `%`, `_` и `\` в запросе — буквально.
+    let pattern = q.as_ref().map(|q| {
+        let escaped = q
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        format!("%{escaped}%")
+    });
+    let filter = "($1::text IS NULL OR c.title ILIKE $1)
+         AND ($2::bool IS NULL OR c.is_public = $2)
+         AND ($3::bool IS NULL OR (c.featured_position IS NOT NULL) = $3)";
+    let total: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM collections c WHERE {filter}"
+    ))
+    .bind(&pattern)
+    .bind(query.public)
+    .bind(query.featured)
+    .fetch_one(&state.db)
+    .await?;
+    let rows: Vec<CollectionRow> = sqlx::query_as(&format!(
+        "SELECT {COLLECTION_COLUMNS} FROM collections c WHERE {filter}
+         ORDER BY lower(c.title) = lower($4) DESC,
+                  starts_with(lower(c.title), lower($4)) DESC,
+                  items_count DESC, c.created_at DESC, c.id
+         LIMIT $5 OFFSET $6"
+    ))
+    .bind(&pattern)
+    .bind(query.public)
+    .bind(query.featured)
+    .bind(q.as_deref().unwrap_or(""))
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(Page {
+        items: refs::collections(&state, rows).await?,
+        total,
+        limit,
+        offset,
+    }))
 }
 
 /// Изменить название и описание любой коллекции (например, чужой особой), закрыть или открыть

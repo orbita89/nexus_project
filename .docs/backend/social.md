@@ -131,7 +131,8 @@
 лента новых коллекций; частичный (`user_id`, `created_at DESC`) для публичных — коллекции тех, на
 кого подписан, в ленте (миграция `20261011100000_social_feed.sql`); частичный
 `collections_featured_idx` (`featured_position`, `created_at`) для особых (миграция
-`20261103100000_social_featured_collections.sql`).
+`20261103100000_social_featured_collections.sql`); GIN `collections_title_trgm` (`title gin_trgm_ops`) — поиск в админке (миграция
+`20261110100000_social_collections_title_trgm.sql`).
 
 ### `collection_links` ✅ — связанные подборки
 
@@ -597,6 +598,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | DELETE | `/admin/collections/{id}` | Удалить любую коллекцию, в том числе приватную → 204 |
 | PATCH | `/admin/collections/{id}` | Изменить название и описание **любой** коллекции (например, чужой особой): `{"title"?, "description"?, "comments_locked"?}` — не передано — не меняется, `description: null` — очистить → 200 `Collection`. 400 `validation` с `field` (`title` 1–200, `description` до 2000); `is_public` (и любое другое поле) — 400: видимость меняет только владелец. 404 — нет коллекции |
 | DELETE | `/admin/collection-comments/{id}` | Удалить любой комментарий обсуждения коллекции (корневой — с ответами) → 204; 404 — нет или уже удалён |
+| GET | `/admin/collections` | Поиск любых коллекций (и приватных) для редактора связей и «Подборок»: `?q=` — подстрока названия без учёта регистра (ILIKE, `%` и `_` буквально, до 200 символов; пусто — все), `public=true\|false`, `featured=true\|false`, `limit` 1–100 (20), `offset` → `Page<Collection>`. Сверху — точное совпадение названия, затем начинающиеся с `q`, затем больше произведений, новее. Индекс `collections_title_trgm` (GIN `gin_trgm_ops`, миграция `20261110100000_social_collections_title_trgm.sql`). 400 `validation` `field: q` — длиннее 200. Публичного поиска коллекций нет (публичные списки — через Meilisearch, коллекций там нет) |
 | PUT | `/admin/collections/{id}/related` | Заменить все связи: `{"ids": [uuid, ...]}` — порядок в массиве = `position` → 200 актуальный `Collection[]`. 400 `validation` `field: ids` — сама коллекция, повтор, больше 12; 400 `collection_private` — связываемая приватная; 404 — нет коллекции или одной из связываемых |
 | PUT | `/admin/collections/{id}/related/{related_id}` | Добавить связь: в конец или `{"position"?}` со сдвигом остальных (идемпотентно: уже есть — не меняется) → 200 `Collection[]`. 400 `validation` `field: related_id` — сама коллекция, `field: ids` — уже 12; 400 `collection_private`; 404 — нет коллекции или связываемой |
 | DELETE | `/admin/collections/{id}/related/{related_id}` | Убрать связь (идемпотентно), позиции перенумеровываются → 204; 404 — нет коллекции |
@@ -664,7 +666,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `directory.rs` | `InterestDirectory` для других модулей |
 | `collection_links.rs` | Связанные подборки: выдача (`related` для детали), замена списка, добавление на позицию, удаление, перенумерация |
 | `collection_comments.rs` | Обсуждение коллекции: список, запись (ответы — к корню, лимит частоты, закрытое обсуждение), удаление своего, `remove` для модерации |
-| `admin.rs` | Модерация; правка названия и описания любой коллекции; особые коллекции: slug, оформление, состав любой особой (`collections::Editor::Admin`) |
+| `admin.rs` | Модерация; поиск коллекций (`search_collections`); правка названия и описания любой коллекции; особые коллекции: slug, оформление, состав любой особой (`collections::Editor::Admin`) |
 | `slug.rs` | slug особых коллекций: проверка формата, транслит названия, служебные слова |
 
 Тесты — `app/tests/social.rs`, `app/tests/chat.rs` (чат: WebSocket + REST), `app/tests/forum.rs`, `app/tests/interests.rs`, `app/tests/feed.rs` (сущности — `app/tests/fixtures/catalog.sql`,

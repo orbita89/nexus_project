@@ -500,6 +500,22 @@ pub struct CollectionDetail {
     pub related: Vec<Collection>,
 }
 
+/// Поиск коллекций в админке (редактор связей, «Подборки»).
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct AdminCollectionsQuery {
+    /// Подстрока названия, без учёта регистра, до 200 символов; пусто — все.
+    pub q: Option<String>,
+    /// Только публичные (`true`) или только приватные (`false`).
+    pub public: Option<bool>,
+    /// Только особые (`true`) или только обычные (`false`).
+    pub featured: Option<bool>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
 /// Заменить список связанных подборок.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
