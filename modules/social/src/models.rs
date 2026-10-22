@@ -496,6 +496,25 @@ pub struct CollectionDetail {
     #[serde(flatten)]
     pub collection: Collection,
     pub items: Vec<CollectionItem>,
+    /// Связанные подборки (задаёт admin) по порядку, только публичные; `[]` — связей нет.
+    pub related: Vec<Collection>,
+}
+
+/// Заменить список связанных подборок.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetRelated {
+    /// id публичных коллекций, до 12, без повторов и без самой коллекции; порядок — порядок показа.
+    pub ids: Vec<Uuid>,
+}
+
+/// Добавить связанную подборку.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddRelated {
+    /// Куда вставить (со сдвигом остальных); без него — в конец.
+    #[schema(example = 0)]
+    pub position: Option<i32>,
 }
 
 /// Произведение в коллекции.

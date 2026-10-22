@@ -660,9 +660,11 @@ async fn detail(state: &AppState, row: CollectionRow) -> AppResult<CollectionDet
     .bind(row.id)
     .fetch_all(&state.db)
     .await?;
+    let related = crate::collection_links::related(state, row.id).await?;
     Ok(CollectionDetail {
         collection: refs::collection(state, row).await?,
         items: refs::items(state, items).await?,
+        related,
     })
 }
 

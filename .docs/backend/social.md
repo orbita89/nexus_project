@@ -133,6 +133,24 @@
 `collections_featured_idx` (`featured_position`, `created_at`) для особых (миграция
 `20261103100000_social_featured_collections.sql`).
 
+### `collection_links` ✅ — связанные подборки
+
+Миграция `20261109100000_social_collection_links.sql` (2026-10-22). Какие коллекции admin показывает
+рядом с данной («Похожие подборки») и в каком порядке. Связь направленная (обратную admin добавляет
+сам); приоритет над будущим автоподбором.
+
+| Колонка | Тип | Ограничения | Смысл |
+|---|---|---|---|
+| `collection_id` | `uuid` | PK, FK → `collections` CASCADE | Откуда связь |
+| `related_id` | `uuid` | PK, FK → `collections` CASCADE; CHECK ≠ `collection_id` | На что ссылается |
+| `position` | `integer` | NOT NULL | Порядок показа: всегда 0, 1, 2, … без пропусков (код перенумеровывает) |
+| `created_at` | `timestamptz` | NOT NULL | |
+
+**Индексы:** `collection_links_order_idx` (`collection_id`, `position`); `collection_links_related_idx`
+(`related_id`). Не больше 12 связей у коллекции (`collection_links::MAX_LINKS`, проверка в коде).
+Связывать можно только публичные; связанная, ставшая приватной, пропускается в выдаче (связь остаётся
+и вернётся при открытии), удалённая уходит каскадом. Изменения — под `FOR UPDATE` строки коллекции.
+
 ### `collection_comments` ✅ — обсуждение коллекции
 
 Миграция `20261108100000_social_collection_comments.sql` (2026-10-22). По образцу `review_comments`.
@@ -439,6 +457,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | GET | `/collections` | гость | Новые публичные коллекции |
 | GET | `/collections/featured` | гость | Особые коллекции (помечены admin) по `featured_position` — массив без пагинации |
 | GET | `/collections/by-slug/{slug}` | гость | Особая по читаемому адресу: текущий slug → 200 `CollectionDetail` (как `/collections/{id}`); бывший, коллекция всё ещё особая → 200 `{"redirect_slug"}`; бывший, больше не особая, но публичная → 200 `{"redirect_id"}` (фронт делает 301); удалена, приватна, slug неизвестен → 404. Отдельный путь — чтобы не спорить с `/collections/{id}` и `/collections/featured` |
+| GET | `/collections/{id}/related` | гость (`Option<AuthUser>`) | Связанные подборки по `position`: `Collection[]`, только публичные; связей нет — `[]`. Публичная коллекция — `Cache-Control: public, s-maxage=600`. 404 — нет коллекции или чужая приватная. То же в поле `related` детали коллекции (`/collections/{id}`, `/collections/by-slug/{slug}`) |
 | GET | `/collections/{id}/comments` | гость (`Option<AuthUser>`) | Обсуждение: `Page<CollectionComment>` (`?limit=1..100&offset=`), старые сверху (`created_at`, `id`), ответы — в той же ленте с `parent_id` (фронт группирует под корнем). `CollectionComment`: `id`, `collection_id`, `parent_id`, `author` (`UserRef`), `body`, `created_at`, `updated_at`. 404 — нет коллекции или чужая приватная |
 | POST | `/collections/{id}/comments` | user | `{"body", "parent_id"?}` (лишние поля — 400) → 201 `CollectionComment`. Ответ на ответ привязывается к корню. 400 `validation` с `field`: `body` (1–2000 после обрезки), `parent_id` (нет неудалённого комментария в этой коллекции); 403 `comments_locked` — обсуждение закрыто (admin может писать); 404 — нет коллекции или чужая приватная; 429 — больше 5 комментариев в минуту (`Retry-After: 60`) |
 | DELETE | `/collection-comments/{id}` | автор | Удалить свой (корневой — вместе с ответами) → 204; 403 — чужой; 404 — нет или уже удалён |
@@ -460,7 +479,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 
 Коллекция в ответе: `id`, `owner` (`UserRef`), `title`, `description`, `is_public`, `is_featured`, `featured_position`, `slug`, `wallpaper_url`, `cover_url`, `theme`, `wallpaper_mode`, `wallpaper_dim`, `wallpaper_blur`, `effects`, `accent_color`, `header_mode` (у обычной `null` / значения по умолчанию: `header`, `null`, `0`, `true`, `null`, `styled`; фронт рисует особую иначе и строит её адрес `/collections/{slug}`), `comments_count` (комментариев в обсуждении, без удалённых), `comments_locked` (обсуждение закрыто), `items_count`,
 `preview` (первые 4 произведения по порядку, `EntityRef` — обложки в списке; одним запросом на
-страницу), `contains` (только с `?contains=`), даты; карточка — ещё `items`: `{entity, position, note, added_at}`, где `entity` — `EntityRef` плюс `overview` (краткое описание: без HTML, до 1000 символов по границе предложения или слова, `null` — нет; одним запросом `EntityDirectory::overviews` на всю коллекцию; тот же вид у ответа `PUT .../items/{slug}`) по `position`, затем по времени
+страницу), `contains` (только с `?contains=`), даты; карточка — ещё `related` (связанные подборки, см. `collection_links`) и `items`: `{entity, position, note, added_at}`, где `entity` — `EntityRef` плюс `overview` (краткое описание: без HTML, до 1000 символов по границе предложения или слова, `null` — нет; одним запросом `EntityDirectory::overviews` на всю коллекцию; тот же вид у ответа `PUT .../items/{slug}`) по `position`, затем по времени
 добавления. Изменение содержимого обновляет `updated_at` коллекции.
 
 ### Форум
@@ -578,6 +597,9 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | DELETE | `/admin/collections/{id}` | Удалить любую коллекцию, в том числе приватную → 204 |
 | PATCH | `/admin/collections/{id}` | Изменить название и описание **любой** коллекции (например, чужой особой): `{"title"?, "description"?, "comments_locked"?}` — не передано — не меняется, `description: null` — очистить → 200 `Collection`. 400 `validation` с `field` (`title` 1–200, `description` до 2000); `is_public` (и любое другое поле) — 400: видимость меняет только владелец. 404 — нет коллекции |
 | DELETE | `/admin/collection-comments/{id}` | Удалить любой комментарий обсуждения коллекции (корневой — с ответами) → 204; 404 — нет или уже удалён |
+| PUT | `/admin/collections/{id}/related` | Заменить все связи: `{"ids": [uuid, ...]}` — порядок в массиве = `position` → 200 актуальный `Collection[]`. 400 `validation` `field: ids` — сама коллекция, повтор, больше 12; 400 `collection_private` — связываемая приватная; 404 — нет коллекции или одной из связываемых |
+| PUT | `/admin/collections/{id}/related/{related_id}` | Добавить связь: в конец или `{"position"?}` со сдвигом остальных (идемпотентно: уже есть — не меняется) → 200 `Collection[]`. 400 `validation` `field: related_id` — сама коллекция, `field: ids` — уже 12; 400 `collection_private`; 404 — нет коллекции или связываемой |
+| DELETE | `/admin/collections/{id}/related/{related_id}` | Убрать связь (идемпотентно), позиции перенумеровываются → 204; 404 — нет коллекции |
 | PUT | `/admin/collections/{id}/featured` | Пометить публичную коллекцию особой → 200 (`Collection`); тело `{"position"?, "slug"?, "wallpaper_url"?, "cover_url"?, "theme"?, "wallpaper_mode"?, "wallpaper_dim"?, "wallpaper_blur"?, "effects"?, "accent_color"?, "header_mode"?}` необязательно — оформление: не передано — не меняется, `null` — значение по умолчанию (URL, тема, `wallpaper_dim`, `accent_color` — `null`; `wallpaper_mode` — `header`; `wallpaper_blur` — 0; `effects` — `true`; `header_mode` — `styled`). URL — https до 2048, тема — `^[a-z0-9-]{1,32}$`, `wallpaper_mode` — `header`/`page`, `wallpaper_dim` — целое 0–100, `wallpaper_blur` — целое 0–20, `effects` — boolean, `accent_color` — `#rrggbb` (регистр приводится к нижнему), `header_mode` — `styled`/`plain`/`none`; неверный тип — тоже 400 с `field` (поля разбираются как JSON и проверяются в коде); без `position` в конец (уже особая — порядок не меняется); без `slug` при первой пометке — транслит названия (`social::slug::from_title`: «Русский топ 2021» → `russkiy-top-2021`, занят — `-2`, `-3`…), при повторном PUT — не меняется; смена slug — старый в историю, свой бывший можно вернуть. 400 `collection_private` — приватная; 400 `validation` с `field` (`slug`, `wallpaper_url`, `cover_url`, `theme`, `wallpaper_mode`, `wallpaper_dim`, `wallpaper_blur`, `effects`, `accent_color`, `header_mode`) — неверный формат, UUID, служебное слово, не https-URL; 409 `conflict` — slug занят другой коллекцией (сейчас или раньше) |
 | DELETE | `/admin/collections/{id}/featured` | Снять отметку → 204 (повторно — тоже); slug уходит в историю (старый адрес ведёт на `/collections/{id}`, другой коллекции не достанется); оформление сбрасывается (в `NULL` и значения по умолчанию) |
 | PUT | `/admin/collections/{id}/items/{slug}` | Добавить (201) или изменить (200) произведение в **любой особой** коллекции — как `PUT /collections/{id}/items/{slug}` владельца (`{"note"?, "position"?}`, лимит 500). 400 `not_featured` — коллекция не особая; 404 — нет коллекции или сущности |
@@ -640,6 +662,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `feed.rs` | Лента: ярусы, курсор |
 | `events.rs` | События для `realtime` |
 | `directory.rs` | `InterestDirectory` для других модулей |
+| `collection_links.rs` | Связанные подборки: выдача (`related` для детали), замена списка, добавление на позицию, удаление, перенумерация |
 | `collection_comments.rs` | Обсуждение коллекции: список, запись (ответы — к корню, лимит частоты, закрытое обсуждение), удаление своего, `remove` для модерации |
 | `admin.rs` | Модерация; правка названия и описания любой коллекции; особые коллекции: slug, оформление, состав любой особой (`collections::Editor::Admin`) |
 | `slug.rs` | slug особых коллекций: проверка формата, транслит названия, служебные слова |

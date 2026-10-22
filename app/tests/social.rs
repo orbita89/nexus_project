@@ -3187,6 +3187,258 @@ async fn collection_comments(pool: PgPool) {
     .await;
 }
 
+/// Связанные подборки: добавление (в конец и на позицию), идемпотентность, замена списком,
+/// удаление, выдача гостю (только публичные, приватная скрыта и возвращается), поле `related` в
+/// детали, каскад при удалении, лимит 12, 400/403/404.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn related_collections(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let alice = ctx.user("alice").await;
+    let main = ctx.collection(&alice, json!({ "title": "Дюна" })).await;
+    let mut others = Vec::new();
+    for n in 0..13 {
+        others.push(
+            ctx.collection(&alice, json!({ "title": format!("П{n}") }))
+                .await,
+        );
+    }
+    let private = ctx
+        .collection(&alice, json!({ "title": "Тайная", "is_public": false }))
+        .await;
+    let related = format!("/collections/{main}/related");
+    let one = |id: &str| format!("/admin/collections/{main}/related/{id}");
+    let all = format!("/admin/collections/{main}/related");
+    let titles = |list: &Value| -> Vec<String> {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    assert_eq!(ctx.get_ok(&related, None).await, json!([]));
+    // Не admin — 403.
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::PUT,
+        &one(&others[0]),
+        None,
+        Some(&alice),
+    )
+    .await;
+    // В конец, затем на позицию 0; повтор не меняет.
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &one(&others[0]),
+        None,
+        Some(&admin),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &one(&others[1]),
+        None,
+        Some(&admin),
+    )
+    .await;
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &one(&others[2]),
+            Some(json!({ "position": 0 })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(titles(&got), ["П2", "П0", "П1"]);
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &one(&others[0]),
+            Some(json!({ "position": 0 })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(
+        titles(&got),
+        ["П2", "П0", "П1"],
+        "existing link is not moved"
+    );
+    // Связь направленная.
+    assert_eq!(
+        ctx.get_ok(&format!("/collections/{}/related", others[0]), None)
+            .await,
+        json!([])
+    );
+    // Гостю — тот же порядок; в детали — поле `related`.
+    assert_eq!(
+        titles(&ctx.get_ok(&related, None).await),
+        ["П2", "П0", "П1"]
+    );
+    let detail = ctx.get_ok(&format!("/collections/{main}"), None).await;
+    assert_eq!(titles(&detail["related"]), ["П2", "П0", "П1"]);
+
+    // Удаление (идемпотентно), позиции подряд.
+    for _ in 0..2 {
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            &one(&others[0]),
+            None,
+            Some(&admin),
+        )
+        .await;
+    }
+    assert_eq!(titles(&ctx.get_ok(&related, None).await), ["П2", "П1"]);
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &one(&others[3]),
+            Some(json!({ "position": 1 })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(titles(&got), ["П2", "П3", "П1"]);
+
+    // Замена списком.
+    let got = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PUT,
+            &all,
+            Some(json!({ "ids": [others[4], others[1]] })),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(titles(&got), ["П4", "П1"]);
+
+    // Ошибки.
+    for (body, field) in [
+        (json!({ "ids": [main] }), "ids"),
+        (json!({ "ids": [others[1], others[1]] }), "ids"),
+        (json!({ "ids": others }), "ids"),
+    ] {
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::PUT,
+                &all,
+                Some(body),
+                Some(&admin),
+            )
+            .await;
+        assert_eq!(error["field"], field);
+    }
+    let error = ctx
+        .expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            &one(&main),
+            None,
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(error["field"], "related_id");
+    for path in [one(&private), all.clone()] {
+        let body = (path == all).then(|| json!({ "ids": [private] }));
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::PUT,
+                &path,
+                body,
+                Some(&admin),
+            )
+            .await;
+        assert_eq!(error["code"], "collection_private");
+    }
+    let missing = "00000000-0000-0000-0000-000000000000";
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::PUT,
+        &one(missing),
+        None,
+        Some(&admin),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::PUT,
+        &format!("/admin/collections/{missing}/related/{}", others[0]),
+        None,
+        Some(&admin),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        &format!("/collections/{missing}/related"),
+        None,
+        None,
+    )
+    .await;
+    // Лимит 12 при добавлении по одной.
+    let twelve: Vec<&String> = others.iter().take(12).collect();
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &all,
+        Some(json!({ "ids": twelve })),
+        Some(&admin),
+    )
+    .await;
+    let error = ctx
+        .expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            &one(&others[12]),
+            None,
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(error["field"], "ids");
+
+    // Ставшая приватной — скрыта, снова открытая — вернулась; удалённая — уходит каскадом.
+    let hide = |public: bool| json!({ "is_public": public });
+    ctx.expect(
+        StatusCode::OK,
+        Method::PATCH,
+        &format!("/collections/{}", others[0]),
+        Some(hide(false)),
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(
+        ctx.get_ok(&related, None).await.as_array().unwrap().len(),
+        11
+    );
+    ctx.expect(
+        StatusCode::OK,
+        Method::PATCH,
+        &format!("/collections/{}", others[0]),
+        Some(hide(true)),
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(titles(&ctx.get_ok(&related, None).await)[0], "П0");
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/collections/{}", others[0]),
+        None,
+        Some(&alice),
+    )
+    .await;
+    let list = ctx.get_ok(&related, None).await;
+    assert_eq!(list.as_array().unwrap().len(), 11);
+    assert_eq!(titles(&list)[0], "П1");
+}
+
 fn pluck_items(detail: &Value) -> Vec<&str> {
     detail["items"]
         .as_array()

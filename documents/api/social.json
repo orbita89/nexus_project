@@ -787,6 +787,268 @@
         ]
       }
     },
+    "/api/v1/social/admin/collections/{id}/related": {
+      "put": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Заменить весь список связей: порядок в `ids` — порядок показа (перетаскивание в админке).",
+        "operationId": "admin_set_related_collections",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetRelated"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Актуальный список",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Collection"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`validation` с `field: ids` — сама коллекция, повтор, больше 12; `collection_private` — связываемая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции или одной из связываемых",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/admin/collections/{id}/related/{related_id}": {
+      "put": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Добавить одну связь: в конец или на `position` со сдвигом остальных. Уже есть — не меняется.",
+        "operationId": "admin_add_related_collection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "related_id",
+            "in": "path",
+            "description": "id связываемой коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Можно не передавать тело: в конец",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddRelated"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Актуальный список",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Collection"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`validation`: `field: related_id` — сама коллекция, `field: ids` — уже 12 связей; `collection_private` — связываемая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции или связываемой",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Убрать связь → 204 (даже если её не было).",
+        "operationId": "admin_remove_related_collection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "related_id",
+            "in": "path",
+            "description": "id связанной коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Связи нет"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/admin/posts/{id}": {
       "delete": {
         "tags": [
@@ -2722,6 +2984,62 @@
             "bearer": []
           }
         ]
+      }
+    },
+    "/api/v1/social/collections/{id}/related": {
+      "get": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Связанные подборки коллекции по порядку: только публичные; связей нет — `[]`. Публичную\nколлекцию кэширует CDN (`s-maxage=600`).",
+        "operationId": "list_related_collections",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Связанные коллекции",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Collection"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции или она чужая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/social/entities/{slug}/collections": {
@@ -6001,6 +6319,22 @@
   },
   "components": {
     "schemas": {
+      "AddRelated": {
+        "type": "object",
+        "description": "Добавить связанную подборку.",
+        "properties": {
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Куда вставить (со сдвигом остальных); без него — в конец.",
+            "example": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "AdminUpdateCollection": {
         "type": "object",
         "description": "Админ меняет название и описание любой коллекции (`is_public` здесь не меняется — 400).",
@@ -6555,7 +6889,8 @@
           {
             "type": "object",
             "required": [
-              "items"
+              "items",
+              "related"
             ],
             "properties": {
               "items": {
@@ -6563,6 +6898,13 @@
                 "items": {
                   "$ref": "#/components/schemas/CollectionItem"
                 }
+              },
+              "related": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Collection"
+                },
+                "description": "Связанные подборки (задаёт admin) по порядку, только публичные; `[]` — связей нет."
               }
             }
           }
@@ -8662,6 +9004,24 @@
           "rating_desc",
           "rating_asc"
         ]
+      },
+      "SetRelated": {
+        "type": "object",
+        "description": "Заменить список связанных подборок.",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "id публичных коллекций, до 12, без повторов и без самой коллекции; порядок — порядок показа."
+          }
+        },
+        "additionalProperties": false
       },
       "SocialProfile": {
         "type": "object",

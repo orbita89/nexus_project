@@ -10,6 +10,7 @@
 pub mod admin;
 pub mod chat;
 pub mod collection_comments;
+pub mod collection_links;
 pub mod collections;
 pub mod comments;
 pub mod directory;
@@ -74,6 +75,9 @@ pub fn router() -> OpenApiRouter<AppState> {
             collection_comments::create
         ))
         .routes(routes!(collection_comments::delete))
+        .routes(routes!(collection_links::list))
+        .routes(routes!(collection_links::set))
+        .routes(routes!(collection_links::add, collection_links::remove))
         .routes(routes!(admin::delete_collection_comment))
         .routes(routes!(collections::list_for_user))
         .routes(routes!(collections::list_for_entity))
