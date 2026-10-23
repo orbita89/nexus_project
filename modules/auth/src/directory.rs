@@ -58,6 +58,28 @@ impl UserDirectory for PgUserDirectory {
             .collect())
     }
 
+    async fn search(&self, q: &str, limit: i64) -> AppResult<Vec<UserRef>> {
+        let escaped = q
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        Ok(sqlx::query_as(&format!(
+            // Индексы users_username_trgm и users_display_name_trgm: без полного просмотра.
+            "SELECT {REF_COLUMNS} FROM users
+             WHERE is_active AND (username::text ILIKE $1 OR display_name ILIKE $1)
+             -- Начинается с запроса — выше, дальше по близости имени.
+             ORDER BY (username::text ILIKE $2) DESC,
+                      similarity(username::text, $3) DESC, username
+             LIMIT $4"
+        ))
+        .bind(format!("%{escaped}%"))
+        .bind(format!("{escaped}%"))
+        .bind(q)
+        .bind(limit)
+        .fetch_all(&self.db)
+        .await?)
+    }
+
     async fn count(&self) -> AppResult<i64> {
         Ok(
             sqlx::query_scalar("SELECT count(*) FROM users WHERE is_active")

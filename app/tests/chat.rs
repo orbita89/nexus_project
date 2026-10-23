@@ -24,6 +24,20 @@ const QUIET: Duration = Duration::from_millis(300);
 const SEEDED_ROOMS: i64 = 15;
 const SYSTEM_ROOMS: usize = 5;
 
+/// Процентное кодирование значения query-параметра: кириллица в URI недопустима.
+fn enc(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
 /// Каналы из ответа `authenticated`.
 fn subscribed(auth: &Value) -> Vec<&str> {
     auth["channels"]
@@ -1421,4 +1435,214 @@ async fn mentions_notify_named_users(pool: PgPool) {
         .await;
     bob_ws.event("chat.message.created").await;
     bob_ws.silent().await;
+}
+
+/// Поиск по комнатам (`?q=`), по сообщениям (`/chat/search`) и по пользователям (`/users?q=`).
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn search_rooms_messages_and_users(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    ctx.api(
+        StatusCode::CREATED,
+        Method::POST,
+        "/chat/rooms",
+        Some(json!({ "slug": "cyberpunk-fans", "title": "Киберпанк", "description": "Про неон" })),
+        Some(&alice),
+    )
+    .await;
+
+    // Поиск по комнатам: по названию, по описанию и по куску слова.
+    for (q, expected) in [("Киберпанк", 1), ("неон", 1), ("берпан", 1), ("бузина", 0)]
+    {
+        let path = format!("/chat/rooms?limit=100&q={}", enc(q));
+        let list = ctx
+            .api(StatusCode::OK, Method::GET, &path, None, None)
+            .await;
+        assert_eq!(list["total"], expected, "q={q}");
+        if expected == 1 {
+            assert_eq!(list["items"][0]["slug"], "cyberpunk-fans", "q={q}");
+        }
+    }
+    // Системные комнаты тоже ищутся по названию.
+    let found = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            &format!("/chat/rooms?q={}", enc("Сериалы")),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(found["items"][0]["slug"], "series");
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        &format!("/chat/rooms?q={}", enc(&"я".repeat(101))),
+        None,
+        None,
+    )
+    .await;
+
+    // Сообщения: в системной комнате и в своей.
+    let mut ws = ctx.authed(&alice).await;
+    for (room, body) in [
+        ("room:general", "Смотрел вчера Дюну, отличное кино"),
+        ("room:cyberpunk-fans", "Дюна тут ни при чём"),
+        ("room:general", "А это про другое"),
+    ] {
+        ws.request(
+            json!({ "type": "chat.send", "room": room, "body": body }),
+            "chat.sent",
+        )
+        .await;
+    }
+
+    // Боб состоит только в системных: своя комната Алисы в его поиск не попадает.
+    let mine = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            &format!("/chat/search?q={}", enc("дюна")),
+            None,
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(mine["items"].as_array().unwrap().len(), 1);
+    assert_eq!(mine["items"][0]["room"], "room:general");
+    assert_eq!(
+        mine["items"][0]["message"]["body"],
+        "Смотрел вчера Дюну, отличное кино"
+    );
+    // Морфология: «Дюну» находится по «дюна».
+    assert_eq!(mine["next_before"], Value::Null);
+
+    // Алиса состоит в обеих — находит оба сообщения.
+    let both = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            &format!("/chat/search?q={}", enc("дюна")),
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(both["items"].as_array().unwrap().len(), 2);
+
+    // Поиск по одной комнате доступен и гостю.
+    let in_room = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            &format!("/chat/search?q={}&room=room:cyberpunk-fans", enc("дюна")),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(in_room["items"].as_array().unwrap().len(), 1);
+    assert_eq!(in_room["items"][0]["room"], "room:cyberpunk-fans");
+    // Без room гостю — 401.
+    ctx.api(
+        StatusCode::UNAUTHORIZED,
+        Method::GET,
+        &format!("/chat/search?q={}", enc("дюна")),
+        None,
+        None,
+    )
+    .await;
+    // Курсор: по одному на страницу.
+    let page = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            &format!("/chat/search?q={}&limit=1", enc("дюна")),
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    let next = page["next_before"].as_str().unwrap();
+    let rest = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            &format!("/chat/search?q={}&limit=1&before={next}", enc("дюна")),
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(rest["items"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        rest["items"][0]["message"]["id"],
+        page["items"][0]["message"]["id"]
+    );
+
+    let q = enc("дюна");
+    for path in [
+        "/chat/search?q=".to_string(),
+        format!("/chat/search?q={q}&limit=0"),
+        format!("/chat/search?q={q}&room={}", enc("нечто")),
+    ] {
+        ctx.api(
+            StatusCode::BAD_REQUEST,
+            Method::GET,
+            &path,
+            None,
+            Some(&alice),
+        )
+        .await;
+    }
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        &format!("/chat/search?q={}&room=room:nope", enc("дюна")),
+        None,
+        Some(&alice),
+    )
+    .await;
+
+    // Удалённое сообщение не находится.
+    let deleted = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            &format!("/chat/search?q={}&room=room:cyberpunk-fans", enc("дюна")),
+            None,
+            Some(&alice),
+        )
+        .await;
+    let id = deleted["items"][0]["message"]["id"].as_str().unwrap();
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/chat/messages/{id}"),
+        None,
+        Some(&alice),
+    )
+    .await;
+    let gone = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            &format!("/chat/search?q={}&room=room:cyberpunk-fans", enc("дюна")),
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert!(gone["items"].as_array().unwrap().is_empty());
+
+    // Пользователи для «@».
+    let users = ctx
+        .api(StatusCode::OK, Method::GET, "/users?q=ali", None, None)
+        .await;
+    assert_eq!(users[0]["username"], "alice");
+    let none = ctx
+        .api(StatusCode::OK, Method::GET, "/users?q=zzz", None, None)
+        .await;
+    assert!(none.as_array().unwrap().is_empty());
+    for path in ["/users?q=", "/users?q=ali&limit=0"] {
+        ctx.api(StatusCode::BAD_REQUEST, Method::GET, path, None, None)
+            .await;
+    }
 }

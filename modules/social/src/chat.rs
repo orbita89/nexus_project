@@ -1112,3 +1112,168 @@ mod tests {
         assert_eq!(mentions(&long)[0].len(), MAX_USERNAME);
     }
 }
+
+// ---------------------------------------------------------------- поиск по сообщениям
+
+/// Длина поискового запроса по сообщениям.
+pub const MAX_CHAT_QUERY: usize = 100;
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ChatSearchQuery {
+    /// Слова для поиска, 1–100 символов.
+    #[param(example = "дюна")]
+    pub q: String,
+    /// Комната вида `entity:dune-2021`, `person:<slug>`, `tag:<slug>` или `room:<slug>`.
+    /// Без неё — по всем моим чатам (нужен вход).
+    pub room: Option<String>,
+    /// 1–100, по умолчанию 50.
+    pub limit: Option<i64>,
+    /// Сообщения старше этого id (курсор `next_before`).
+    pub before: Option<Uuid>,
+}
+
+/// Найденное сообщение вместе с комнатой: по `room` фронтенд её открывает.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ChatSearchHit {
+    /// Имя комнаты: `entity:<slug>`, `person:<slug>`, `tag:<slug>` или `room:<slug>`.
+    #[schema(example = "entity:dune-2021")]
+    pub room: String,
+    pub message: ChatMessage,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ChatSearchPage {
+    pub items: Vec<ChatSearchHit>,
+    /// Курсор дальше в прошлое; `null` — найдено всё.
+    pub next_before: Option<Uuid>,
+}
+
+/// Имена комнат для найденных сообщений: по запросу на вид, не по запросу на сообщение.
+async fn room_names(state: &AppState, items: &[ChatMessage]) -> AppResult<HashMap<Uuid, String>> {
+    let ids_of = |kind: &str| -> Vec<Uuid> {
+        items
+            .iter()
+            .filter(|message| message.kind == kind)
+            .map(|message| message.target_id)
+            .collect()
+    };
+    let mut names = HashMap::new();
+    for (id, found) in refs::entities(state, ids_of("entity")).await? {
+        names.insert(id, format!("entity:{}", found.slug));
+    }
+    for (id, found) in refs::people(state, ids_of("person")).await? {
+        names.insert(id, format!("person:{}", found.slug));
+    }
+    for (id, found) in refs::tags(state, ids_of("tag")).await? {
+        names.insert(id, format!("tag:{}", found.slug));
+    }
+    let rooms: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, slug FROM chat_rooms WHERE id = ANY($1)")
+            .bind(ids_of("room"))
+            .fetch_all(&state.db)
+            .await?;
+    for (id, slug) in rooms {
+        names.insert(id, format!("room:{slug}"));
+    }
+    Ok(names)
+}
+
+/// Поиск по сообщениям: по словам тела, с русской морфологией (`websearch_to_tsquery`, индекс
+/// `chat_messages_body_fts`). Без `room` — по всем моим чатам, поэтому нужен вход; с `room` —
+/// по одной комнате, и это доступно гостю, как и её история. Удалённые не находятся.
+#[utoipa::path(
+    get, operation_id = "search_chat_messages", path = "/chat/search", tag = "chat",
+    params(ChatSearchQuery),
+    responses(
+        (status = 200, description = "Найденные сообщения, новые сверху", body = ChatSearchPage),
+        (status = 400, description = "Пустой или слишком длинный `q`, неверный `limit` или `room`", body = ErrorBody),
+        (status = 401, description = "Без `room` нужен вход", body = ErrorBody),
+        (status = 404, description = "Нет такой комнаты", body = ErrorBody),
+    )
+)]
+pub async fn search(
+    State(state): State<AppState>,
+    viewer: Option<AuthUser>,
+    Query(query): Query<ChatSearchQuery>,
+) -> AppResult<Json<ChatSearchPage>> {
+    let q = validate::required("q", &query.q, MAX_CHAT_QUERY)?;
+    let limit = match query.limit {
+        None => HISTORY_LIMIT,
+        Some(limit) if (1..=MAX_HISTORY_LIMIT).contains(&limit) => limit,
+        Some(_) => {
+            return Err(AppError::BadRequest(format!(
+                "limit must be between 1 and {MAX_HISTORY_LIMIT}"
+            ))
+            .on_field("limit"))
+        }
+    };
+
+    // Область поиска: одна комната ($3) или все мои чаты ($2). Обе ветки упоминают оба
+    // параметра — Postgres не принимает привязку неиспользованного.
+    let (room_scope, mine_scope, user_id, target_id) = match &query.room {
+        Some(name) => {
+            let (kind, slug) = name
+                .split_once(':')
+                .ok_or_else(|| AppError::BadRequest("room must be <kind>:<slug>".into()))?;
+            let room = room_by_slug(&state, kind, slug).await?;
+            (
+                format!("r.{} = $3", column(room)),
+                "$2::uuid IS NULL".to_string(),
+                None,
+                Some(room_parts(room).1),
+            )
+        }
+        None => {
+            let user = viewer.ok_or(AppError::Unauthorized)?;
+            // Те же комнаты, что в GET /chats: интересы всех трёх видов, свои и системные.
+            let mine = "r.entity_id IN (SELECT entity_id FROM user_interests WHERE user_id = $2)
+                 OR r.person_id IN (SELECT person_id FROM user_person_interests WHERE user_id = $2)
+                 OR r.tag_id IN (SELECT tag_id FROM user_tag_interests WHERE user_id = $2)
+                 OR r.id IN (SELECT room_id FROM chat_room_members WHERE user_id = $2)
+                 OR r.system";
+            (
+                "$3::uuid IS NULL".to_string(),
+                mine.to_string(),
+                Some(user.id),
+                None,
+            )
+        }
+    };
+    let scope = format!("({room_scope}) AND ({mine_scope})");
+
+    // Берём на одну строку больше запрошенного: есть ли что дальше в прошлое.
+    let rows: Vec<MessageRow> = sqlx::query_as(&format!(
+        "SELECT {MESSAGE_COLUMNS}, {ROOM_COLUMNS}
+         FROM chat_messages m JOIN chat_rooms r ON r.id = m.room_id
+         WHERE m.deleted_at IS NULL AND {scope}
+           AND to_tsvector('russian', m.body) @@ websearch_to_tsquery('russian', $1)
+           AND ($4::uuid IS NULL OR m.id < $4)
+         ORDER BY m.id DESC LIMIT $5"
+    ))
+    .bind(&q)
+    .bind(user_id)
+    .bind(target_id)
+    .bind(query.before)
+    .bind(limit + 1)
+    .fetch_all(&state.db)
+    .await?;
+
+    let has_more = rows.len() as i64 > limit;
+    let rows: Vec<MessageRow> = rows.into_iter().take(limit as usize).collect();
+    let items = messages(&state, rows).await?;
+    let next_before = has_more
+        .then(|| items.last().map(|message| message.id))
+        .flatten();
+    let names = room_names(&state, &items).await?;
+    let items = items
+        .into_iter()
+        .filter_map(|message| {
+            Some(ChatSearchHit {
+                room: names.get(&message.target_id)?.clone(),
+                message,
+            })
+        })
+        .collect();
+    Ok(Json(ChatSearchPage { items, next_before }))
+}

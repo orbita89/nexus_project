@@ -39,6 +39,7 @@ use utoipa_axum::routes;
 pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(profiles::get))
+        .routes(routes!(profiles::search))
         .routes(routes!(reviews::list_for_entity))
         .routes(routes!(reviews::rating))
         .routes(routes!(reviews::ratings))
@@ -99,6 +100,7 @@ pub fn router() -> OpenApiRouter<AppState> {
             interests::remove_tag
         ))
         .routes(routes!(chat::list_own))
+        .routes(routes!(chat::search))
         .routes(routes!(chat::info))
         .routes(routes!(chat::history))
         .routes(routes!(chat::get, chat::update, chat::delete))

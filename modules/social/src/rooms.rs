@@ -69,8 +69,23 @@ pub struct ListRoomsQuery {
     pub limit: Option<i64>,
     /// С 0.
     pub offset: Option<i64>,
-    /// `active` (по умолчанию), `members` или `new`.
+    /// `active` (по умолчанию), `members` или `new`. При `q` не действует: там порядок по
+    /// близости к запросу.
     pub sort: Option<RoomSort>,
+    /// Поиск по названию и описанию, до 100 символов. Пустой — как без него.
+    pub q: Option<String>,
+}
+
+/// Длина поискового запроса по комнатам.
+pub const MAX_ROOM_QUERY: usize = 100;
+
+/// Запрос → шаблон `ILIKE`: `%`, `_` и `\` в нём — буквальные символы.
+pub(crate) fn like_pattern(q: &str) -> String {
+    let escaped = q
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -189,16 +204,45 @@ pub async fn list(
     Query(query): Query<ListRoomsQuery>,
 ) -> AppResult<Json<Page<CustomRoom>>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM chat_rooms WHERE slug IS NOT NULL")
-        .fetch_one(&state.db)
-        .await?;
-    let order = query.sort.unwrap_or_default().order_by();
+    let q = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+    if q.is_some_and(|q| q.chars().count() > MAX_ROOM_QUERY) {
+        return Err(
+            AppError::BadRequest(format!("q must be at most {MAX_ROOM_QUERY} chars")).on_field("q"),
+        );
+    }
+    let pattern = q.map(like_pattern);
+    // Поиск по названию и описанию; без запроса фильтр пропускает всё. `{n}` — номер
+    // параметра с шаблоном: в счёте он единственный, в выдаче идёт после limit и offset.
+    let filter = |n: u8| {
+        format!(
+            "r.slug IS NOT NULL
+             AND (${n}::text IS NULL OR r.title ILIKE ${n} OR r.description ILIKE ${n})"
+        )
+    };
+    let total: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM chat_rooms r WHERE {}",
+        filter(1)
+    ))
+    .bind(&pattern)
+    .fetch_one(&state.db)
+    .await?;
+    // С запросом порядок задаёт близость названия, иначе — выбранная сортировка.
+    let order = match q {
+        Some(_) => "similarity(r.title, $4) DESC".to_string(),
+        None => format!(
+            "r.system DESC, {}",
+            query.sort.unwrap_or_default().order_by()
+        ),
+    };
     let mut items: Vec<CustomRoom> = sqlx::query_as(&format!(
-        "SELECT {CUSTOM_COLUMNS} FROM chat_rooms r WHERE r.slug IS NOT NULL
-         ORDER BY r.system DESC, {order}, r.created_at, r.id LIMIT $1 OFFSET $2"
+        "SELECT {CUSTOM_COLUMNS} FROM chat_rooms r WHERE {}
+         ORDER BY {order}, r.created_at, r.id LIMIT $1 OFFSET $2",
+        filter(3)
     ))
     .bind(limit)
     .bind(offset)
+    .bind(&pattern)
+    .bind(q.unwrap_or_default())
     .fetch_all(&state.db)
     .await?;
     crate::chat::fill_rooms(&state, &mut items).await?;

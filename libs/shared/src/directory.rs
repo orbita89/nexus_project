@@ -99,6 +99,9 @@ pub trait UserDirectory: Send + Sync {
     /// Активные пользователи по username (без учёта регистра), ключ — username в нижнем
     /// регистре. Для `@упоминаний` в чате: один запрос на сообщение, не по запросу на имя.
     async fn by_usernames(&self, usernames: &[String]) -> AppResult<HashMap<String, UserRef>>;
+    /// Активные пользователи по подстроке username или имени, до `limit` штук: автодополнение
+    /// «@» в чате и поиск людей. Порядок — по близости к запросу.
+    async fn search(&self, q: &str, limit: i64) -> AppResult<Vec<UserRef>>;
     /// Сколько активных пользователей всего. Нужно `social`: участник системной комнаты чата —
     /// каждый, строк в `chat_room_members` для неё нет, а `members_count` отдавать надо.
     async fn count(&self) -> AppResult<i64>;

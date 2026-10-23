@@ -1805,10 +1805,19 @@
           {
             "name": "sort",
             "in": "query",
-            "description": "`active` (по умолчанию), `members` или `new`.",
+            "description": "`active` (по умолчанию), `members` или `new`. При `q` не действует: там порядок по\nблизости к запросу.",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/RoomSort"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Поиск по названию и описанию, до 100 символов. Пустой — как без него.",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -2297,6 +2306,98 @@
             "bearer": []
           }
         ]
+      }
+    },
+    "/api/v1/social/chat/search": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Поиск по сообщениям: по словам тела, с русской морфологией (`websearch_to_tsquery`, индекс\n`chat_messages_body_fts`). Без `room` — по всем моим чатам, поэтому нужен вход; с `room` —\nпо одной комнате, и это доступно гостю, как и её история. Удалённые не находятся.",
+        "operationId": "search_chat_messages",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Слова для поиска, 1–100 символов.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "дюна"
+          },
+          {
+            "name": "room",
+            "in": "query",
+            "description": "Комната вида `entity:dune-2021`, `person:<slug>`, `tag:<slug>` или `room:<slug>`.\nБез неё — по всем моим чатам (нужен вход).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Сообщения старше этого id (курсор `next_before`).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Найденные сообщения, новые сверху",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatSearchPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пустой или слишком длинный `q`, неверный `limit` или `room`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Без `room` нужен вход",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/social/chat/{kind}/{slug}": {
@@ -6216,6 +6317,62 @@
         ]
       }
     },
+    "/api/v1/social/users": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Поиск пользователей по username и имени — автодополнение «@» в чате. Отдаёт только\nактивных; данные — через `UserDirectory` (таблица `users` принадлежит `auth`).",
+        "operationId": "search_users",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Начало username или имени, 1–50 символов.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "ali"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–50, по умолчанию 8.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Найденные пользователи",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserRef"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пустой или слишком длинный `q`, неверный `limit`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/social/users/me/marks": {
       "get": {
         "tags": [
@@ -7052,6 +7209,46 @@
             "type": "integer",
             "format": "int64",
             "description": "Непрочитанные чужие сообщения, не больше 100."
+          }
+        }
+      },
+      "ChatSearchHit": {
+        "type": "object",
+        "description": "Найденное сообщение вместе с комнатой: по `room` фронтенд её открывает.",
+        "required": [
+          "room",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/ChatMessage"
+          },
+          "room": {
+            "type": "string",
+            "description": "Имя комнаты: `entity:<slug>`, `person:<slug>`, `tag:<slug>` или `room:<slug>`.",
+            "example": "entity:dune-2021"
+          }
+        }
+      },
+      "ChatSearchPage": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatSearchHit"
+            }
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Курсор дальше в прошлое; `null` — найдено всё."
           }
         }
       },

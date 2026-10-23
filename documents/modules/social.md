@@ -368,6 +368,35 @@
 существующему, кроме автора, уходит `chat.mention` в его `user:`-канал. Непрочитанное считается
 как прежде — упоминание его не трогает.
 
+### Поиск по чату и по пользователям ✅ — чат, этап 6
+
+Миграция `20261113100000_social_chat_search.sql` (2026-10-23). Всё на PostgreSQL, не в
+Meilisearch: комнат десятки, а сообщения ищутся всегда внутри ограниченного набора комнат, так
+что отдельный индекс и его инкрементальное обновление в горячем пути `chat.send` не окупаются
+(решение пользователя, 2026-10-23). Индексы: `chat_rooms_title_trgm`,
+`chat_rooms_description_trgm` (gin_trgm_ops), `chat_messages_body_fts`
+(`to_tsvector('russian', body)` WHERE `deleted_at IS NULL`), `users_display_name_trgm`
+(username уже покрыт `users_username_trgm`).
+
+**Комнаты** — `GET /chat/rooms?q=` (`rooms::MAX_ROOM_QUERY` = 100): `ILIKE '%q%'` по `title` и
+`description`, порядок — `similarity(title, q)` убыв. При `q` сортировка `?sort` и «системные
+первыми» не действуют: там порядок задаёт близость к запросу. `%`, `_` и `\` в запросе —
+буквальные символы (`rooms::like_pattern`).
+
+**Сообщения** — `GET /chat/search` (`chat::MAX_CHAT_QUERY` = 100): `websearch_to_tsquery` по
+русской конфигурации, то есть по словам с морфологией («дюна» находит «Дюну»), а не по
+подстроке. Область: с `room=<kind>:<slug>` — одна комната (доступно гостю, как и её история),
+без `room` — все мои чаты (интересы всех трёх видов + свои комнаты + системные), и тогда нужен
+вход. Обе ветки SQL упоминают оба параметра области — Postgres не принимает привязку
+неиспользованного. Удалённые не находятся (их нет в частичном индексе). Курсор — `before` по
+`id` убыв., как в истории; `next_before` считается по лишней прочитанной строке.
+
+**Пользователи** — `GET /users?q=` (`profiles::MAX_USER_QUERY` = 50, `limit` 1–50, по умолчанию
+8): автодополнение «@» в чате. Данные — через `UserDirectory::search` (таблица `users`
+принадлежит `auth`): `ILIKE` по username и `display_name`, сверху те, чей username начинается с
+запроса, дальше по `similarity`. Только активные.
+
+
 
 ### `user_person_interests`, `user_tag_interests` ✅ — интересы к людям и тегам
 
@@ -405,7 +434,7 @@
 | Трейт | Реализует | Методы |
 |---|---|---|
 | `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>`, `by_slugs` → `HashMap<String, EntityRef>`, `overviews(ids)` → `HashMap<Uuid, String>` (краткие описания для детали коллекции). По slug — только видимые сущности каталога (активные; фильмы из TMDB — вышедшие или «Скоро премьера», либо включённые вручную): невидимая (её нет на сайте) — как неизвестная, эндпоинты по slug сущности отвечают 404, а в `/ratings` её нет. По id — все: коллекции, ленты и интересы со скрытой сущностью её не теряют |
-| `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных), `by_usernames` (пакетно, для `@упоминаний`), `count` (активных — `members_count` системных комнат чата) |
+| `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных), `by_usernames` (пакетно, для `@упоминаний`), `search` (по username и имени — автодополнение «@»), `count` (активных — `members_count` системных комнат чата) |
 | `EntityRatings` | `catalog::directory::PgEntityRatings` | `set`, `replace_all` — `social` сообщает каталогу сводки оценок для сортировок `popular` и `rating` (`social::ratings`: после записи рецензии и при старте) |
 
 В обратную сторону `social` сам реализует `InterestDirectory` (`social::directory::PgInterestDirectory`):
@@ -453,6 +482,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 
 | Метод | Путь | Доступ | Что делает |
 |---|---|---|---|
+| GET | `/users` | все | Поиск пользователей для автодополнения «@»: `?q=` (1–50, по username и имени), `?limit=` 1–50 (8) → `[UserRef]`, только активные. 400 — пустой/длинный `q`, `limit` вне 1–50 |
 | GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых) и `relation` |
 
 `relation` — `{"following": true, "followed_by": false}`: подписан ли вошедший на пользователя и
@@ -584,11 +614,12 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | GET | `/chats` | user | Мои чаты = комнаты всех сущностей, людей и тегов из интересов и свои комнаты, в которые вступил (сообщений может не быть): `[{room: "entity:<slug>" \| "person:<slug>" \| "tag:<slug>" \| "room:<slug>", kind, entity \| null, person \| null, tag \| null, custom \| null, last_message \| null, unread (до 100), muted}]` — из `entity`/`person`/`tag`/`custom` заполнено одно, по `kind`; сверху со свежими сообщениями, затем без сообщений (новые интересы сверху). Без пагинации (интересов ≤ 3 × 500) |
 | GET | `/chat/{kind}/{slug}` | все (`Option<AuthUser>`) | Комната для открытой панели, в том числе не из «моих чатов» (открыта с карточки): `{room, kind, entity \| person \| tag \| custom, last_message \| null, me}`. `me` — вошедшему `{member, muted, unread (до 100), last_read_id}`: `member` — сущность, человек или тег в интересах / в свою комнату вступил; `last_read_id` — для разделителя «новые сообщения». Гостю `me: null`. 404 — неизвестный `kind` или slug; 401 — неверный токен |
 | GET | `/chat/{kind}/{slug}/messages?before=&limit=` | все | История комнаты (`kind` — `entity`, `person`, `tag`, `room`): `{items, next_before}` — `limit` 1–100 (50) сообщений старше `before` (без него — последние), в `items` старые сверху; `next_before` — курсор дальше в прошлое, `null` — начало. 400 — `limit` вне 1–100; 404 — неизвестный `kind` или slug |
+| GET | `/chat/search` | все (`Option<AuthUser>`) | Поиск по сообщениям: `?q=` (1–100, по словам с русской морфологией), `?room=<kind>:<slug>` (без него — по всем моим чатам, нужен вход), `?limit=` 1–100 (50), `?before=` — курсор. `{items: [{room, message}], next_before}`, новые сверху; удалённые не находятся. 400 — пустой/длинный `q`, `limit` вне 1–100, `room` не вида `kind:slug`; 401 — без `room` и без входа; 404 — нет комнаты |
 | GET | `/chat/messages/{id}` | все | Одно сообщение (перечитать по `chat.message.updated` / `deleted`). 404 — нет |
 | PATCH | `/chat/messages/{id}` | автор | `{body}` 1–2000 → 200 сообщение с `edited_at`. 403 — чужое, 400 — пусто/длинно/удалено, 404 — нет |
 | DELETE | `/chat/messages/{id}` | автор или admin | Мягкое удаление → 204 (повторно — 204). 403 — чужое, 404 — нет |
 | PUT / DELETE | `/chat/{kind}/{slug}/mute` | user | Заглушить / снять → 204 (повторно — 204). 404 — неизвестный `kind` или slug |
-| GET | `/chat/rooms` | все (`Option<AuthUser>`) | Комнаты: системные сверху, дальше по `?sort=active\|members\|new` (`active` — по умолчанию): `Page<CustomRoom>` (`?limit=&offset=`). `joined` — вступил ли вошедший (одним запросом на страницу), гостю `null`. 400 — неизвестный `sort` |
+| GET | `/chat/rooms` | все (`Option<AuthUser>`) | Комнаты: системные сверху, дальше по `?sort=active\|members\|new` (`active` — по умолчанию): `Page<CustomRoom>` (`?limit=&offset=`). `?q=` — поиск по названию и описанию (тогда порядок по близости, системные не первыми). `joined` — вступил ли вошедший (одним запросом на страницу), гостю `null`. 400 — неизвестный `sort`, `q` длиннее 100 |
 | GET | `/chat/rooms/{slug}` | все (`Option<AuthUser>`) | Комната: `CustomRoom` `{id, slug, title, description, members_count, messages_count, messages_24h, last_message_at, created_at, system, owner, joined}` (`owner` — `UserRef` владельца, `null` у системной и админской; `joined` — гостю `null`, в системной и в `/chats` всегда `true`). 404 — нет |
 | POST | `/chat/rooms` | user | Своя комната: `{slug, title, description?}` → 201 `CustomRoom`, автор — владелец и участник (`interest.added`). 400 — неверный slug (a-z, 0-9, дефисы между ними, 1–80), пустое/длинное название (1–100), описание > 500; 409 — slug занят или зарезервирован (`slug_taken`), уже 5 своих комнат (`room_limit`); 429 — больше 3 за сутки (`Retry-After`) |
 | PATCH | `/chat/rooms/{slug}` | владелец или admin | `{title?, description?}` (пустое описание — убрать; slug не меняется) → 200 `CustomRoom`, событие `chat.room.updated`. 403 — чужая или системная (`room_is_system`); 404 — нет |
@@ -705,7 +736,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `threads.rs`, `posts.rs` | Форум: темы и сообщения |
 | `interests.rs` | Интересы: сущности, люди, теги (общие `add_interest` / `remove_interest`) |
 | `rooms.rs` | Комнаты со slug: список, комната, вступление и выход, свои комнаты пользователей (лимиты, зарезервированные слаги, правка и удаление владельцем), жалобы и их разбор, админские создание/правка/удаление; системные закрыты от всех изменений |
-| `chat.rs` | Чат: `PgChat` (`shared::directory::Chat` для realtime), мои чаты, история, правка, удаление, заглушение |
+| `chat.rs` | Чат: `PgChat` (`shared::directory::Chat` для realtime), мои чаты, история, поиск по сообщениям, разбор `@упоминаний`, правка, удаление, заглушение |
 | `feed.rs` | Лента: ярусы, курсор |
 | `events.rs` | События для `realtime` |
 | `directory.rs` | `InterestDirectory` для других модулей: `entity_ids`, `entities_in_use` |

@@ -76,3 +76,46 @@ struct Counts {
     following: bool,
     followed_by: bool,
 }
+
+/// Длина запроса и размер выдачи поиска пользователей.
+pub const MAX_USER_QUERY: usize = 50;
+const USER_SEARCH_LIMIT: i64 = 8;
+const MAX_USER_SEARCH_LIMIT: i64 = 50;
+
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct UserSearchQuery {
+    /// Начало username или имени, 1–50 символов.
+    #[param(example = "ali")]
+    pub q: String,
+    /// 1–50, по умолчанию 8.
+    pub limit: Option<i64>,
+}
+
+/// Поиск пользователей по username и имени — автодополнение «@» в чате. Отдаёт только
+/// активных; данные — через `UserDirectory` (таблица `users` принадлежит `auth`).
+#[utoipa::path(
+    get, operation_id = "search_users", path = "/users", tag = "users",
+    params(UserSearchQuery),
+    responses(
+        (status = 200, description = "Найденные пользователи", body = Vec<shared::directory::UserRef>),
+        (status = 400, description = "Пустой или слишком длинный `q`, неверный `limit`", body = ErrorBody),
+    )
+)]
+pub async fn search(
+    State(state): State<AppState>,
+    shared::extract::Query(query): shared::extract::Query<UserSearchQuery>,
+) -> AppResult<Json<Vec<shared::directory::UserRef>>> {
+    let q = crate::validate::required("q", &query.q, MAX_USER_QUERY)?;
+    let limit = match query.limit {
+        None => USER_SEARCH_LIMIT,
+        Some(limit) if (1..=MAX_USER_SEARCH_LIMIT).contains(&limit) => limit,
+        Some(_) => {
+            return Err(shared::AppError::BadRequest(format!(
+                "limit must be between 1 and {MAX_USER_SEARCH_LIMIT}"
+            ))
+            .on_field("limit"))
+        }
+    };
+    Ok(Json(state.users.search(&q, limit).await?))
+}
