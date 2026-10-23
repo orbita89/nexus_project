@@ -2117,6 +2117,126 @@
         ]
       }
     },
+    "/api/v1/social/chat/rooms/{slug}/hidden": {
+      "put": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Убрать комнату из «Моих чатов» → 204 (повторно — тоже 204). Комната остаётся рабочей:\nистория, отправка и подписка на канал не меняются — иначе пропали бы упоминания.\nТолько для системных: из остальных можно просто выйти.",
+        "operationId": "hide_chat_room",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "general"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Скрыта"
+          },
+          "400": {
+            "description": "Комната не системная — из неё можно выйти",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Вернуть комнату в «Мои чаты» → 204 (даже если она не была скрыта).",
+        "operationId": "unhide_chat_room",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug комнаты",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "general"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "В списке"
+          },
+          "400": {
+            "description": "Комната не системная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой комнаты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/chat/rooms/{slug}/membership": {
       "put": {
         "tags": [
@@ -7822,6 +7942,13 @@
               "null"
             ]
           },
+          "hidden": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Убрана ли комната из «Моих чатов» текущим пользователем; `null` — гость. Скрытая не\nприходит в `GET /chats`, но остаётся рабочей: история, отправка и канал не меняются."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -8587,6 +8714,13 @@
                     "string",
                     "null"
                   ]
+                },
+                "hidden": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Убрана ли комната из «Моих чатов» текущим пользователем; `null` — гость. Скрытая не\nприходит в `GET /chats`, но остаётся рабочей: история, отправка и канал не меняются."
                 },
                 "id": {
                   "type": "string",

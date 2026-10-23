@@ -128,6 +128,10 @@ pub struct CustomRoom {
     /// Вступил ли текущий пользователь; `null` — гость. В системной — всегда `true`.
     #[sqlx(skip)]
     pub joined: Option<bool>,
+    /// Убрана ли комната из «Моих чатов» текущим пользователем; `null` — гость. Скрытая не
+    /// приходит в `GET /chats`, но остаётся рабочей: история, отправка и канал не меняются.
+    #[sqlx(skip)]
+    pub hidden: Option<bool>,
     #[serde(skip)]
     pub owner_id: Option<Uuid>,
 }
@@ -605,7 +609,9 @@ pub async fn list_own(
              WHERE cm.user_id = $1 AND NOT cr.system
              UNION ALL
              -- В системных комнатах состоят все: своих строк в chat_room_members у них нет.
-             SELECT 'room', sr.id, sr.created_at, sr.id FROM chat_rooms sr WHERE sr.system)
+             SELECT 'room', sr.id, sr.created_at, sr.id FROM chat_rooms sr
+             WHERE sr.system AND NOT EXISTS (SELECT 1 FROM chat_room_hidden h
+                                             WHERE h.user_id = $1 AND h.room_id = sr.id))
          SELECT mine.kind, mine.target_id, r.last_message_id,
                 (SELECT count(*) FROM (
                      SELECT 1 FROM chat_messages m
@@ -664,6 +670,8 @@ pub async fn list_own(
                 room.id,
                 CustomRoom {
                     joined: Some(true),
+                    // Скрытые в «Мои чаты» не попадают.
+                    hidden: Some(false),
                     ..room
                 },
             )
@@ -837,6 +845,17 @@ pub async fn info(
             };
             if let Some(custom) = custom.as_mut() {
                 custom.joined = Some(member);
+                // Убрана ли из «Моих чатов»: панель показывает ссылку «Вернуть».
+                custom.hidden = Some(
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM chat_room_hidden
+                                        WHERE user_id = $1 AND room_id = $2)",
+                    )
+                    .bind(user.id)
+                    .bind(custom.id)
+                    .fetch_one(&state.db)
+                    .await?,
+                );
             }
             Some(ChatRoomMe {
                 member,

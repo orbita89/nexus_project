@@ -183,8 +183,16 @@ async fn fill_joined(
     .bind(&ids)
     .fetch_all(&state.db)
     .await?;
+    let hidden: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT room_id FROM chat_room_hidden WHERE user_id = $1 AND room_id = ANY($2)",
+    )
+    .bind(user.id)
+    .bind(&ids)
+    .fetch_all(&state.db)
+    .await?;
     for room in rooms {
         room.joined = Some(room.system || joined.contains(&room.id));
+        room.hidden = Some(hidden.contains(&room.id));
     }
     Ok(())
 }
@@ -348,6 +356,74 @@ pub async fn leave(
         );
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Убрать комнату из «Моих чатов» → 204 (повторно — тоже 204). Комната остаётся рабочей:
+/// история, отправка и подписка на канал не меняются — иначе пропали бы упоминания.
+/// Только для системных: из остальных можно просто выйти.
+#[utoipa::path(
+    put, operation_id = "hide_chat_room", path = "/chat/rooms/{slug}/hidden", tag = "chat",
+    security(("bearer" = [])),
+    params(("slug" = String, Path, description = "slug комнаты", example = "general")),
+    responses(
+        (status = 204, description = "Скрыта"),
+        (status = 400, description = "Комната не системная — из неё можно выйти", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 404, description = "Нет такой комнаты", body = ErrorBody),
+    )
+)]
+pub async fn hide(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(slug): Path<String>,
+) -> AppResult<StatusCode> {
+    let found = system_room(&state, &slug).await?;
+    sqlx::query(
+        "INSERT INTO chat_room_hidden (user_id, room_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(user.id)
+    .bind(found)
+    .execute(&state.db)
+    .await
+    .map_err(validate::missing_reference)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Вернуть комнату в «Мои чаты» → 204 (даже если она не была скрыта).
+#[utoipa::path(
+    delete, operation_id = "unhide_chat_room", path = "/chat/rooms/{slug}/hidden", tag = "chat",
+    security(("bearer" = [])),
+    params(("slug" = String, Path, description = "slug комнаты", example = "general")),
+    responses(
+        (status = 204, description = "В списке"),
+        (status = 400, description = "Комната не системная", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 404, description = "Нет такой комнаты", body = ErrorBody),
+    )
+)]
+pub async fn unhide(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(slug): Path<String>,
+) -> AppResult<StatusCode> {
+    let found = system_room(&state, &slug).await?;
+    sqlx::query("DELETE FROM chat_room_hidden WHERE user_id = $1 AND room_id = $2")
+        .bind(user.id)
+        .bind(found)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// id системной комнаты по slug. Несистемная — 400: её не скрывают, из неё выходят.
+async fn system_room(state: &AppState, slug: &str) -> AppResult<Uuid> {
+    let found = room_owner(state, slug).await?;
+    if !found.system {
+        return Err(AppError::BadRequest(
+            "only system rooms can be hidden: leave the room instead".into(),
+        ));
+    }
+    Ok(found.id)
 }
 
 /// Проверенные название, адрес и описание новой комнаты.

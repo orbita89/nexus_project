@@ -1698,3 +1698,133 @@ async fn rooms_channel_reports_catalog_changes(pool: PgPool) {
     watcher.event("chat.room.deleted").await;
     watcher.silent().await;
 }
+
+/// Скрытые комнаты: системную можно убрать из «Моих чатов», оставшись в ней.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn hidden_system_rooms(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    assert_eq!(ctx.all_chats(&alice).await.len(), SYSTEM_ROOMS);
+    let hidden = "/chat/rooms/general/hidden";
+
+    // Скрыть — и строка уходит из списка; повторно — тоже 204.
+    for _ in 0..2 {
+        ctx.api(
+            StatusCode::NO_CONTENT,
+            Method::PUT,
+            hidden,
+            None,
+            Some(&alice),
+        )
+        .await;
+    }
+    let chats = ctx.all_chats(&alice).await;
+    assert_eq!(chats.len(), SYSTEM_ROOMS - 1);
+    assert!(chats
+        .iter()
+        .all(|chat| chat["custom"]["slug"] != json!("general")));
+    // У других не скрыта.
+    assert_eq!(ctx.all_chats(&bob).await.len(), SYSTEM_ROOMS);
+
+    // Комната осталась рабочей: панель, история, отправка и подписка на канал.
+    let info = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/room/general",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(info["custom"]["hidden"], true);
+    assert_eq!(info["custom"]["joined"], true);
+    assert_eq!(info["me"]["member"], true);
+    let room = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/rooms/general",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(room["hidden"], true);
+    // Гостю — null, как и joined.
+    let guest = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/rooms/general",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(guest["hidden"], Value::Null);
+
+    let mut ws = ctx.authed(&alice).await;
+    let auth = ws
+        .request(
+            json!({ "type": "auth", "token": alice.token }),
+            "authenticated",
+        )
+        .await;
+    assert!(subscribed(&auth).contains(&"room:general"));
+    ws.request(
+        json!({ "type": "chat.send", "room": "room:general", "body": "Я ещё тут" }),
+        "chat.sent",
+    )
+    .await;
+    let history = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/room/general/messages",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(history["items"][0]["body"], "Я ещё тут");
+
+    // Вернуть; повторно — тоже 204.
+    for _ in 0..2 {
+        ctx.api(
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            hidden,
+            None,
+            Some(&alice),
+        )
+        .await;
+    }
+    assert_eq!(ctx.all_chats(&alice).await.len(), SYSTEM_ROOMS);
+
+    // Несистемную не скрывают — из неё выходят.
+    ctx.api(
+        StatusCode::CREATED,
+        Method::POST,
+        "/chat/rooms",
+        Some(json!({ "slug": "cyberpunk-fans", "title": "Киберпанк" })),
+        Some(&alice),
+    )
+    .await;
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::PUT,
+        "/chat/rooms/cyberpunk-fans/hidden",
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::PUT,
+        "/chat/rooms/nope/hidden",
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.api(StatusCode::UNAUTHORIZED, Method::PUT, hidden, None, None)
+        .await;
+}

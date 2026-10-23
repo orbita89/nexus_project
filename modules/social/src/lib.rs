@@ -108,6 +108,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(rooms::list, rooms::create_own))
         .routes(routes!(rooms::get, rooms::update_own, rooms::delete_own))
         .routes(routes!(rooms::join, rooms::leave))
+        .routes(routes!(rooms::hide, rooms::unhide))
         .routes(routes!(rooms::report))
         .routes(routes!(rooms::list_reported))
         .routes(routes!(rooms::create))
