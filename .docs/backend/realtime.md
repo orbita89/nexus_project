@@ -5,7 +5,7 @@
 интересов, ответы на свои сообщения.
 **URL:** `/ws` (WebSocket) · **Код:** `modules/realtime/` · **Источник (LOD 3):** `documents/modules/realtime.md`
 
-**Статус:** ✅ WebSocket с каналами (`thread:`, `entity:`, `user:me`), гости и вошедшие, автоподписка
+**Статус:** ✅ WebSocket с каналами (`thread:`, `entity:`, `rooms`, `user:me`), гости и вошедшие, автоподписка
 по интересам, продление входа без разрыва, лимиты и heartbeat. Шина — внутри процесса.
 Каналы людей, тегов и своих комнат (`person:`, `tag:`, `room:`), автоподписка по интересам и
 вступлению. Чат комнат сущностей, людей, тегов и своих комнат админа: отправка и «прочитано» по WebSocket (`chat.send`, `chat.read`), сообщения —
@@ -65,9 +65,10 @@
 | `entity:<slug>` | все | Новые темы о сущности, сообщения в её темах, изменение и удаление этих тем, рецензии |
 | `person:<slug>` | все | Чат комнаты человека (`chat.message.*`). Неизвестный или скрытый человек — `error` |
 | `tag:<slug>` | все | Чат комнаты тега. Неизвестный тег — `error` |
-| `room:<slug>` | все | Своя комната админа: чат, `chat.room.updated` / `chat.room.deleted`. Неизвестная — `error` |
-| `user:me` | только после `auth`, подписывается сам | `reply.created` — ответили на ваше сообщение; `interest.added` / `interest.removed` |
-| интересы | только после `auth`, подписываются сами | Как `entity:<slug>`, `person:<slug>`, `tag:<slug>`: по каждой сущности, человеку и тегу из интересов пользователя и своей комнате, в которую он вступил (`InterestDirectory::entity_ids`, `person_ids`, `tag_ids`, `room_ids`; slug комнат — `Chat::room_slugs`). `interest.added` / `interest.removed` с `entity_id`, `person_id`, `tag_id` или `room_id` меняют подписки на лету |
+| `room:<slug>` | все | Комната со slug (системная, админская или своя): чат, `chat.room.updated` / `chat.room.deleted`. Неизвестная — `error` |
+| `rooms` | все, только вручную | Каталог комнат чата: `chat.room.created` (новая комната), а также `chat.room.updated` / `chat.room.deleted` — чтобы открытый список обновлялся без перезагрузки. Автоматически никому не выдаётся |
+| `user:me` | только после `auth`, подписывается сам | `reply.created` — ответили на ваше сообщение; `interest.added` / `interest.removed`; `chat.mention` — вас назвали `@username` в чате |
+| интересы | только после `auth`, подписываются сами | Как `entity:<slug>`, `person:<slug>`, `tag:<slug>`: по каждой сущности, человеку и тегу из интересов пользователя, своей комнате, в которую он вступил, и каждой системной комнате чата (в них состоят все) (`InterestDirectory::entity_ids`, `person_ids`, `tag_ids`, `room_ids`; slug комнат — `Chat::room_slugs`). `interest.added` / `interest.removed` с `entity_id`, `person_id`, `tag_id` или `room_id` меняют подписки на лету |
 
 Существование темы при подписке не проверяется (realtime не читает таблицы форума): на
 несуществующую тему просто не придёт событий. Неизвестная сущность — `error`.
@@ -170,7 +171,7 @@ Access-токен живёт 15 минут, а соединение — часа
 |---|---|
 | `lib.rs` | Роутер `/ws`, константы лимитов |
 | `connection.rs` | Цикл соединения: сообщения клиента, события шины, heartbeat, срок токена |
-| `channels.rs` | Имена каналов ↔ `shared::events::Channel` (`thread:`, `entity:`, `person:`, `tag:`, `room:`); каналы интересов (`interests`, `rooms`); комнаты чата (`chat_room`) |
+| `channels.rs` | Имена каналов ↔ `shared::events::Channel` (`thread:`, `entity:`, `person:`, `tag:`, `room:`, общий `rooms`); каналы интересов (`interests`, `rooms`); комнаты чата (`chat_room`) |
 | `registry.rs` | Счётчик соединений пользователя |
 
 Шина — `libs/shared/src/events.rs`. Тесты — `app/tests/realtime.rs` и `app/tests/chat.rs` (чат): настоящий WebSocket против

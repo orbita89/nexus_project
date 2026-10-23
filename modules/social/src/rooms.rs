@@ -447,6 +447,7 @@ pub async fn create_own(
         &state,
         events::interest("interest.added", user.id, "room_id", id),
     );
+    events::publish(&state, events::chat_room_created(id));
     Ok((StatusCode::CREATED, Json(room(&state, id).await?)))
 }
 
@@ -646,6 +647,7 @@ pub async fn create(
     // Админу зарезервированные слаги доступны: системные всё равно закрыты UNIQUE.
     let (slug, title, description) = new_room(&req, false)?;
     let id = insert_room(&state, &slug, &title, &description, admin.id, None).await?;
+    events::publish(&state, events::chat_room_created(id));
     Ok((StatusCode::CREATED, Json(room(&state, id).await?)))
 }
 

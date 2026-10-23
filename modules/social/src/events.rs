@@ -197,12 +197,23 @@ fn room_channel(room: ChatRoom) -> Channel {
     }
 }
 
-/// `chat.room.updated` или `chat.room.deleted`: своя комната изменена или удалена админом —
-/// клиент перечитывает `GET /chat/rooms/{slug}` или закрывает её.
+/// `chat.room.updated` или `chat.room.deleted`: комната изменена или удалена — клиент
+/// перечитывает `GET /chat/rooms/{slug}` или закрывает её. Кроме самой комнаты уходит в
+/// `rooms` — открытый каталог комнат обновляет строку, не перезагружаясь.
 pub fn chat_room_changed(kind: &'static str, room_id: Uuid) -> Event {
     Event::new(
         kind,
-        vec![Channel::Room(room_id)],
+        vec![Channel::Room(room_id), Channel::Rooms],
+        json!({ "room_id": room_id }),
+    )
+}
+
+/// `chat.room.created`: завели новую комнату. Только в `rooms` — на канал самой комнаты ещё
+/// никто не подписан. Клиент перечитывает `GET /chat/rooms/{slug}` или весь список.
+pub fn chat_room_created(room_id: Uuid) -> Event {
+    Event::new(
+        "chat.room.created",
+        vec![Channel::Rooms],
         json!({ "room_id": room_id }),
     )
 }

@@ -1646,3 +1646,55 @@ async fn search_rooms_messages_and_users(pool: PgPool) {
             .await;
     }
 }
+
+/// Канал `rooms`: подписанный клиент узнаёт о новых, изменённых и удалённых комнатах.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn rooms_channel_reports_catalog_changes(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+
+    let mut watcher = ctx.client().await;
+    let subscribed = watcher
+        .request(
+            json!({ "type": "subscribe", "channels": ["rooms"] }),
+            "subscribed",
+        )
+        .await;
+    assert_eq!(subscribed["channels"], json!(["rooms"]));
+
+    let room = ctx
+        .api(
+            StatusCode::CREATED,
+            Method::POST,
+            "/chat/rooms",
+            Some(json!({ "slug": "cyberpunk-fans", "title": "Киберпанк" })),
+            Some(&alice),
+        )
+        .await;
+    let created = watcher.event("chat.room.created").await;
+    assert_eq!(created["channels"], json!(["rooms"]));
+    assert_eq!(created["data"]["room_id"], room["id"]);
+
+    ctx.api(
+        StatusCode::OK,
+        Method::PATCH,
+        "/chat/rooms/cyberpunk-fans",
+        Some(json!({ "title": "Киберпанк 2077" })),
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(
+        watcher.event("chat.room.updated").await["data"]["room_id"],
+        room["id"]
+    );
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        "/chat/rooms/cyberpunk-fans",
+        None,
+        Some(&alice),
+    )
+    .await;
+    watcher.event("chat.room.deleted").await;
+    watcher.silent().await;
+}

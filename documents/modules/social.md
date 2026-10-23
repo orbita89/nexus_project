@@ -346,6 +346,12 @@
 Жалоба одна на пользователя: повторная — `ON CONFLICT DO UPDATE` причины и `created_at`, дубля
 нет. Админский разбор — `GET /admin/chat/rooms/reports`.
 
+**Реалтайм каталога.** Создание комнаты публикует `chat.room.created` в общий канал `rooms`
+(`shared::events::Channel::Rooms`, имя канала — `rooms`, подписка только вручную через
+`subscribe`: автоматически он никому не выдаётся, он нужен лишь открытой странице со списком
+комнат). Туда же, кроме канала самой комнаты, уходят `chat.room.updated` и `chat.room.deleted`
+— открытый список обновляет строку, не перезагружаясь.
+
 ### Активность комнат и упоминания ✅ — чат, этап 5
 
 Миграция `20261112100000_social_chat_activity.sql` (2026-10-23): индекс
@@ -770,7 +776,8 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `interest.added`, `interest.removed` | пользователь | `entity_id`, `person_id`, `tag_id` или `room_id` (вступил в свою комнату / вышел) |
 | `chat.message.created` | комната: `entity:`, `person:`, `tag:` или `room:` | `kind`, `target_id`, `message` — **сообщение целиком** (`ChatMessage`). Исключение из правила «только id»: иначе каждое сообщение — запрос каждого онлайн-клиента |
 | `chat.message.updated`, `chat.message.deleted` | комната | `kind`, `target_id`, `message_id` — перечитать `GET /chat/messages/{id}` |
-| `chat.room.updated`, `chat.room.deleted` | комната (`room:`) | `room_id` — перечитать `GET /chat/rooms/{slug}` или закрыть |
+| `chat.room.created` | каталог комнат (`rooms`) | `room_id` — завели новую комнату: открытый список добавляет строку. Только в `rooms`: на канал самой комнаты ещё никто не подписан |
+| `chat.room.updated`, `chat.room.deleted` | комната (`room:`) и каталог (`rooms`) | `room_id` — перечитать `GET /chat/rooms/{slug}` или закрыть |
 | `chat.mention` | пользователь (`user:`) | `kind`, `target_id`, `message` — в сообщении назвали `@username`. Второе исключение из «только id» после `chat.message.created`: текст нужен сразу, чтобы показать уведомление. Комната — `kind` + `target_id` (в `channels` здесь `user:`, имени комнаты в них нет) |
 | `chat.read` | пользователь | `kind`, `target_id`, `message_id` — прочитано до него: другие устройства гасят счётчик |
 

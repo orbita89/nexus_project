@@ -3,7 +3,8 @@
 //! `thread:<id>` — тема форума, `entity:<slug>` — сущность каталога, `person:<slug>` — человек,
 //! `tag:<slug>` — тег, `room:<slug>` — своя комната чата (внутри по id: события приходят с id;
 //! у людей, тегов и комнат — только чат),
-//! `user:me` — личный канал вошедшего, подписывается сам после `auth`.
+//! `user:me` — личный канал вошедшего, подписывается сам после `auth`,
+//! `rooms` — каталог комнат чата (новые комнаты), подписка только вручную.
 
 use shared::directory::ChatRoom;
 use shared::events::Channel;
@@ -11,6 +12,8 @@ use shared::{AppError, AppResult, AppState};
 use uuid::Uuid;
 
 pub const USER_ME: &str = "user:me";
+/// Каталог комнат чата: `chat.room.created`. Подписка только вручную.
+pub const ROOMS: &str = "rooms";
 
 /// Разобрать имя канала из `subscribe`: канал и его каноничное имя.
 pub async fn parse(state: &AppState, name: &str) -> AppResult<(Channel, String)> {
@@ -60,6 +63,7 @@ pub async fn parse(state: &AppState, name: &str) -> AppResult<(Channel, String)>
                 .ok_or_else(|| bad(format!("unknown tag in channel: {name}")))?;
             Ok((Channel::Tag(tag.id), format!("tag:{}", tag.slug)))
         }
+        _ if name == ROOMS => Ok((Channel::Rooms, ROOMS.to_string())),
         _ if name == USER_ME => Err(bad("user:me is subscribed automatically after auth".into())),
         _ => Err(bad(format!("unknown channel: {name}"))),
     }
