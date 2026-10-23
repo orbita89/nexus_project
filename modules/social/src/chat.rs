@@ -115,6 +115,10 @@ pub struct CustomRoom {
     /// Участников. У системной комнаты — все пользователи сайта.
     pub members_count: i64,
     pub messages_count: i32,
+    /// Сообщений за последние сутки — «насколько комната жива сейчас».
+    pub messages_24h: i64,
+    /// Когда написали в последний раз; `null` — сообщений не было.
+    pub last_message_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     /// Системная комната: в ней состоят все, её нельзя покинуть, изменить и удалить.
     pub system: bool,
@@ -200,7 +204,13 @@ pub struct ChatRoomMe {
 /// его заполняет [`fill_rooms`].
 pub(crate) const CUSTOM_COLUMNS: &str = "r.id, r.slug, r.title, r.description,
      (SELECT count(*) FROM chat_room_members cm WHERE cm.room_id = r.id) AS members_count,
-     r.messages_count, r.created_at, r.system, r.owner_id";
+     r.messages_count,
+     -- Сообщений за сутки: диапазон по chat_messages_room_recent_idx. Сортировка
+     -- `?sort=active` ссылается на этот алиас.
+     (SELECT count(*) FROM chat_messages m24
+      WHERE m24.room_id = r.id AND m24.deleted_at IS NULL
+        AND m24.created_at > now() - interval '24 hours') AS messages_24h,
+     r.last_message_at, r.created_at, r.system, r.owner_id";
 
 /// Комната в списке «мои чаты». Заполнено ровно одно из `entity`, `person`, `tag`, `custom` —
 /// по `kind`.
@@ -330,6 +340,59 @@ async fn room_id(tx: &mut PgConnection, room: ChatRoom) -> AppResult<Uuid> {
     .map_err(validate::missing_reference)
 }
 
+/// Длина username — как в `auth` (`[a-zA-Z0-9_]`, до 32 символов).
+const MAX_USERNAME: usize = 32;
+
+/// `@username` из текста сообщения, без дублей и в нижнем регистре. `@` считается началом
+/// упоминания, только если перед ним не буква и не цифра: `mail@example.com` — не упоминание.
+fn mentions(body: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let bytes = body.as_bytes();
+    for (at, _) in body.match_indices('@') {
+        let before_is_word = at
+            .checked_sub(1)
+            .and_then(|i| bytes.get(i))
+            .is_some_and(|b| b.is_ascii_alphanumeric());
+        if before_is_word {
+            continue;
+        }
+        let name: String = body[at + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .take(MAX_USERNAME)
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        let name = name.to_lowercase();
+        if !found.contains(&name) {
+            found.push(name);
+        }
+    }
+    found
+}
+
+/// Упоминания в только что отправленном сообщении: каждому названному — `chat.mention` в его
+/// личный канал. Себя пропускаем, несуществующих — тоже (одним запросом в `UserDirectory`).
+async fn notify_mentions(
+    state: &AppState,
+    author_id: Uuid,
+    room: ChatRoom,
+    body: &str,
+    message: &Value,
+) -> AppResult<()> {
+    let names = mentions(body);
+    if names.is_empty() {
+        return Ok(());
+    }
+    for user in state.users.by_usernames(&names).await?.into_values() {
+        if user.id != author_id {
+            events::publish(state, events::chat_mention(user.id, room, message));
+        }
+    }
+    Ok(())
+}
+
 /// Реализация `shared::directory::Chat`: вызывает `realtime` на `chat.send` и `chat.read`.
 pub struct PgChat;
 
@@ -408,6 +471,7 @@ impl Chat for PgChat {
         tx.commit().await?;
 
         let (kind, target_id) = room_parts(room);
+        let message_body = body.clone();
         let row = MessageRow {
             id,
             kind: kind.to_string(),
@@ -421,6 +485,7 @@ impl Chat for PgChat {
         };
         let message = serde_json::json!(messages(state, vec![row]).await?.remove(0));
         events::publish(state, events::chat_message_created(room, &message));
+        notify_mentions(state, user_id, room, &message_body, &message).await?;
         Ok(message)
     }
 
@@ -1015,4 +1080,35 @@ pub async fn unmute(
     .execute(&state.db)
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mentions_are_parsed_once_and_lowercased() {
+        assert_eq!(mentions("привет, @Alice и @bob!"), ["alice", "bob"]);
+        // Дубли схлопываются, регистр не важен.
+        assert_eq!(mentions("@alice @ALICE @Alice"), ["alice"]);
+        // Знаки препинания обрывают имя, дефис в username недопустим.
+        assert_eq!(mentions("@bob, @ann-marie"), ["bob", "ann"]);
+        assert_eq!(mentions("@user_1 пишет"), ["user_1"]);
+    }
+
+    #[test]
+    fn at_inside_a_word_is_not_a_mention() {
+        assert!(mentions("mail@example.com").is_empty());
+        assert!(mentions("почта me@you").is_empty());
+        assert_eq!(mentions("(@bob)"), ["bob"]);
+    }
+
+    #[test]
+    fn empty_and_overlong_mentions() {
+        assert!(mentions("просто текст").is_empty());
+        assert!(mentions("@ пробел").is_empty());
+        assert!(mentions("@@").is_empty());
+        let long = format!("@{}", "a".repeat(40));
+        assert_eq!(mentions(&long)[0].len(), MAX_USERNAME);
+    }
 }

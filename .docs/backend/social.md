@@ -349,6 +349,28 @@
 Жалоба одна на пользователя: повторная — `ON CONFLICT DO UPDATE` причины и `created_at`, дубля
 нет. Админский разбор — `GET /admin/chat/rooms/reports`.
 
+### Активность комнат и упоминания ✅ — чат, этап 5
+
+Миграция `20261112100000_social_chat_activity.sql` (2026-10-23): индекс
+`chat_messages_room_recent_idx` (`room_id`, `created_at DESC`) WHERE `deleted_at IS NULL`.
+
+`CustomRoom` += `messages_24h` (сообщений за сутки) и `last_message_at`. Счётчик **не**
+материализован: он считается подзапросом в `CUSTOM_COLUMNS` по этому индексу — диапазон на
+комнату. Колонку-счётчик пришлось бы чем-то обнулять по истечении суток (cron или пересчёт при
+чтении), а комнат пока десятки, поэтому подзапрос дешевле и всегда точен. Когда комнат станут
+тысячи, менять надо здесь: `messages_24h` в `ORDER BY` считается для всех комнат выборки.
+
+`GET /chat/rooms?sort=active|members|new` (`rooms::RoomSort`, по умолчанию `active`): системные
+всегда первыми, дальше — `messages_24h` убыв. + `last_message_at` убыв. (`active`),
+`members_count` убыв. (`members`) или `created_at` убыв. (`new`).
+
+**Упоминания.** `chat::mentions` разбирает `@username` в теле сообщения: `@` считается началом
+упоминания, только если перед ним не буква и не цифра (`mail@example.com` — не упоминание), имя
+— `[a-zA-Z0-9_]` до 32 символов, дубли схлопываются, регистр не важен. После
+`chat.message.created` всех названных ищет один `UserDirectory::by_usernames`, и каждому
+существующему, кроме автора, уходит `chat.mention` в его `user:`-канал. Непрочитанное считается
+как прежде — упоминание его не трогает.
+
 ### `user_person_interests`, `user_tag_interests` ✅ — интересы к людям и тегам
 
 Миграция `20261031100000_social_chat_people_tags.sql` (2026-10-20). Как `user_interests`, но для
@@ -389,7 +411,7 @@
 | Трейт | Реализует | Методы |
 |---|---|---|
 | `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>`, `by_slugs` → `HashMap<String, EntityRef>`, `overviews(ids)` → `HashMap<Uuid, String>` (краткие описания для детали коллекции). По slug — только видимые сущности каталога (активные; фильмы из TMDB — вышедшие или «Скоро премьера», либо включённые вручную): невидимая (её нет на сайте) — как неизвестная, эндпоинты по slug сущности отвечают 404, а в `/ratings` её нет. По id — все: коллекции, ленты и интересы со скрытой сущностью её не теряют |
-| `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных), `count` (активных — `members_count` системных комнат чата) |
+| `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных), `by_usernames` (пакетно, для `@упоминаний`), `count` (активных — `members_count` системных комнат чата) |
 | `EntityRatings` | `catalog::directory::PgEntityRatings` | `set`, `replace_all` — `social` сообщает каталогу сводки оценок для сортировок `popular` и `rating` (`social::ratings`: после записи рецензии и при старте) |
 
 В обратную сторону `social` сам реализует `InterestDirectory` (`social::directory::PgInterestDirectory`):
@@ -576,8 +598,8 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | PATCH | `/chat/messages/{id}` | автор | `{body}` 1–2000 → 200 сообщение с `edited_at`. 403 — чужое, 400 — пусто/длинно/удалено, 404 — нет |
 | DELETE | `/chat/messages/{id}` | автор или admin | Мягкое удаление → 204 (повторно — 204). 403 — чужое, 404 — нет |
 | PUT / DELETE | `/chat/{kind}/{slug}/mute` | user | Заглушить / снять → 204 (повторно — 204). 404 — неизвестный `kind` или slug |
-| GET | `/chat/rooms` | все (`Option<AuthUser>`) | Комнаты: системные сверху, дальше больше участников — выше: `Page<CustomRoom>` (`?limit=&offset=`). `joined` — вступил ли вошедший (одним запросом на страницу), гостю `null` |
-| GET | `/chat/rooms/{slug}` | все (`Option<AuthUser>`) | Комната: `CustomRoom` `{id, slug, title, description, members_count, messages_count, created_at, system, owner, joined}` (`owner` — `UserRef` владельца, `null` у системной и админской; `joined` — гостю `null`, в системной и в `/chats` всегда `true`). 404 — нет |
+| GET | `/chat/rooms` | все (`Option<AuthUser>`) | Комнаты: системные сверху, дальше по `?sort=active\|members\|new` (`active` — по умолчанию): `Page<CustomRoom>` (`?limit=&offset=`). `joined` — вступил ли вошедший (одним запросом на страницу), гостю `null`. 400 — неизвестный `sort` |
+| GET | `/chat/rooms/{slug}` | все (`Option<AuthUser>`) | Комната: `CustomRoom` `{id, slug, title, description, members_count, messages_count, messages_24h, last_message_at, created_at, system, owner, joined}` (`owner` — `UserRef` владельца, `null` у системной и админской; `joined` — гостю `null`, в системной и в `/chats` всегда `true`). 404 — нет |
 | POST | `/chat/rooms` | user | Своя комната: `{slug, title, description?}` → 201 `CustomRoom`, автор — владелец и участник (`interest.added`). 400 — неверный slug (a-z, 0-9, дефисы между ними, 1–80), пустое/длинное название (1–100), описание > 500; 409 — slug занят или зарезервирован (`slug_taken`), уже 5 своих комнат (`room_limit`); 429 — больше 3 за сутки (`Retry-After`) |
 | PATCH | `/chat/rooms/{slug}` | владелец или admin | `{title?, description?}` (пустое описание — убрать; slug не меняется) → 200 `CustomRoom`, событие `chat.room.updated`. 403 — чужая или системная (`room_is_system`); 404 — нет |
 | DELETE | `/chat/rooms/{slug}` | владелец или admin | Удалить с сообщениями и участниками → 204, событие `chat.room.deleted`. 403 — чужая или системная (`room_is_system`); 404 — нет |
@@ -740,6 +762,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `chat.message.created` | комната: `entity:`, `person:`, `tag:` или `room:` | `kind`, `target_id`, `message` — **сообщение целиком** (`ChatMessage`). Исключение из правила «только id»: иначе каждое сообщение — запрос каждого онлайн-клиента |
 | `chat.message.updated`, `chat.message.deleted` | комната | `kind`, `target_id`, `message_id` — перечитать `GET /chat/messages/{id}` |
 | `chat.room.updated`, `chat.room.deleted` | комната (`room:`) | `room_id` — перечитать `GET /chat/rooms/{slug}` или закрыть |
+| `chat.mention` | пользователь (`user:`) | `kind`, `target_id`, `message` — в сообщении назвали `@username`. Второе исключение из «только id» после `chat.message.created`: текст нужен сразу, чтобы показать уведомление. Комната — `kind` + `target_id` (в `channels` здесь `user:`, имени комнаты в них нет) |
 | `chat.read` | пользователь | `kind`, `target_id`, `message_id` — прочитано до него: другие устройства гасят счётчик |
 
 `thread.updated` — и правка автором, и закрытие/открытие admin; `thread.deleted` и `post.deleted` —

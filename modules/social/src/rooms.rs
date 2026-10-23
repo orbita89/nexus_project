@@ -24,7 +24,7 @@ use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path, Query};
 use shared::pagination::{page_bounds, Page};
 use shared::{AdminUser, AppError, AppResult, AppState, AuthUser};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 /// Сколько своих комнат разрешено держать одновременно.
@@ -37,6 +37,41 @@ pub const MAX_ROOMS_PER_DAY: i64 = 3;
 const RESERVED_SLUGS: &[&str] = &[
     "general", "movies", "series", "books", "games", "admin", "api", "new", "search", "chat",
 ];
+
+/// Порядок каталога комнат. Системные всегда первыми — это вкладки панели.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RoomSort {
+    /// Живые сейчас: `messages_24h` убыв., при равенстве — свежее сообщение выше.
+    #[default]
+    Active,
+    /// Больше участников — выше.
+    Members,
+    /// Новые — выше.
+    New,
+}
+
+impl RoomSort {
+    /// Хвост `ORDER BY` после системных. `messages_24h` — алиас из `CUSTOM_COLUMNS`.
+    fn order_by(&self) -> &'static str {
+        match self {
+            Self::Active => "messages_24h DESC, r.last_message_at DESC NULLS LAST",
+            Self::Members => "members_count DESC",
+            Self::New => "r.created_at DESC",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListRoomsQuery {
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+    /// `active` (по умолчанию), `members` или `new`.
+    pub sort: Option<RoomSort>,
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateRoom {
@@ -139,10 +174,10 @@ async fn fill_joined(
     Ok(())
 }
 
-/// Комнаты: системные сверху, дальше — где больше участников. Вошедшему — `joined` (вступил ли).
+/// Комнаты: системные сверху, дальше — по `?sort`. Вошедшему — `joined` (вступил ли).
 #[utoipa::path(
     get, operation_id = "list_chat_rooms", path = "/chat/rooms", tag = "chat",
-    params(PageQuery),
+    params(ListRoomsQuery),
     responses(
         (status = 200, description = "Страница комнат", body = Page<CustomRoom>),
         (status = 401, description = "Неверный токен", body = ErrorBody),
@@ -151,15 +186,16 @@ async fn fill_joined(
 pub async fn list(
     State(state): State<AppState>,
     viewer: Option<AuthUser>,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<ListRoomsQuery>,
 ) -> AppResult<Json<Page<CustomRoom>>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
     let total: i64 = sqlx::query_scalar("SELECT count(*) FROM chat_rooms WHERE slug IS NOT NULL")
         .fetch_one(&state.db)
         .await?;
+    let order = query.sort.unwrap_or_default().order_by();
     let mut items: Vec<CustomRoom> = sqlx::query_as(&format!(
         "SELECT {CUSTOM_COLUMNS} FROM chat_rooms r WHERE r.slug IS NOT NULL
-         ORDER BY r.system DESC, members_count DESC, r.created_at, r.id LIMIT $1 OFFSET $2"
+         ORDER BY r.system DESC, {order}, r.created_at, r.id LIMIT $1 OFFSET $2"
     ))
     .bind(limit)
     .bind(offset)

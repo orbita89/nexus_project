@@ -96,6 +96,9 @@ pub trait UserDirectory: Send + Sync {
     async fn by_username(&self, username: &str) -> AppResult<Option<UserRef>>;
     /// Пользователи по id, включая заблокированных: их рецензии и коллекции остаются видны.
     async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, UserRef>>;
+    /// Активные пользователи по username (без учёта регистра), ключ — username в нижнем
+    /// регистре. Для `@упоминаний` в чате: один запрос на сообщение, не по запросу на имя.
+    async fn by_usernames(&self, usernames: &[String]) -> AppResult<HashMap<String, UserRef>>;
     /// Сколько активных пользователей всего. Нужно `social`: участник системной комнаты чата —
     /// каждый, строк в `chat_room_members` для неё нет, а `members_count` отдавать надо.
     async fn count(&self) -> AppResult<i64>;

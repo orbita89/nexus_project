@@ -1779,7 +1779,7 @@
         "tags": [
           "chat"
         ],
-        "summary": "Комнаты: системные сверху, дальше — где больше участников. Вошедшему — `joined` (вступил ли).",
+        "summary": "Комнаты: системные сверху, дальше — по `?sort`. Вошедшему — `joined` (вступил ли).",
         "operationId": "list_chat_rooms",
         "parameters": [
           {
@@ -1800,6 +1800,15 @@
             "schema": {
               "type": "integer",
               "format": "int64"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "`active` (по умолчанию), `members` или `new`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/RoomSort"
             }
           }
         ],
@@ -7601,6 +7610,7 @@
           "title",
           "members_count",
           "messages_count",
+          "messages_24h",
           "created_at",
           "system"
         ],
@@ -7626,10 +7636,23 @@
             ],
             "description": "Вступил ли текущий пользователь; `null` — гость. В системной — всегда `true`."
           },
+          "last_message_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Когда написали в последний раз; `null` — сообщений не было."
+          },
           "members_count": {
             "type": "integer",
             "format": "int64",
             "description": "Участников. У системной комнаты — все пользователи сайта."
+          },
+          "messages_24h": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сообщений за последние сутки — «насколько комната жива сейчас»."
           },
           "messages_count": {
             "type": "integer",
@@ -8353,6 +8376,7 @@
                 "title",
                 "members_count",
                 "messages_count",
+                "messages_24h",
                 "created_at",
                 "system"
               ],
@@ -8378,10 +8402,23 @@
                   ],
                   "description": "Вступил ли текущий пользователь; `null` — гость. В системной — всегда `true`."
                 },
+                "last_message_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "description": "Когда написали в последний раз; `null` — сообщений не было."
+                },
                 "members_count": {
                   "type": "integer",
                   "format": "int64",
                   "description": "Участников. У системной комнаты — все пользователи сайта."
+                },
+                "messages_24h": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Сообщений за последние сутки — «насколько комната жива сейчас»."
                 },
                 "messages_count": {
                   "type": "integer",
@@ -9608,6 +9645,15 @@
           "new",
           "rating_desc",
           "rating_asc"
+        ]
+      },
+      "RoomSort": {
+        "type": "string",
+        "description": "Порядок каталога комнат. Системные всегда первыми — это вкладки панели.",
+        "enum": [
+          "active",
+          "members",
+          "new"
         ]
       },
       "SetRelated": {

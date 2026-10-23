@@ -42,6 +42,22 @@ impl UserDirectory for PgUserDirectory {
         Ok(rows.into_iter().map(|row| (row.id, row)).collect())
     }
 
+    async fn by_usernames(&self, usernames: &[String]) -> AppResult<HashMap<String, UserRef>> {
+        if usernames.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<UserRef> = sqlx::query_as(&format!(
+            "SELECT {REF_COLUMNS} FROM users WHERE username = ANY($1::citext[]) AND is_active"
+        ))
+        .bind(usernames)
+        .fetch_all(&self.db)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.username.to_lowercase(), row))
+            .collect())
+    }
+
     async fn count(&self) -> AppResult<i64> {
         Ok(
             sqlx::query_scalar("SELECT count(*) FROM users WHERE is_active")

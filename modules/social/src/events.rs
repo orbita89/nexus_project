@@ -144,6 +144,19 @@ pub fn chat_message_created(room: ChatRoom, message: &serde_json::Value) -> Even
     )
 }
 
+/// `chat.mention`: в сообщении назвали `@username` — в личный канал названного. Несёт само
+/// сообщение по той же причине, что и `chat.message.created`: иначе на каждое упоминание
+/// клиент идёт за текстом, который ему нужен прямо сейчас — показать уведомление.
+/// Комната — `kind` + `target_id`, как в `chat.message.created` (в `channels` здесь `user:`).
+pub fn chat_mention(user_id: Uuid, room: ChatRoom, message: &serde_json::Value) -> Event {
+    let (kind, target_id) = room_parts(room);
+    Event::new(
+        "chat.mention",
+        vec![Channel::User(user_id)],
+        json!({ "kind": kind, "target_id": target_id, "message": message }),
+    )
+}
+
 /// `chat.message.updated` или `chat.message.deleted`: клиент перечитывает сообщение.
 pub fn chat_message_changed(event: &'static str, room: ChatRoom, message_id: Uuid) -> Event {
     let (kind, target_id) = room_parts(room);

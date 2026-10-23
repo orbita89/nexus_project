@@ -1297,3 +1297,128 @@ async fn own_rooms(pool: PgPool) {
     )
     .await;
 }
+
+/// Активность комнат: `messages_24h`, `last_message_at` и `?sort=active|members|new`.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn room_activity_and_sort(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    // Две свои комнаты: в «тихой» больше участников, в «живой» — сообщения.
+    for (slug, title) in [("quiet", "Тихая"), ("loud", "Живая")] {
+        ctx.api(
+            StatusCode::CREATED,
+            Method::POST,
+            "/chat/rooms",
+            Some(json!({ "slug": slug, "title": title })),
+            Some(&alice),
+        )
+        .await;
+    }
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        "/chat/rooms/quiet/membership",
+        None,
+        Some(&bob),
+    )
+    .await;
+    let mut ws = ctx.authed(&alice).await;
+    for body in ["Раз", "Два"] {
+        ws.request(
+            json!({ "type": "chat.send", "room": "room:loud", "body": body }),
+            "chat.sent",
+        )
+        .await;
+    }
+
+    let loud = ctx
+        .api(StatusCode::OK, Method::GET, "/chat/rooms/loud", None, None)
+        .await;
+    assert_eq!(loud["messages_24h"], 2);
+    assert!(loud["last_message_at"].is_string());
+    let quiet = ctx
+        .api(StatusCode::OK, Method::GET, "/chat/rooms/quiet", None, None)
+        .await;
+    assert_eq!(quiet["messages_24h"], 0);
+    assert_eq!(quiet["last_message_at"], Value::Null);
+
+    // Системные всегда первыми, поэтому смотрим на первую несистемную.
+    let first_of = |list: &Value| -> String {
+        list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|room| room["system"] == json!(false))
+            .unwrap()["slug"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // Без sort — по активности; «тихая» всплывает только по участникам.
+    for (sort, expected) in [
+        ("", "loud"),
+        ("active", "loud"),
+        ("members", "quiet"),
+        ("new", "loud"),
+    ] {
+        let path = format!("/chat/rooms?limit=100&sort={sort}");
+        let path = if sort.is_empty() {
+            "/chat/rooms?limit=100".to_string()
+        } else {
+            path
+        };
+        let list = ctx
+            .api(StatusCode::OK, Method::GET, &path, None, None)
+            .await;
+        assert_eq!(first_of(&list), expected, "sort={sort}");
+    }
+    // Неизвестный sort — 400.
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        "/chat/rooms?sort=nope",
+        None,
+        None,
+    )
+    .await;
+}
+
+/// Упоминания: `@username` шлёт `chat.mention` названному, себя и несуществующих пропускает.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn mentions_notify_named_users(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    let mut bob_ws = ctx.authed(&bob).await;
+    let mut alice_ws = ctx.authed(&alice).await;
+    let sent = alice_ws
+        .request(
+            json!({ "type": "chat.send", "room": "room:general", "body": "@bob глянь, @nobody тоже" }),
+            "chat.sent",
+        )
+        .await;
+
+    // Бобу прилетает само сообщение (он в системной комнате) и следом упоминание.
+    bob_ws.event("chat.message.created").await;
+    let mention = bob_ws.event("chat.mention").await;
+    assert_eq!(mention["channels"], json!(["user:me"]));
+    assert_eq!(mention["data"]["kind"], "room");
+    assert_eq!(mention["data"]["message"]["id"], sent["message"]["id"]);
+    assert_eq!(
+        mention["data"]["message"]["body"],
+        "@bob глянь, @nobody тоже"
+    );
+
+    // Себя упомянуть — тишина (кроме самого сообщения в канале комнаты).
+    alice_ws
+        .request(
+            json!({ "type": "chat.send", "room": "room:general", "body": "@alice сам себе" }),
+            "chat.sent",
+        )
+        .await;
+    bob_ws.event("chat.message.created").await;
+    bob_ws.silent().await;
+}
