@@ -34,6 +34,21 @@
 невозможна (PK).
 **Индексы:** PK — «на кого подписан я»; по `followee_id` — «кто подписан на меня».
 
+### `user_likes` ✅ — лайки профилей
+
+Миграция `20261119100000_social_user_likes.sql`. Только лайк: дизлайка у пользователя нет —
+оценивают человека, а не рецензию, и минус здесь работал бы как травля.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `user_id` | `uuid` | PK, FK → `users`, CASCADE | Кто лайкнул |
+| `liked_id` | `uuid` | PK, FK → `users`, CASCADE | Кого |
+| `created_at` | `timestamptz` | NOT NULL | |
+
+**Ограничения:** себе лайк не поставить (CHECK `user_likes_not_self`); повторный невозможен (PK).
+**Индексы:** PK; (`liked_id`, `created_at DESC`) — счётчик профиля и «кто лайкнул», новые сверху.
+Отсюда же берётся одно из слагаемых рейтинга пользователя (этап «карма»).
+
 ### `reviews` ✅ — рецензии и оценки
 
 Отзыв пользователя о произведении. Это одновременно и оценка, и рецензия: можно поставить только
@@ -663,11 +678,14 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | Метод | Путь | Доступ | Что делает |
 |---|---|---|---|
 | GET | `/users` | все | Поиск пользователей для автодополнения «@»: `?q=` (1–50, по username и имени), `?limit=` 1–50 (8) → `[UserRef]`, только активные. 400 — пустой/длинный `q`, `limit` вне 1–50 |
+| PUT | `/users/{username}/like` | user | Лайкнуть профиль → 204 (повторно — тоже 204). 400 `like_self` — себе; 404 — нет пользователя |
+| DELETE | `/users/{username}/like` | user | Снять лайк → 204 (даже если его не было) |
+| GET | `/users/{username}/likes` | все | Кто лайкнул: `Page<{user, since}>` (`?limit=1..100&offset=`), новые сверху. 404 — нет пользователя |
 | GET | `/users/{username}/comments` | гость / вошедший | «Мои комментарии»: всё, что пользователь написал — к произведениям, людям и студиям (`comments`), к рецензиям и в обсуждениях коллекций — одной лентой, новые сверху. `Page<UserComment>` (`?limit=1..100&offset=`); `UserComment`: `id`, `body`, `created_at`, `updated_at` и `target` с `kind` — `entity`/`person`/`studio` (рядом `entity`/`person`/`studio`), `review` (`review_id` и `entity`, о котором рецензия) или `collection` (`collection_id`, `title`). Цель удалена — строки в ленте нет. 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}/stats` | гость / вошедший | Аналитика профиля: `ratings` (`average`, `count`, `distribution` 1–10), `reviews_with_text`, `marks` (`later`, `done`), `reactions` (все четыре ключа), `comments` (`reviews`, `collections`, без удалённых) и `by_kind` (`rated`, `done` по типам контента — из `EntityDirectory::kind_counts`, ключей без единой сущности нет). 403 `stats_private` — владелец не открыл аналитику; 404 — нет пользователя |
 | GET | `/users/{username}/ratings` | гость / вошедший | Что пользователь оценил: `Page<{entity, rating, has_text, created_at}>`, `?sort=new` (по умолчанию) `\|rating_desc\|rating_asc`, `?limit=1..100&offset=`. 400 — неизвестный `sort`; 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}/marks` | гость / вошедший | Отметки пользователя: `?kind=later\|done` (не передан — все), `limit`, `offset` → `Page<{entity, kind, created_at}>`. Своё без оглядки на приватность — `/users/me/marks`. 403 `stats_private`; 404 — нет пользователя |
-| GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых), `relation`, `blocked` (я заблокировал его; гостю и в своём профиле `false`), `blocked_by` (он заблокировал меня; `null` — гость или свой профиль), а также `bio`, `stats_public` (открыл ли пользователь свою аналитику всем) и `registered_at` — из `auth` через `UserDirectory::details` |
+| GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых), `likes_count` и `liked` (лайкнул ли вошедший; гостю и в своём профиле `false`), `relation`, `blocked` (я заблокировал его; гостю и в своём профиле `false`), `blocked_by` (он заблокировал меня; `null` — гость или свой профиль), а также `bio`, `stats_public` (открыл ли пользователь свою аналитику всем) и `registered_at` — из `auth` через `UserDirectory::details` |
 
 **Приватность аналитики.** `/users/{username}/stats`, `/ratings` и `/marks` по умолчанию видит
 только владелец (и admin). Чужому и гостю — 403 `stats_private`, а не 404: профиль существует и
@@ -940,6 +958,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `votes.rs`, `comments.rs` | Голоса и комментарии к рецензиям |
 | `reactions.rs`, `marks.rs` | Реакции произведений и коллекций, личные отметки |
 | `target_comments.rs` | Комментарии к произведениям, людям и студиям: разбор цели `kind:slug` через справочники, лента, запись (лимит частоты, ответы — к корню), мягкое удаление, `remove` для модерации |
+| `likes.rs` | Лайки профилей: поставить, снять, список лайкнувших |
 | `user_comments.rs` | «Мои комментарии»: `UNION ALL` трёх таблиц одной лентой, пакетное раскрытие целей |
 | `stats.rs` | Аналитика профиля: сводка, список оценок, отметки пользователя; проверка приватности (`visible`) |
 | `ratings.rs` | Сводки оценок для сортировок каталога (`EntityRatings`) |

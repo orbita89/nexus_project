@@ -45,6 +45,8 @@ pub async fn get(
             (SELECT count(*) FROM forum_threads WHERE author_id = $1) AS threads_count,
             (SELECT count(*) FROM forum_posts WHERE author_id = $1 AND deleted_at IS NULL)
                 AS posts_count,
+            (SELECT count(*) FROM user_likes WHERE liked_id = $1) AS likes_count,
+            EXISTS (SELECT 1 FROM user_likes WHERE user_id = $3 AND liked_id = $1) AS liked,
             EXISTS (SELECT 1 FROM follows WHERE follower_id = $3 AND followee_id = $1) AS following,
             EXISTS (SELECT 1 FROM follows WHERE follower_id = $1 AND followee_id = $3) AS followed_by,
             EXISTS (SELECT 1 FROM user_blocks WHERE user_id = $3 AND blocked_id = $1) AS blocked,
@@ -72,6 +74,9 @@ pub async fn get(
         collections_count: row.collections_count,
         threads_count: row.threads_count,
         posts_count: row.posts_count,
+        likes_count: row.likes_count,
+        // Гостю и самому себе кнопка не нужна: лайк всегда «не поставлен».
+        liked: row.liked,
         // Гостю и самому себе блокировок не показываем — как и отношения.
         blocked: relation.is_some() && row.blocked,
         blocked_by: relation.is_some().then_some(row.blocked_by),
@@ -87,6 +92,8 @@ struct Counts {
     collections_count: i64,
     threads_count: i64,
     posts_count: i64,
+    likes_count: i64,
+    liked: bool,
     following: bool,
     followed_by: bool,
     blocked: bool,

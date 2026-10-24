@@ -232,6 +232,14 @@ pub struct Follow {
     pub since: DateTime<Utc>,
 }
 
+/// Лайк профиля.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Like {
+    pub user: UserRef,
+    /// Когда лайкнул.
+    pub since: DateTime<Utc>,
+}
+
 // ---------------------------------------------------------------- профиль
 
 /// Социальный профиль пользователя.
@@ -260,6 +268,11 @@ pub struct SocialProfile {
     /// Сообщения на форуме, без удалённых.
     #[schema(example = 25)]
     pub posts_count: i64,
+    /// Сколько лайков у профиля (дизлайков нет).
+    #[schema(example = 17)]
+    pub likes_count: i64,
+    /// Лайкнул ли вошедший этот профиль. Гостю и в своём профиле — `false`.
+    pub liked: bool,
     /// Отношение вошедшего к пользователю. `null` — гость или свой профиль.
     pub relation: Option<Relation>,
     /// Вошедший заблокировал этого пользователя. Гостю и в своём профиле — `false`.

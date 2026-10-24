@@ -4102,6 +4102,80 @@ async fn user_comments_feed(pool: PgPool) {
     assert_eq!(ctx.get_ok(&path, None).await["total"], 4);
 }
 
+/// Лайки профилей: только плюс, себе нельзя, счётчик и `liked` — в шапке профиля.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn user_likes(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+    let carol = ctx.user("carol").await;
+    let like = format!("/users/{}/like", alice.username);
+    let profile = format!("/users/{}", alice.username);
+
+    assert_eq!(ctx.get_ok(&profile, None).await["likes_count"], 0);
+
+    for user in [&bob, &carol] {
+        ctx.expect(StatusCode::NO_CONTENT, Method::PUT, &like, None, Some(user))
+            .await;
+    }
+    // Повторный лайк ничего не меняет.
+    ctx.expect(StatusCode::NO_CONTENT, Method::PUT, &like, None, Some(&bob))
+        .await;
+
+    let seen_by_bob = ctx.get_ok(&profile, Some(&bob)).await;
+    assert_eq!(seen_by_bob["likes_count"], 2);
+    assert_eq!(seen_by_bob["liked"], true);
+    // Гостю и самому себе кнопка не нужна: лайк «не поставлен».
+    assert_eq!(ctx.get_ok(&profile, None).await["liked"], false);
+    assert_eq!(ctx.get_ok(&profile, Some(&alice)).await["liked"], false);
+
+    // Кто лайкнул — новые сверху.
+    let page = ctx.get_ok(&format!("{profile}/likes"), None).await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(
+        page["items"][0]["user"]["username"],
+        carol.username.as_str()
+    );
+    assert!(page["items"][0]["since"].is_string());
+
+    // Себе — 400 `like_self`; дизлайка нет вовсе.
+    let error = ctx
+        .expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            &format!("/users/{}/like", alice.username),
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(error["code"], "like_self");
+    ctx.expect(StatusCode::UNAUTHORIZED, Method::PUT, &like, None, None)
+        .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::PUT,
+        "/users/nobody/like",
+        None,
+        Some(&bob),
+    )
+    .await;
+
+    // Снятие идемпотентно.
+    for _ in 0..2 {
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            &like,
+            None,
+            Some(&bob),
+        )
+        .await;
+    }
+    let seen_by_bob = ctx.get_ok(&profile, Some(&bob)).await;
+    assert_eq!(seen_by_bob["likes_count"], 1);
+    assert_eq!(seen_by_bob["liked"], false);
+}
+
 // ---------------------------------------------------------------- границы модулей
 
 /// Справочник сущностей, отдающий для `dune-2021` своё название: видно, что social берёт

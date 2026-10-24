@@ -8082,6 +8082,189 @@
         }
       }
     },
+    "/api/v1/social/users/{username}/like": {
+      "put": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Лайкнуть профиль. Повторный лайк ничего не меняет.",
+        "operationId": "like_user",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "Кого лайкнуть",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "author"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Лайкнут"
+          },
+          "400": {
+            "description": "Лайк самому себе (`like_self`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Снять свой лайк. Если его не было — тоже 204.",
+        "operationId": "unlike_user",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "С кого снять лайк",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "author"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Лайка нет"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/users/{username}/likes": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Кто лайкнул профиль, новые сверху.",
+        "operationId": "list_user_likes",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "author"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница лайкнувших",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Like"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/social/users/{username}/marks": {
       "get": {
         "tags": [
@@ -10006,6 +10189,24 @@
           }
         }
       },
+      "Like": {
+        "type": "object",
+        "description": "Лайк профиля.",
+        "required": [
+          "user",
+          "since"
+        ],
+        "properties": {
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Когда лайкнул."
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserRef"
+          }
+        }
+      },
       "Mark": {
         "type": "object",
         "description": "Своя отметка на карточке.",
@@ -10531,6 +10732,55 @@
                   "type": "string",
                   "format": "date-time",
                   "description": "Когда добавлена."
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_Like": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Лайк профиля.",
+              "required": [
+                "user",
+                "since"
+              ],
+              "properties": {
+                "since": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Когда лайкнул."
+                },
+                "user": {
+                  "$ref": "#/components/schemas/UserRef"
                 }
               }
             }
@@ -12036,6 +12286,8 @@
           "collections_count",
           "threads_count",
           "posts_count",
+          "likes_count",
+          "liked",
           "blocked"
         ],
         "properties": {
@@ -12072,6 +12324,16 @@
             "type": "integer",
             "format": "int64",
             "example": 3
+          },
+          "liked": {
+            "type": "boolean",
+            "description": "Лайкнул ли вошедший этот профиль. Гостю и в своём профиле — `false`."
+          },
+          "likes_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько лайков у профиля (дизлайков нет).",
+            "example": 17
           },
           "posts_count": {
             "type": "integer",

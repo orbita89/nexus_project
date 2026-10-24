@@ -20,6 +20,7 @@ mod events;
 pub mod feed;
 pub mod follows;
 pub mod interests;
+pub mod likes;
 pub mod marks;
 pub mod models;
 pub mod posts;
@@ -53,6 +54,8 @@ pub fn router() -> OpenApiRouter<AppState> {
             reactions::delete_collection
         ))
         .routes(routes!(admin::delete_comment))
+        .routes(routes!(likes::like, likes::unlike))
+        .routes(routes!(likes::list))
         .routes(routes!(stats::get))
         .routes(routes!(user_comments::list))
         .routes(routes!(stats::ratings))
