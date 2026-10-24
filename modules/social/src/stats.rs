@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 /// Пользователь профиля и право смотреть его статистику. Владельцу и админу — всегда,
 /// остальным — только при `stats_public`.
-async fn visible(
+pub(crate) async fn visible(
     state: &AppState,
     username: &str,
     viewer: Option<&AuthUser>,

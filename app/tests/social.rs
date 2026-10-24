@@ -3974,6 +3974,134 @@ async fn collection_reactions(pool: PgPool) {
     .await;
 }
 
+/// «Мои комментарии»: три источника одной лентой, с раскрытой целью и той же приватностью.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn user_comments_feed(pool: PgPool) {
+    sqlx::query("INSERT INTO studios (slug, name) VALUES ('legendary', 'Legendary Pictures')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+
+    // Цели трёх видов из таблицы comments.
+    for target in [
+        "entity:dune-2021",
+        "person:denis-villeneuve",
+        "studio:legendary",
+    ] {
+        ctx.expect(
+            StatusCode::CREATED,
+            Method::POST,
+            "/comments",
+            Some(json!({ "target": target, "body": format!("Про {target}") })),
+            Some(&alice),
+        )
+        .await;
+    }
+    // Комментарий к чужой рецензии.
+    let review = ctx
+        .review(
+            &bob,
+            "dune-2021",
+            json!({ "rating": 8, "body": "Рецензия" }),
+        )
+        .await;
+    let review_id = review["id"].as_str().unwrap().to_string();
+    ctx.expect(
+        StatusCode::CREATED,
+        Method::POST,
+        &format!("/reviews/{review_id}/comments"),
+        Some(json!({ "body": "Согласен" })),
+        Some(&alice),
+    )
+    .await;
+    // Сообщение в обсуждении коллекции.
+    let collection = ctx.collection(&bob, json!({ "title": "Подборка" })).await;
+    ctx.expect(
+        StatusCode::CREATED,
+        Method::POST,
+        &format!("/collections/{collection}/comments"),
+        Some(json!({ "body": "Хорошая подборка" })),
+        Some(&alice),
+    )
+    .await;
+
+    let path = format!("/users/{}/comments", alice.username);
+
+    // Закрыто по умолчанию: чужому и гостю — 403.
+    let error = ctx
+        .expect(StatusCode::FORBIDDEN, Method::GET, &path, None, Some(&bob))
+        .await;
+    assert_eq!(error["code"], "stats_private");
+    ctx.expect(StatusCode::FORBIDDEN, Method::GET, &path, None, None)
+        .await;
+
+    let page = ctx.get_ok(&path, Some(&alice)).await;
+    assert_eq!(page["total"], 5, "три цели + рецензия + коллекция");
+    // Новые сверху: последним был комментарий к коллекции.
+    assert_eq!(page["items"][0]["target"]["kind"], "collection");
+    assert_eq!(
+        page["items"][0]["target"]["collection_id"],
+        collection.as_str()
+    );
+    assert_eq!(page["items"][0]["target"]["title"], "Подборка");
+    assert_eq!(page["items"][1]["target"]["kind"], "review");
+    assert_eq!(page["items"][1]["target"]["review_id"], review_id.as_str());
+    assert_eq!(
+        page["items"][1]["target"]["entity"]["slug"], "dune-2021",
+        "у рецензии видно произведение"
+    );
+
+    let kinds: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["target"]["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["collection", "review", "studio", "person", "entity"]
+    );
+    assert_eq!(page["items"][2]["target"]["studio"]["slug"], "legendary");
+    assert_eq!(
+        page["items"][3]["target"]["person"]["slug"],
+        "denis-villeneuve"
+    );
+    assert_eq!(page["items"][4]["target"]["entity"]["slug"], "dune-2021");
+
+    // Страницы режут общую ленту, а не каждый источник по отдельности.
+    let first = ctx.get_ok(&format!("{path}?limit=2"), Some(&alice)).await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    assert_eq!(first["total"], 5);
+    let second = ctx
+        .get_ok(&format!("{path}?limit=2&offset=2"), Some(&alice))
+        .await;
+    assert_eq!(second["items"][0]["id"], page["items"][2]["id"]);
+
+    // Удалённый комментарий из ленты пропадает.
+    let studio_comment = page["items"][2]["id"].as_str().unwrap().to_string();
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/comments/{studio_comment}"),
+        None,
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(ctx.get_ok(&path, Some(&alice)).await["total"], 4);
+
+    // Владелец открыл аналитику — ленту видят все.
+    sqlx::query("UPDATE users SET stats_public = true WHERE username = $1::citext")
+        .bind(&alice.username)
+        .execute(&ctx.state.db)
+        .await
+        .unwrap();
+    assert_eq!(ctx.get_ok(&path, Some(&bob)).await["total"], 4);
+    assert_eq!(ctx.get_ok(&path, None).await["total"], 4);
+}
+
 // ---------------------------------------------------------------- границы модулей
 
 /// Справочник сущностей, отдающий для `dune-2021` своё название: видно, что social берёт

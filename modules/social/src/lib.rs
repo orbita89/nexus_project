@@ -33,6 +33,7 @@ mod slug;
 pub mod stats;
 pub mod target_comments;
 pub mod threads;
+pub mod user_comments;
 mod validate;
 pub mod votes;
 
@@ -53,6 +54,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         ))
         .routes(routes!(admin::delete_comment))
         .routes(routes!(stats::get))
+        .routes(routes!(user_comments::list))
         .routes(routes!(stats::ratings))
         .routes(routes!(stats::marks))
         .routes(routes!(reviews::list_for_entity))

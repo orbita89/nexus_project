@@ -663,6 +663,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | Метод | Путь | Доступ | Что делает |
 |---|---|---|---|
 | GET | `/users` | все | Поиск пользователей для автодополнения «@»: `?q=` (1–50, по username и имени), `?limit=` 1–50 (8) → `[UserRef]`, только активные. 400 — пустой/длинный `q`, `limit` вне 1–50 |
+| GET | `/users/{username}/comments` | гость / вошедший | «Мои комментарии»: всё, что пользователь написал — к произведениям, людям и студиям (`comments`), к рецензиям и в обсуждениях коллекций — одной лентой, новые сверху. `Page<UserComment>` (`?limit=1..100&offset=`); `UserComment`: `id`, `body`, `created_at`, `updated_at` и `target` с `kind` — `entity`/`person`/`studio` (рядом `entity`/`person`/`studio`), `review` (`review_id` и `entity`, о котором рецензия) или `collection` (`collection_id`, `title`). Цель удалена — строки в ленте нет. 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}/stats` | гость / вошедший | Аналитика профиля: `ratings` (`average`, `count`, `distribution` 1–10), `reviews_with_text`, `marks` (`later`, `done`), `reactions` (все четыре ключа), `comments` (`reviews`, `collections`, без удалённых) и `by_kind` (`rated`, `done` по типам контента — из `EntityDirectory::kind_counts`, ключей без единой сущности нет). 403 `stats_private` — владелец не открыл аналитику; 404 — нет пользователя |
 | GET | `/users/{username}/ratings` | гость / вошедший | Что пользователь оценил: `Page<{entity, rating, has_text, created_at}>`, `?sort=new` (по умолчанию) `\|rating_desc\|rating_asc`, `?limit=1..100&offset=`. 400 — неизвестный `sort`; 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}/marks` | гость / вошедший | Отметки пользователя: `?kind=later\|done` (не передан — все), `limit`, `offset` → `Page<{entity, kind, created_at}>`. Своё без оглядки на приватность — `/users/me/marks`. 403 `stats_private`; 404 — нет пользователя |
@@ -939,6 +940,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `votes.rs`, `comments.rs` | Голоса и комментарии к рецензиям |
 | `reactions.rs`, `marks.rs` | Реакции произведений и коллекций, личные отметки |
 | `target_comments.rs` | Комментарии к произведениям, людям и студиям: разбор цели `kind:slug` через справочники, лента, запись (лимит частоты, ответы — к корню), мягкое удаление, `remove` для модерации |
+| `user_comments.rs` | «Мои комментарии»: `UNION ALL` трёх таблиц одной лентой, пакетное раскрытие целей |
 | `stats.rs` | Аналитика профиля: сводка, список оценок, отметки пользователя; проверка приватности (`visible`) |
 | `ratings.rs` | Сводки оценок для сортировок каталога (`EntityRatings`) |
 | `threads.rs`, `posts.rs` | Форум: темы и сообщения |

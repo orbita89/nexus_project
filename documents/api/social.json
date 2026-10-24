@@ -7659,6 +7659,105 @@
         ]
       }
     },
+    "/api/v1/social/users/{username}/comments": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Комментарии пользователя, новые сверху.",
+        "operationId": "list_user_comments",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "user"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница комментариев",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_UserComment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Токен передан, но недействителен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Аналитика закрыта владельцем (`stats_private`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/users/{username}/dm": {
       "put": {
         "tags": [
@@ -11162,6 +11261,69 @@
           }
         }
       },
+      "Page_UserComment": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Комментарий пользователя в ленте «мои комментарии» вместе с тем, где он оставлен.",
+              "required": [
+                "id",
+                "target",
+                "body",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "body": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "target": {
+                  "$ref": "#/components/schemas/UserCommentTarget",
+                  "description": "Где комментарий оставлен: вид цели в `kind`, рядом — её данные."
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "Page_UserRef": {
         "type": "object",
         "description": "Страница списка.",
@@ -11954,6 +12116,35 @@
           }
         }
       },
+      "StudioRef": {
+        "type": "object",
+        "description": "Студия каталога в чужих ответах: ссылка на её страницу.",
+        "required": [
+          "id",
+          "slug",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "example": "Legendary Pictures"
+          },
+          "slug": {
+            "type": "string",
+            "example": "legendary-pictures"
+          }
+        }
+      },
       "TagInterest": {
         "type": "object",
         "description": "Тег или жанр в интересах пользователя.",
@@ -12265,6 +12456,145 @@
           }
         },
         "additionalProperties": false
+      },
+      "UserComment": {
+        "type": "object",
+        "description": "Комментарий пользователя в ленте «мои комментарии» вместе с тем, где он оставлен.",
+        "required": [
+          "id",
+          "target",
+          "body",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target": {
+            "$ref": "#/components/schemas/UserCommentTarget",
+            "description": "Где комментарий оставлен: вид цели в `kind`, рядом — её данные."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "UserCommentTarget": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "entity",
+              "kind"
+            ],
+            "properties": {
+              "entity": {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "entity"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "person",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "person"
+                ]
+              },
+              "person": {
+                "$ref": "#/components/schemas/PersonRef"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "studio",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "studio"
+                ]
+              },
+              "studio": {
+                "$ref": "#/components/schemas/StudioRef"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Комментарий к рецензии: сама рецензия и произведение, о котором она.",
+            "required": [
+              "review_id",
+              "entity",
+              "kind"
+            ],
+            "properties": {
+              "entity": {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "review"
+                ]
+              },
+              "review_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Сообщение в обсуждении коллекции.",
+            "required": [
+              "collection_id",
+              "title",
+              "kind"
+            ],
+            "properties": {
+              "collection_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "collection"
+                ]
+              },
+              "title": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "Цель комментария. `kind` — `entity`, `person`, `studio`, `review` или `collection`;\nостальные поля зависят от него."
       },
       "UserRef": {
         "type": "object",

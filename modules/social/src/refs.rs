@@ -46,6 +46,10 @@ pub async fn tags(state: &AppState, ids: Vec<Uuid>) -> AppResult<HashMap<Uuid, T
     state.tags.by_ids(&dedup(ids)).await
 }
 
+pub async fn studios(state: &AppState, ids: Vec<Uuid>) -> AppResult<HashMap<Uuid, StudioRef>> {
+    state.studios.by_ids(&dedup(ids)).await
+}
+
 /// Оценки, рецензии и реакции — только после выхода: дата выхода позже сегодняшней (UTC) → 409
 /// `not_released`. Без даты — можно.
 pub fn require_released(entity: &EntityRef) -> AppResult<()> {

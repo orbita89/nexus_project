@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
-use shared::directory::{EntityRef, PersonRef, TagRef, UserRef};
+use shared::directory::{EntityRef, PersonRef, StudioRef, TagRef, UserRef};
 use shared::pagination::Page;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -996,6 +996,57 @@ pub struct TargetCommentsQuery {
     pub limit: Option<i64>,
     /// С 0.
     pub offset: Option<i64>,
+}
+
+// ---------------------------------------------------------------- мои комментарии
+
+/// Комментарий пользователя в ленте «мои комментарии» вместе с тем, где он оставлен.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UserComment {
+    pub id: Uuid,
+    /// Где комментарий оставлен: вид цели в `kind`, рядом — её данные.
+    pub target: UserCommentTarget,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Цель комментария. `kind` — `entity`, `person`, `studio`, `review` или `collection`;
+/// остальные поля зависят от него.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum UserCommentTarget {
+    Entity {
+        entity: EntityRef,
+    },
+    Person {
+        person: PersonRef,
+    },
+    Studio {
+        studio: StudioRef,
+    },
+    /// Комментарий к рецензии: сама рецензия и произведение, о котором она.
+    Review {
+        review_id: Uuid,
+        entity: EntityRef,
+    },
+    /// Сообщение в обсуждении коллекции.
+    Collection {
+        collection_id: Uuid,
+        title: String,
+    },
+}
+
+/// Строка объединённой ленты комментариев (`comments` + `review_comments` +
+/// `collection_comments`). `source` — вид цели или таблица-источник.
+#[derive(Debug, sqlx::FromRow)]
+pub struct UserCommentRow {
+    pub id: Uuid,
+    pub source: String,
+    pub target_id: Uuid,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------- аналитика профиля
