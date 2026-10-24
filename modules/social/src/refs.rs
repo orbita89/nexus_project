@@ -6,8 +6,8 @@
 
 use crate::models::{
     Collection, CollectionEntity, CollectionItem, CollectionItemRow, CollectionRow, Interest,
-    InterestRow, MarkRow, MarkedEntity, Post, PostRow, Review, ReviewComment, ReviewCommentRow,
-    ReviewRow, Thread, ThreadRow,
+    InterestRow, MarkRow, MarkedEntity, Post, PostRow, RatedEntity, RatedRow, Review,
+    ReviewComment, ReviewCommentRow, ReviewRow, Thread, ThreadRow,
 };
 use shared::directory::{EntityRef, PersonRef, TagRef, UserRef};
 use shared::{AppError, AppResult, AppState};
@@ -296,6 +296,22 @@ pub async fn interests(state: &AppState, rows: Vec<InterestRow>) -> AppResult<Ve
             Some(Interest {
                 entity: entities.get(&row.entity_id)?.clone(),
                 since: row.created_at,
+            })
+        })
+        .collect())
+}
+
+/// Оценки пользователя для списка «что оценил»: сущности — одним вызовом справочника.
+pub async fn rated(state: &AppState, rows: Vec<RatedRow>) -> AppResult<Vec<RatedEntity>> {
+    let entities = entities(state, rows.iter().map(|r| r.entity_id).collect()).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(RatedEntity {
+                entity: entities.get(&row.entity_id)?.clone(),
+                rating: row.rating,
+                has_text: row.has_text,
+                created_at: row.created_at,
             })
         })
         .collect())

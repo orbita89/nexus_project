@@ -553,7 +553,7 @@ Meilisearch: комнат десятки, а сообщения ищутся в�
 
 | Трейт | Реализует | Методы |
 |---|---|---|
-| `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>`, `by_slugs` → `HashMap<String, EntityRef>`, `overviews(ids)` → `HashMap<Uuid, String>` (краткие описания для детали коллекции). По slug — только видимые сущности каталога (активные; фильмы из TMDB — вышедшие или «Скоро премьера», либо включённые вручную): невидимая (её нет на сайте) — как неизвестная, эндпоинты по slug сущности отвечают 404, а в `/ratings` её нет. По id — все: коллекции, ленты и интересы со скрытой сущностью её не теряют |
+| `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>`, `by_slugs` → `HashMap<String, EntityRef>`, `overviews(ids)` → `HashMap<Uuid, String>` (краткие описания для детали коллекции), `kind_counts(ids)` → `HashMap<String, i64>` (сколько сущностей каждого типа среди переданных — разрез аналитики профиля по `movie`/`series`/`book`/`game` одним запросом вместо выборки всех `EntityRef`). По slug — только видимые сущности каталога (активные; фильмы из TMDB — вышедшие или «Скоро премьера», либо включённые вручную): невидимая (её нет на сайте) — как неизвестная, эндпоинты по slug сущности отвечают 404, а в `/ratings` её нет. По id — все: коллекции, ленты и интересы со скрытой сущностью её не теряют |
 | `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных), `by_usernames` (пакетно, для `@упоминаний`), `search` (по username и имени, с `exclude` — блокировки передаёт `social`), `is_verified` (подтверждён ли email — право начать переписку), `details(id)` → `UserDetails` `{bio, stats_public, created_at}` (поля страницы профиля: в `UserRef` им не место — он стоит рядом с каждой рецензией), `count` (активных — `members_count` системных комнат чата) |
 | `EntityRatings` | `catalog::directory::PgEntityRatings` | `set`, `replace_all` — `social` сообщает каталогу сводки оценок для сортировок `popular` и `rating` (`social::ratings`: после записи рецензии и при старте) |
 
@@ -607,7 +607,16 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | Метод | Путь | Доступ | Что делает |
 |---|---|---|---|
 | GET | `/users` | все | Поиск пользователей для автодополнения «@»: `?q=` (1–50, по username и имени), `?limit=` 1–50 (8) → `[UserRef]`, только активные. 400 — пустой/длинный `q`, `limit` вне 1–50 |
+| GET | `/users/{username}/stats` | гость / вошедший | Аналитика профиля: `ratings` (`average`, `count`, `distribution` 1–10), `reviews_with_text`, `marks` (`later`, `done`), `reactions` (все четыре ключа), `comments` (`reviews`, `collections`, без удалённых) и `by_kind` (`rated`, `done` по типам контента — из `EntityDirectory::kind_counts`, ключей без единой сущности нет). 403 `stats_private` — владелец не открыл аналитику; 404 — нет пользователя |
+| GET | `/users/{username}/ratings` | гость / вошедший | Что пользователь оценил: `Page<{entity, rating, has_text, created_at}>`, `?sort=new` (по умолчанию) `\|rating_desc\|rating_asc`, `?limit=1..100&offset=`. 400 — неизвестный `sort`; 403 `stats_private`; 404 — нет пользователя |
+| GET | `/users/{username}/marks` | гость / вошедший | Отметки пользователя: `?kind=later\|done` (не передан — все), `limit`, `offset` → `Page<{entity, kind, created_at}>`. Своё без оглядки на приватность — `/users/me/marks`. 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых), `relation`, `blocked` (я заблокировал его; гостю и в своём профиле `false`), `blocked_by` (он заблокировал меня; `null` — гость или свой профиль), а также `bio`, `stats_public` (открыл ли пользователь свою аналитику всем) и `registered_at` — из `auth` через `UserDirectory::details` |
+
+**Приватность аналитики.** `/users/{username}/stats`, `/ratings` и `/marks` по умолчанию видит
+только владелец (и admin). Чужому и гостю — 403 `stats_private`, а не 404: профиль существует и
+открыт, закрыта именно статистика. Открывает её сам владелец — `stats_public: true` в
+`PATCH /api/v1/auth/me`; `stats_public` виден в шапке профиля, так что фронтенд знает, показывать
+ли вкладки, не получая 403.
 
 `relation` — `{"following": true, "followed_by": false}`: подписан ли вошедший на пользователя и
 пользователь на него. Для гостя и своего профиля — `null`. Так фронтенд рисует кнопку
@@ -873,6 +882,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `reviews.rs`, `follows.rs`, `collections.rs` | Эндпоинты |
 | `votes.rs`, `comments.rs` | Голоса и комментарии к рецензиям |
 | `reactions.rs`, `marks.rs` | Реакции и личные отметки |
+| `stats.rs` | Аналитика профиля: сводка, список оценок, отметки пользователя; проверка приватности (`visible`) |
 | `ratings.rs` | Сводки оценок для сортировок каталога (`EntityRatings`) |
 | `threads.rs`, `posts.rs` | Форум: темы и сообщения |
 | `interests.rs` | Интересы: сущности, люди, теги (общие `add_interest` / `remove_interest`) |

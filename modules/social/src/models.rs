@@ -931,6 +931,122 @@ pub struct FeedQuery {
     pub limit: Option<i64>,
 }
 
+// ---------------------------------------------------------------- аналитика профиля
+
+/// Что пользователь успел на площадке. Числа считаются по его строкам: чужие ограничения
+/// видимости (приватные коллекции) сюда не попадают.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileStats {
+    /// Оценки: среднее, сколько их и распределение по 1–10.
+    pub ratings: ProfileRatings,
+    /// Рецензии с текстом (оценка без текста сюда не идёт).
+    #[schema(example = 12)]
+    pub reviews_with_text: i64,
+    /// Отметки «посмотрю позже» и «просмотрено».
+    pub marks: MarkCounts,
+    /// Свои реакции на произведения: всегда все четыре ключа.
+    pub reactions: Reactions,
+    /// Комментарии: к рецензиям и в обсуждениях коллекций, без удалённых.
+    pub comments: CommentCounts,
+    /// Сколько оценённого и просмотренного каждого типа (`movie`, `series`, `book`, `game`):
+    /// типы берутся у каталога через справочник, ключей без единой сущности нет.
+    pub by_kind: ByKind,
+}
+
+/// Оценки пользователя. Без оценок — `average: null`, `count: 0`, нули в распределении.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileRatings {
+    /// Округлено до 0.1. `null` — не оценивал.
+    #[schema(example = 8.3)]
+    pub average: Option<f64>,
+    #[schema(example = 42)]
+    pub count: i64,
+    /// Сколько оценок 1, 2, … 10 — ровно 10 чисел.
+    pub distribution: Vec<i64>,
+}
+
+/// Строка `GROUP BY kind` по `entity_marks`: вид отметки читаем как текст, чтобы незнакомый
+/// (появится новый) не ломал запрос.
+#[derive(Debug, sqlx::FromRow)]
+pub struct MarkCountsRow {
+    pub kind: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct MarkCounts {
+    /// «Посмотрю позже».
+    #[schema(example = 7)]
+    pub later: i64,
+    /// «Просмотрено» (у книг «прочитано», у игр «пройдено»).
+    #[schema(example = 30)]
+    pub done: i64,
+}
+
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct CommentCounts {
+    /// Комментарии к рецензиям.
+    #[schema(example = 4)]
+    pub reviews: i64,
+    /// Сообщения в обсуждениях коллекций.
+    #[schema(example = 2)]
+    pub collections: i64,
+}
+
+/// Разрез по типам контента: `{"movie": 30, "book": 12}`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ByKind {
+    /// Что оценено.
+    pub rated: std::collections::HashMap<String, i64>,
+    /// Что отмечено «просмотрено».
+    pub done: std::collections::HashMap<String, i64>,
+}
+
+/// Оценённое произведение в списке «что я оценил».
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RatedEntity {
+    pub entity: EntityRef,
+    /// 1–10.
+    #[schema(example = 8)]
+    pub rating: i16,
+    /// Есть ли у оценки текст рецензии.
+    pub has_text: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct RatedRow {
+    pub entity_id: Uuid,
+    pub rating: i16,
+    pub has_text: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Порядок в списке оценок.
+#[derive(Debug, Clone, Copy, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RatingsSort {
+    /// Свежие сверху (по умолчанию).
+    #[default]
+    New,
+    /// Сначала высокие оценки.
+    RatingDesc,
+    /// Сначала низкие.
+    RatingAsc,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct UserRatingsQuery {
+    /// `new` (по умолчанию), `rating_desc`, `rating_asc`.
+    #[param(inline)]
+    pub sort: Option<RatingsSort>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
 /// Отличает «поле не передано» (`None`) от `null` (`Some(None)`).
 fn nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where

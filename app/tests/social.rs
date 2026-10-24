@@ -3547,6 +3547,117 @@ fn pluck_items(detail: &Value) -> Vec<&str> {
         .collect()
 }
 
+/// Аналитика профиля: сводка, оценки и отметки — и приватность по умолчанию.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn profile_stats_are_private_until_opened(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+    let admin = ctx.login("admin@example.com", "admin").await;
+
+    ctx.review(&alice, "dune-2021", json!({ "rating": 8, "body": "Отличный фильм" }))
+        .await;
+    ctx.review(&alice, "dune-novel", json!({ "rating": 9 })).await;
+    for (slug, kind) in [("dune-2021", "done"), ("dune-novel", "later")] {
+        ctx.expect(
+            StatusCode::OK,
+            Method::PUT,
+            &format!("/entities/{slug}/mark"),
+            Some(json!({ "kind": kind })),
+            Some(&alice),
+        )
+        .await;
+    }
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        "/entities/dune-2021/reaction",
+        Some(json!({ "kind": "fire" })),
+        Some(&alice),
+    )
+    .await;
+
+    let stats = format!("/users/{}/stats", alice.username);
+    let ratings = format!("/users/{}/ratings", alice.username);
+    let marks = format!("/users/{}/marks", alice.username);
+
+    // По умолчанию аналитика закрыта: чужой и гость получают 403, владелец — данные.
+    for path in [&stats, &ratings, &marks] {
+        let error = ctx
+            .expect(StatusCode::FORBIDDEN, Method::GET, path, None, Some(&bob))
+            .await;
+        assert_eq!(error["code"], "stats_private");
+        ctx.expect(StatusCode::FORBIDDEN, Method::GET, path, None, None)
+            .await;
+        // Админу видно всегда.
+        ctx.get_ok(path, Some(&admin)).await;
+    }
+
+    let own = ctx.get_ok(&stats, Some(&alice)).await;
+    assert_eq!(own["ratings"]["count"], 2);
+    assert_eq!(own["ratings"]["average"], 8.5);
+    assert_eq!(own["ratings"]["distribution"][7], 1);
+    assert_eq!(own["ratings"]["distribution"][8], 1);
+    assert_eq!(own["reviews_with_text"], 1);
+    assert_eq!(own["marks"], json!({ "later": 1, "done": 1 }));
+    assert_eq!(
+        own["reactions"],
+        json!({ "fire": 1, "sad": 0, "think": 0, "bored": 0 })
+    );
+    assert_eq!(own["comments"], json!({ "reviews": 0, "collections": 0 }));
+    // Типы контента — из справочника каталога, а не JOIN'ом к `entities`.
+    assert_eq!(own["by_kind"]["rated"], json!({ "movie": 1, "book": 1 }));
+    assert_eq!(own["by_kind"]["done"], json!({ "movie": 1 }));
+
+    // Оценки: порядок и has_text.
+    let page = ctx.get_ok(&ratings, Some(&alice)).await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(page["items"][0]["entity"]["slug"], "dune-novel");
+    assert_eq!(page["items"][0]["rating"], 9);
+    assert_eq!(page["items"][0]["has_text"], false);
+    assert_eq!(page["items"][1]["has_text"], true);
+    let low_first = ctx
+        .get_ok(&format!("{ratings}?sort=rating_asc"), Some(&alice))
+        .await;
+    assert_eq!(low_first["items"][0]["rating"], 8);
+    ctx.expect(
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        &format!("{ratings}?sort=unknown"),
+        None,
+        Some(&alice),
+    )
+    .await;
+
+    // Отметки: фильтр по виду.
+    let later = ctx
+        .get_ok(&format!("{marks}?kind=later"), Some(&alice))
+        .await;
+    assert_eq!(later["total"], 1);
+    assert_eq!(later["items"][0]["entity"]["slug"], "dune-novel");
+
+    // Владелец открыл аналитику — её видят все.
+    sqlx::query("UPDATE users SET stats_public = true WHERE username = $1::citext")
+        .bind(&alice.username)
+        .execute(&ctx.state.db)
+        .await
+        .unwrap();
+    for path in [&stats, &ratings, &marks] {
+        ctx.get_ok(path, Some(&bob)).await;
+        ctx.get_ok(path, None).await;
+    }
+
+    // Нет такого пользователя — 404, а не 403.
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/users/nobody/stats",
+        None,
+        Some(&alice),
+    )
+    .await;
+}
+
 // ---------------------------------------------------------------- границы модулей
 
 /// Справочник сущностей, отдающий для `dune-2021` своё название: видно, что social берёт
@@ -3575,6 +3686,15 @@ impl EntityDirectory for FakeEntities {
             .filter(|slug| **slug == self.dune.slug)
             .map(|slug| (slug.clone(), self.dune.clone()))
             .collect())
+    }
+
+    async fn kind_counts(&self, ids: &[Uuid]) -> AppResult<HashMap<String, i64>> {
+        let count = ids.iter().filter(|id| **id == self.dune.id).count() as i64;
+        Ok(if count > 0 {
+            HashMap::from([(self.dune.kind.clone(), count)])
+        } else {
+            HashMap::new()
+        })
     }
 }
 

@@ -7528,6 +7528,233 @@
         }
       }
     },
+    "/api/v1/social/users/{username}/marks": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Отметки пользователя: «посмотрю позже» и «просмотрено». Своё — `GET /users/me/marks`.",
+        "operationId": "list_user_marks",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "user"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Только отметки этого вида; не передан — все.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Личная отметка: `later` — «посмотреть (прочитать, пройти) позже», `done` — «просмотрено».",
+              "enum": [
+                "later",
+                "done"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница отметок",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_MarkedEntity"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Токен передан, но недействителен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Аналитика закрыта владельцем (`stats_private`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/users/{username}/ratings": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Что пользователь оценил: произведение, оценка и есть ли текст.",
+        "operationId": "list_user_ratings",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "user"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "`new` (по умолчанию), `rating_desc`, `rating_asc`.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Порядок в списке оценок.",
+              "enum": [
+                "new",
+                "rating_desc",
+                "rating_asc"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница оценок",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_RatedEntity"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Токен передан, но недействителен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Аналитика закрыта владельцем (`stats_private`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/users/{username}/reviews": {
       "get": {
         "tags": [
@@ -7589,6 +7816,75 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/social/users/{username}/stats": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Сводка: оценки, рецензии, отметки, реакции, комментарии, разрез по типам контента.",
+        "operationId": "get_profile_stats",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "user"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Аналитика профиля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileStats"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Токен передан, но недействителен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Аналитика закрыта владельцем (`stats_private`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/social/users/{username}/threads": {
@@ -7739,6 +8035,38 @@
           "width": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "ByKind": {
+        "type": "object",
+        "description": "Разрез по типам контента: `{\"movie\": 30, \"book\": 12}`.",
+        "required": [
+          "rated",
+          "done"
+        ],
+        "properties": {
+          "done": {
+            "type": "object",
+            "description": "Что отмечено «просмотрено».",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "rated": {
+            "type": "object",
+            "description": "Что оценено.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         }
       },
@@ -8425,6 +8753,27 @@
           }
         }
       },
+      "CommentCounts": {
+        "type": "object",
+        "required": [
+          "reviews",
+          "collections"
+        ],
+        "properties": {
+          "collections": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сообщения в обсуждениях коллекций.",
+            "example": 2
+          },
+          "reviews": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Комментарии к рецензиям.",
+            "example": 4
+          }
+        }
+      },
       "CreateCollection": {
         "type": "object",
         "required": [
@@ -9064,6 +9413,27 @@
           }
         },
         "additionalProperties": false
+      },
+      "MarkCounts": {
+        "type": "object",
+        "required": [
+          "later",
+          "done"
+        ],
+        "properties": {
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "description": "«Просмотрено» (у книг «прочитано», у игр «пройдено»).",
+            "example": 30
+          },
+          "later": {
+            "type": "integer",
+            "format": "int64",
+            "description": "«Посмотрю позже».",
+            "example": 7
+          }
+        }
       },
       "MarkKind": {
         "type": "string",
@@ -9785,6 +10155,66 @@
           }
         }
       },
+      "Page_RatedEntity": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Оценённое произведение в списке «что я оценил».",
+              "required": [
+                "entity",
+                "rating",
+                "has_text",
+                "created_at"
+              ],
+              "properties": {
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "entity": {
+                  "$ref": "#/components/schemas/EntityRef"
+                },
+                "has_text": {
+                  "type": "boolean",
+                  "description": "Есть ли у оценки текст рецензии."
+                },
+                "rating": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "1–10.",
+                  "example": 8
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "Page_ReportedRoom": {
         "type": "object",
         "description": "Страница списка.",
@@ -10333,6 +10763,78 @@
           }
         }
       },
+      "ProfileRatings": {
+        "type": "object",
+        "description": "Оценки пользователя. Без оценок — `average: null`, `count: 0`, нули в распределении.",
+        "required": [
+          "count",
+          "distribution"
+        ],
+        "properties": {
+          "average": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Округлено до 0.1. `null` — не оценивал.",
+            "example": 8.3
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "example": 42
+          },
+          "distribution": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Сколько оценок 1, 2, … 10 — ровно 10 чисел."
+          }
+        }
+      },
+      "ProfileStats": {
+        "type": "object",
+        "description": "Что пользователь успел на площадке. Числа считаются по его строкам: чужие ограничения\nвидимости (приватные коллекции) сюда не попадают.",
+        "required": [
+          "ratings",
+          "reviews_with_text",
+          "marks",
+          "reactions",
+          "comments",
+          "by_kind"
+        ],
+        "properties": {
+          "by_kind": {
+            "$ref": "#/components/schemas/ByKind",
+            "description": "Сколько оценённого и просмотренного каждого типа (`movie`, `series`, `book`, `game`):\nтипы берутся у каталога через справочник, ключей без единой сущности нет."
+          },
+          "comments": {
+            "$ref": "#/components/schemas/CommentCounts",
+            "description": "Комментарии: к рецензиям и в обсуждениях коллекций, без удалённых."
+          },
+          "marks": {
+            "$ref": "#/components/schemas/MarkCounts",
+            "description": "Отметки «посмотрю позже» и «просмотрено»."
+          },
+          "ratings": {
+            "$ref": "#/components/schemas/ProfileRatings",
+            "description": "Оценки: среднее, сколько их и распределение по 1–10."
+          },
+          "reactions": {
+            "$ref": "#/components/schemas/Reactions",
+            "description": "Свои реакции на произведения: всегда все четыре ключа."
+          },
+          "reviews_with_text": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Рецензии с текстом (оценка без текста сюда не идёт).",
+            "example": 12
+          }
+        }
+      },
       "PutCollectionItem": {
         "type": "object",
         "description": "Добавить произведение в коллекцию или изменить пункт.",
@@ -10397,6 +10899,35 @@
           }
         },
         "additionalProperties": false
+      },
+      "RatedEntity": {
+        "type": "object",
+        "description": "Оценённое произведение в списке «что я оценил».",
+        "required": [
+          "entity",
+          "rating",
+          "has_text",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entity": {
+            "$ref": "#/components/schemas/EntityRef"
+          },
+          "has_text": {
+            "type": "boolean",
+            "description": "Есть ли у оценки текст рецензии."
+          },
+          "rating": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1–10.",
+            "example": 8
+          }
+        }
       },
       "RatingBrief": {
         "type": "object",

@@ -30,6 +30,7 @@ mod refs;
 pub mod reviews;
 pub mod rooms;
 mod slug;
+pub mod stats;
 pub mod threads;
 mod validate;
 pub mod votes;
@@ -42,6 +43,9 @@ pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(profiles::get))
         .routes(routes!(profiles::search))
+        .routes(routes!(stats::get))
+        .routes(routes!(stats::ratings))
+        .routes(routes!(stats::marks))
         .routes(routes!(reviews::list_for_entity))
         .routes(routes!(reviews::rating))
         .routes(routes!(reviews::ratings))

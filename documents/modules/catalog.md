@@ -142,6 +142,10 @@ TMDB с русским названием (121 371) и 500 самых попул
 `entities.description` без HTML, до 1000 символов по границе предложения или слова
 (`catalog::directory::overview`), одним запросом; ими `social` дополняет элементы коллекции.
 
+Сколько сущностей каждого типа среди переданных id — `EntityDirectory::kind_counts(ids)`: один
+`GROUP BY kind`, которым `social` строит разрез аналитики профиля («оценено 30 фильмов и 12 книг»)
+не выбирая ради одного поля все `EntityRef`.
+
 Люди и теги для других модулей — справочники `PersonDirectory` (`PgPersonDirectory`, `state.people`:
 `by_slug` — только публичные, `by_ids` — все → `PersonRef` `{id, slug, full_name, photo_url}`) и
 `TagDirectory` (`PgTagDirectory`, `state.tags`: `by_slug`, `by_ids` → `TagRef` `{id, slug, name, kind}`)

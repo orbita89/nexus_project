@@ -52,6 +52,18 @@ impl EntityDirectory for PgEntityDirectory {
         Ok(rows.into_iter().map(|row| (row.id, row)).collect())
     }
 
+    async fn kind_counts(&self, ids: &[Uuid]) -> AppResult<HashMap<String, i64>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT kind, count(*) FROM entities WHERE id = ANY($1) GROUP BY kind")
+                .bind(ids)
+                .fetch_all(&self.db)
+                .await?;
+        Ok(rows.into_iter().collect())
+    }
+
     async fn by_slugs(&self, slugs: &[String]) -> AppResult<HashMap<String, EntityRef>> {
         if slugs.is_empty() {
             return Ok(HashMap::new());
