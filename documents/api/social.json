@@ -1222,6 +1222,67 @@
         ]
       }
     },
+    "/api/v1/social/admin/comments/{id}": {
+      "delete": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Удалить любой комментарий к произведению, человеку или студии (с ответами, если корневой).",
+        "operationId": "admin_delete_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id комментария",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или уже удалён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/admin/posts/{id}": {
       "delete": {
         "tags": [
@@ -3922,6 +3983,192 @@
         ]
       }
     },
+    "/api/v1/social/collections/{id}/reaction": {
+      "put": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Поставить реакцию на коллекцию; другая заменяет прежнюю.",
+        "operationId": "put_collection_reaction",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Reaction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Реакция сохранена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reaction"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестная реакция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции или она чужая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Убрать свою реакцию с коллекции → 204 (даже если её не было).",
+        "operationId": "delete_collection_reaction",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Реакции нет"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции или она чужая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/collections/{id}/reactions": {
+      "get": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Сводка реакций на коллекцию: сколько каких и своя (вошедшему).",
+        "operationId": "get_collection_reactions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id коллекции",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сводка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionReactions"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет коллекции или она чужая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/collections/{id}/related": {
       "get": {
         "tags": [
@@ -3976,6 +4223,214 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/social/comments": {
+      "get": {
+        "tags": [
+          "comments"
+        ],
+        "summary": "Комментарии цели по времени: старые сверху, ответы — в той же ленте с `parent_id`.",
+        "operationId": "list_comments",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Цель: `kind:slug`, где `kind` — `entity`, `person` или `studio`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "entity:dune-2021"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница комментариев",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_TargetComment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`validation` с `field: target` — не вида `kind:slug` или неизвестный вид",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой цели",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "comments"
+        ],
+        "summary": "Написать комментарий или ответить на него.",
+        "operationId": "create_comment",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTargetComment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создан",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetComment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`validation` с `field`: `target` — не вида `kind:slug`; `body` — пусто или длиннее 2000; `parent_id` — нет такого (неудалённого) комментария у этой цели",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой цели",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Больше 5 комментариев в минуту (`Retry-After`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/comments/{id}": {
+      "delete": {
+        "tags": [
+          "comments"
+        ],
+        "summary": "Удалить свой комментарий (корневой — вместе с ответами).",
+        "operationId": "delete_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id комментария",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужой комментарий",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет или уже удалён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/social/entities/{slug}/collections": {
@@ -8753,6 +9208,30 @@
           }
         }
       },
+      "CollectionReactions": {
+        "type": "object",
+        "description": "Реакции на коллекцию: сколько каких и своя.",
+        "required": [
+          "reactions"
+        ],
+        "properties": {
+          "mine": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReactionKind",
+                "description": "Своя реакция; `null` — гость или не ставил."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reactions": {
+            "$ref": "#/components/schemas/Reactions",
+            "description": "Всегда все четыре ключа."
+          }
+        }
+      },
       "CommentCounts": {
         "type": "object",
         "required": [
@@ -8888,6 +9367,33 @@
             "example": "Киберпанк"
           }
         }
+      },
+      "CreateTargetComment": {
+        "type": "object",
+        "required": [
+          "target",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "1–2000 символов."
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Ответ на комментарий той же цели; ответ на ответ привяжется к корню."
+          },
+          "target": {
+            "type": "string",
+            "description": "Цель: `entity:dune-2021`, `person:denis-villeneuve`, `studio:legendary-pictures`.",
+            "example": "entity:dune-2021"
+          }
+        },
+        "additionalProperties": false
       },
       "CreateThread": {
         "type": "object",
@@ -10488,6 +10994,82 @@
           }
         }
       },
+      "Page_TargetComment": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Комментарий к произведению, человеку или студии.",
+              "required": [
+                "id",
+                "target",
+                "author",
+                "body",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "author": {
+                  "$ref": "#/components/schemas/UserRef"
+                },
+                "body": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "parent_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "Корневой комментарий; `null` — сам корневой. Ответ на ответ привязан к корню."
+                },
+                "target": {
+                  "type": "string",
+                  "description": "Цель в виде `kind:slug`, как в запросе: `entity:dune-2021`, `person:denis-villeneuve`,\n`studio:legendary-pictures`.",
+                  "example": "entity:dune-2021"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "Page_Thread": {
         "type": "object",
         "description": "Страница списка.",
@@ -11416,6 +11998,51 @@
           "slug": {
             "type": "string",
             "example": "sci-fi"
+          }
+        }
+      },
+      "TargetComment": {
+        "type": "object",
+        "description": "Комментарий к произведению, человеку или студии.",
+        "required": [
+          "id",
+          "target",
+          "author",
+          "body",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "author": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Корневой комментарий; `null` — сам корневой. Ответ на ответ привязан к корню."
+          },
+          "target": {
+            "type": "string",
+            "description": "Цель в виде `kind:slug`, как в запросе: `entity:dune-2021`, `person:denis-villeneuve`,\n`studio:legendary-pictures`.",
+            "example": "entity:dune-2021"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },

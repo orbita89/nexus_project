@@ -13,6 +13,7 @@ use crate::models::{
 use crate::posts;
 use crate::refs;
 use crate::slug;
+use crate::target_comments;
 use crate::validate::{self, MAX_COLLECTION_DESCRIPTION, MAX_COLLECTION_TITLE};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -100,6 +101,29 @@ pub async fn delete_collection_comment(
 ) -> AppResult<StatusCode> {
     let author = collection_comments::remove(&state, id, None).await?;
     tracing::info!(admin_id = %admin.id, comment_id = %id, author_id = %author, "collection comment deleted by admin");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Удалить любой комментарий к произведению, человеку или студии (с ответами, если корневой).
+#[utoipa::path(
+    delete, operation_id = "admin_delete_comment", path = "/admin/comments/{id}",
+    tag = "social-admin",
+    security(("bearer" = [])),
+    params(("id" = Uuid, Path, description = "id комментария")),
+    responses(
+        (status = 204, description = "Удалён"),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 404, description = "Нет или уже удалён", body = ErrorBody),
+    )
+)]
+pub async fn delete_comment(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let author = target_comments::remove(&state, id, None).await?;
+    tracing::info!(admin_id = %admin.id, comment_id = %id, author_id = %author, "comment deleted by admin");
     Ok(StatusCode::NO_CONTENT)
 }
 

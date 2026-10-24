@@ -6,7 +6,7 @@ use crate::models::VISIBLE;
 use crate::people::PUBLIC_PERSON;
 use shared::directory::{
     async_trait, EntityDirectory, EntityRatings, EntityRef, PersonDirectory, PersonRef,
-    RatingStats, TagDirectory, TagRef,
+    RatingStats, StudioDirectory, StudioRef, TagDirectory, TagRef,
 };
 use shared::AppResult;
 use sqlx::PgPool;
@@ -207,6 +207,41 @@ impl TagDirectory for PgTagDirectory {
         }
         let rows: Vec<TagRef> =
             sqlx::query_as("SELECT id, slug, name, kind FROM tags WHERE id = ANY($1)")
+                .bind(ids)
+                .fetch_all(&self.db)
+                .await?;
+        Ok(rows.into_iter().map(|row| (row.id, row)).collect())
+    }
+}
+
+/// Студии: страница студии открыта всем, скрытых студий нет.
+pub struct PgStudioDirectory {
+    db: PgPool,
+}
+
+impl PgStudioDirectory {
+    pub fn new(db: PgPool) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl StudioDirectory for PgStudioDirectory {
+    async fn by_slug(&self, slug: &str) -> AppResult<Option<StudioRef>> {
+        Ok(
+            sqlx::query_as("SELECT id, slug, name, logo_url FROM studios WHERE slug = $1")
+                .bind(slug)
+                .fetch_optional(&self.db)
+                .await?,
+        )
+    }
+
+    async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, StudioRef>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<StudioRef> =
+            sqlx::query_as("SELECT id, slug, name, logo_url FROM studios WHERE id = ANY($1)")
                 .bind(ids)
                 .fetch_all(&self.db)
                 .await?;

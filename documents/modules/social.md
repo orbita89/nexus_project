@@ -99,6 +99,43 @@
 
 Одна реакция на зрителя: другая заменяет прежнюю. **Индексы:** PK — подсчёт по сущности; `user_id`.
 
+### `comments` ✅ — комментарии к произведениям, людям и студиям
+
+Миграция `20261118100000_social_comments.sql`. Одна таблица на три вида целей: правила, лимиты и
+модерация у них общие, а эндпоинт один (`/comments?target=entity:dune-2021`). Комментарии к
+рецензиям (`review_comments`) и обсуждения коллекций (`collection_comments`) остаются при своих
+таблицах: у них строгие FK и свои правила (закрытие обсуждения, `reviews.comments_count`).
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK, `uuidv7()` | |
+| `target_kind` | `text` | NOT NULL, CHECK `entity` / `person` / `studio` | Вид цели |
+| `target_id` | `uuid` | NOT NULL | Строка в `entities`, `people` или `studios` — **без FK**: колонка одна, таблиц три |
+| `author_id` | `uuid` | NOT NULL, FK → `users`, CASCADE | |
+| `parent_id` | `uuid` | FK → `comments`, CASCADE | Корневой комментарий той же цели (проверяет код); `NULL` — сам корневой |
+| `body` | `text` | NOT NULL, 1–2000 символов | |
+| `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
+| `deleted_at` | `timestamptz` | | Мягкое удаление: из списков пропадает |
+
+Существование цели проверяет код — через справочники (`EntityDirectory`, `PersonDirectory`,
+`StudioDirectory`), а осиротевшая строка (цель удалили) просто не попадает в выдачу: справочник
+не вернёт ссылку. **Индексы:** частичный (`target_kind`, `target_id`, `created_at`, `id`) для
+неудалённых — лента цели; (`parent_id`) — ответы корня; частичный (`author_id`, `created_at DESC`)
+— «мои комментарии» и лимит частоты.
+
+### `collection_reactions` ✅ — реакции на коллекцию
+
+Та же миграция. 🔥 😢 🤔 😴 под подборкой — как `entity_reactions` у произведения.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `collection_id` | `uuid` | PK, FK → `collections`, CASCADE | |
+| `user_id` | `uuid` | PK, FK → `users`, CASCADE | |
+| `kind` | `text` | NOT NULL, `fire` / `sad` / `think` / `bored` | |
+| `created_at` | `timestamptz` | NOT NULL | Смена реакции — заново |
+
+Одна реакция на зрителя: другая заменяет прежнюю. **Индексы:** PK; `user_id`.
+
 ### `collections` ✅ — коллекции
 
 Пользовательские подборки: «Лучшая фантастика», «Экранизации Кинга: книга vs фильм». В одной
@@ -592,6 +629,23 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 регистра), коллекция, тема и сообщение — по `id`. Неизвестная сущность и неизвестный или заблокированный
 пользователь — 404. Ошибки — `{"error": "...", "code": "..."}` (коды — [for-other-modules.md](../for-other-modules.md#авторизация-в-хендлере)). Пагинация — как в каталоге:
 `?limit=20&offset=0` (1–100), ответ `{items, total, limit, offset}` (`shared::pagination::Page`).
+
+### Комментарии к произведениям, людям и студиям
+
+| Метод | Путь | Доступ | Что делает |
+|---|---|---|---|
+| GET | `/comments?target=entity:dune-2021` | все | Комментарии цели: `Page<TargetComment>` (`?limit=1..100&offset=`), старые сверху (`created_at`, `id`), ответы — в той же ленте с `parent_id`. `target` — `entity:<slug>`, `person:<slug>` или `studio:<slug>`. `TargetComment`: `id`, `target`, `parent_id`, `author` (`UserRef`), `body`, `created_at`, `updated_at`. 400 `validation` `field: target` — не вида `kind:slug` или неизвестный вид; 404 — нет такой цели |
+| POST | `/comments` | user | `{"target", "body", "parent_id"?}` (лишние поля — 400) → 201 `TargetComment`. Ответ на ответ привязывается к корню. 400 `validation` с `field`: `target`, `body` (1–2000 после обрезки), `parent_id` (нет неудалённого комментария **у этой цели**); 404 — нет цели; 429 — больше 5 комментариев в минуту (`Retry-After: 60`) |
+| DELETE | `/comments/{id}` | автор | Удалить свой (корневой — вместе с ответами) → 204; 403 — чужой; 404 — нет или уже удалён |
+| DELETE | `/admin/comments/{id}` | admin | То же для любого комментария |
+
+### Реакции на коллекцию
+
+| Метод | Путь | Доступ | Что делает |
+|---|---|---|---|
+| GET | `/collections/{id}/reactions` | гость / вошедший | Сводка: `{"reactions": {"fire": 2, "sad": 0, "think": 1, "bored": 0}, "mine": "fire" \| null}` (`mine` — гостю `null`). 404 — нет коллекции или чужая приватная |
+| PUT | `/collections/{id}/reaction` | user | `{"kind": "fire" \| "sad" \| "think" \| "bored"}` → 200, другая заменяет прежнюю. 400 — неизвестная; 404 — нет коллекции или чужая приватная |
+| DELETE | `/collections/{id}/reaction` | user | Убрать → 204 (даже если не было) |
 
 ### Профиль
 

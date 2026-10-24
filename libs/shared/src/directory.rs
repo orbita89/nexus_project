@@ -49,6 +49,17 @@ pub struct PersonRef {
     pub photo_url: Option<String>,
 }
 
+/// Студия каталога в чужих ответах: ссылка на её страницу.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow, ToSchema)]
+pub struct StudioRef {
+    pub id: Uuid,
+    #[schema(example = "legendary-pictures")]
+    pub slug: String,
+    #[schema(example = "Legendary Pictures")]
+    pub name: String,
+    pub logo_url: Option<String>,
+}
+
 /// Тег или жанр каталога в чужих ответах.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow, ToSchema)]
 pub struct TagRef {
@@ -237,6 +248,13 @@ pub trait Chat: Send + Sync {
     async fn dm_member(&self, state: &AppState, dm_id: Uuid, user_id: Uuid) -> AppResult<bool>;
 }
 
+/// Студии каталога. Реализует `catalog`. Нужен `social`: комментарии к странице студии.
+#[async_trait]
+pub trait StudioDirectory: Send + Sync {
+    async fn by_slug(&self, slug: &str) -> AppResult<Option<StudioRef>>;
+    async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, StudioRef>>;
+}
+
 /// Все справочники разом: аргумент [`AppState::new`](crate::AppState::new).
 #[derive(Clone)]
 pub struct Directories {
@@ -247,4 +265,5 @@ pub struct Directories {
     pub chat: Arc<dyn Chat>,
     pub people: Arc<dyn PersonDirectory>,
     pub tags: Arc<dyn TagDirectory>,
+    pub studios: Arc<dyn StudioDirectory>,
 }

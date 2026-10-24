@@ -31,6 +31,7 @@ pub mod reviews;
 pub mod rooms;
 mod slug;
 pub mod stats;
+pub mod target_comments;
 pub mod threads;
 mod validate;
 pub mod votes;
@@ -43,6 +44,14 @@ pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(profiles::get))
         .routes(routes!(profiles::search))
+        .routes(routes!(target_comments::list, target_comments::create))
+        .routes(routes!(target_comments::delete))
+        .routes(routes!(reactions::collection_summary,))
+        .routes(routes!(
+            reactions::put_collection,
+            reactions::delete_collection
+        ))
+        .routes(routes!(admin::delete_comment))
         .routes(routes!(stats::get))
         .routes(routes!(stats::ratings))
         .routes(routes!(stats::marks))

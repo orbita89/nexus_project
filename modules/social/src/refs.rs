@@ -9,7 +9,7 @@ use crate::models::{
     InterestRow, MarkRow, MarkedEntity, Post, PostRow, RatedEntity, RatedRow, Review,
     ReviewComment, ReviewCommentRow, ReviewRow, Thread, ThreadRow,
 };
-use shared::directory::{EntityRef, PersonRef, TagRef, UserRef};
+use shared::directory::{EntityRef, PersonRef, StudioRef, TagRef, UserRef};
 use shared::{AppError, AppResult, AppState};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -26,6 +26,11 @@ pub async fn entity(state: &AppState, slug: &str) -> AppResult<EntityRef> {
 /// Человек каталога по slug из URL (только публичный), иначе 404.
 pub async fn person(state: &AppState, slug: &str) -> AppResult<PersonRef> {
     state.people.by_slug(slug).await?.ok_or(AppError::NotFound)
+}
+
+/// Студия каталога по slug из URL, иначе 404.
+pub async fn studio(state: &AppState, slug: &str) -> AppResult<StudioRef> {
+    state.studios.by_slug(slug).await?.ok_or(AppError::NotFound)
 }
 
 /// Тег каталога по slug из URL, иначе 404.

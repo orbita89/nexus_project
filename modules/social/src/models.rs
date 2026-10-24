@@ -931,6 +931,73 @@ pub struct FeedQuery {
     pub limit: Option<i64>,
 }
 
+/// Реакции на коллекцию: сколько каких и своя.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CollectionReactions {
+    /// Всегда все четыре ключа.
+    pub reactions: Reactions,
+    /// Своя реакция; `null` — гость или не ставил.
+    pub mine: Option<ReactionKind>,
+}
+
+// ---------------------------------------------------------------- комментарии к целям
+
+/// Комментарий к произведению, человеку или студии.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TargetComment {
+    pub id: Uuid,
+    /// Цель в виде `kind:slug`, как в запросе: `entity:dune-2021`, `person:denis-villeneuve`,
+    /// `studio:legendary-pictures`.
+    #[schema(example = "entity:dune-2021")]
+    pub target: String,
+    /// Корневой комментарий; `null` — сам корневой. Ответ на ответ привязан к корню.
+    pub parent_id: Option<Uuid>,
+    pub author: UserRef,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct TargetCommentRow {
+    pub id: Uuid,
+    pub target_kind: String,
+    pub target_id: Uuid,
+    pub author_id: Uuid,
+    pub parent_id: Option<Uuid>,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Колонки `comments` для [`TargetCommentRow`].
+pub const TARGET_COMMENT_COLUMNS: &str =
+    "id, target_kind, target_id, author_id, parent_id, body, created_at, updated_at";
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateTargetComment {
+    /// Цель: `entity:dune-2021`, `person:denis-villeneuve`, `studio:legendary-pictures`.
+    #[schema(example = "entity:dune-2021")]
+    pub target: String,
+    /// 1–2000 символов.
+    pub body: String,
+    /// Ответ на комментарий той же цели; ответ на ответ привяжется к корню.
+    pub parent_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct TargetCommentsQuery {
+    /// Цель: `kind:slug`, где `kind` — `entity`, `person` или `studio`.
+    #[param(example = "entity:dune-2021")]
+    pub target: String,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
 // ---------------------------------------------------------------- аналитика профиля
 
 /// Что пользователь успел на площадке. Числа считаются по его строкам: чужие ограничения

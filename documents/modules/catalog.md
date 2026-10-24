@@ -146,6 +146,10 @@ TMDB с русским названием (121 371) и 500 самых попул
 `GROUP BY kind`, которым `social` строит разрез аналитики профиля («оценено 30 фильмов и 12 книг»)
 не выбирая ради одного поля все `EntityRef`.
 
+Студии для других модулей — `StudioDirectory` (`PgStudioDirectory`, `state.studios`: `by_slug`,
+`by_ids` → `StudioRef` `{id, slug, name, logo_url}`); по нему `social` проверяет цель комментария
+`studio:<slug>`.
+
 Люди и теги для других модулей — справочники `PersonDirectory` (`PgPersonDirectory`, `state.people`:
 `by_slug` — только публичные, `by_ids` — все → `PersonRef` `{id, slug, full_name, photo_url}`) и
 `TagDirectory` (`PgTagDirectory`, `state.tags`: `by_slug`, `by_ids` → `TagRef` `{id, slug, name, kind}`)

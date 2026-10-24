@@ -3555,9 +3555,14 @@ async fn profile_stats_are_private_until_opened(pool: PgPool) {
     let bob = ctx.user("bob").await;
     let admin = ctx.login("admin@example.com", "admin").await;
 
-    ctx.review(&alice, "dune-2021", json!({ "rating": 8, "body": "Отличный фильм" }))
+    ctx.review(
+        &alice,
+        "dune-2021",
+        json!({ "rating": 8, "body": "Отличный фильм" }),
+    )
+    .await;
+    ctx.review(&alice, "dune-novel", json!({ "rating": 9 }))
         .await;
-    ctx.review(&alice, "dune-novel", json!({ "rating": 9 })).await;
     for (slug, kind) in [("dune-2021", "done"), ("dune-novel", "later")] {
         ctx.expect(
             StatusCode::OK,
@@ -3653,6 +3658,317 @@ async fn profile_stats_are_private_until_opened(pool: PgPool) {
         Method::GET,
         "/users/nobody/stats",
         None,
+        Some(&alice),
+    )
+    .await;
+}
+
+/// Комментарии ко всему: произведение, человек, студия — одна таблица и один эндпоинт.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn comments_on_entities_people_and_studios(pool: PgPool) {
+    sqlx::query("INSERT INTO studios (slug, name) VALUES ('legendary', 'Legendary Pictures')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+    let admin = ctx.login("admin@example.com", "admin").await;
+
+    // Цель любого вида: комментарий пишется и возвращается с тем же `target`.
+    for target in [
+        "entity:dune-2021",
+        "person:denis-villeneuve",
+        "studio:legendary",
+    ] {
+        let created = ctx
+            .expect(
+                StatusCode::CREATED,
+                Method::POST,
+                "/comments",
+                Some(json!({ "target": target, "body": "  Хорош  " })),
+                Some(&alice),
+            )
+            .await;
+        assert_eq!(created["target"], target);
+        assert_eq!(created["body"], "Хорош");
+        assert_eq!(created["author"]["username"], alice.username.as_str());
+        assert_eq!(created["parent_id"], Value::Null);
+
+        let page = ctx
+            .get_ok(&format!("/comments?target={target}"), None)
+            .await;
+        assert_eq!(page["total"], 1);
+        assert_eq!(page["items"][0]["id"], created["id"]);
+    }
+
+    // Ответ на ответ привязывается к корню.
+    let root = ctx
+        .expect(
+            StatusCode::CREATED,
+            Method::POST,
+            "/comments",
+            Some(json!({ "target": "entity:dune-2021", "body": "Корень" })),
+            Some(&bob),
+        )
+        .await;
+    let reply = ctx
+        .expect(
+            StatusCode::CREATED,
+            Method::POST,
+            "/comments",
+            Some(json!({
+                "target": "entity:dune-2021",
+                "body": "Ответ",
+                "parent_id": root["id"],
+            })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(reply["parent_id"], root["id"]);
+    let deep = ctx
+        .expect(
+            StatusCode::CREATED,
+            Method::POST,
+            "/comments",
+            Some(json!({
+                "target": "entity:dune-2021",
+                "body": "Ответ на ответ",
+                "parent_id": reply["id"],
+            })),
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(deep["parent_id"], root["id"], "ответ на ответ — к корню");
+
+    // Неверная цель и неверный родитель — 400 с полем, неизвестный slug — 404.
+    for bad in [
+        json!({ "target": "dune-2021", "body": "без вида" }),
+        json!({ "target": "movie:dune-2021", "body": "неизвестный вид" }),
+        json!({ "target": "entity:dune-2021", "body": "" }),
+        json!({ "target": "entity:dune-2021", "body": "x".repeat(2001) }),
+    ] {
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::POST,
+                "/comments",
+                Some(bad),
+                Some(&alice),
+            )
+            .await;
+        assert_eq!(error["code"], "validation");
+    }
+    ctx.expect(
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        "/comments",
+        Some(json!({
+            "target": "person:denis-villeneuve",
+            "body": "чужой родитель",
+            "parent_id": root["id"],
+        })),
+        Some(&alice),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::POST,
+        "/comments",
+        Some(json!({ "target": "entity:no-such-film", "body": "нет цели" })),
+        Some(&alice),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/comments?target=studio:no-such-studio",
+        None,
+        None,
+    )
+    .await;
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::POST,
+        "/comments",
+        Some(json!({ "target": "entity:dune-2021", "body": "гость" })),
+        None,
+    )
+    .await;
+
+    // Чужой комментарий удалить нельзя; свой корневой уходит вместе с ответами.
+    let id = root["id"].as_str().unwrap();
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::DELETE,
+        &format!("/comments/{id}"),
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/comments/{id}"),
+        None,
+        Some(&bob),
+    )
+    .await;
+    let page = ctx.get_ok("/comments?target=entity:dune-2021", None).await;
+    let bodies: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(bodies, vec!["Хорош"], "корень и его ответы удалены");
+    // Повторное удаление — 404.
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        &format!("/comments/{id}"),
+        None,
+        Some(&bob),
+    )
+    .await;
+
+    // Админ удаляет любой.
+    let alices = page["items"][0]["id"].as_str().unwrap().to_string();
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::DELETE,
+        &format!("/admin/comments/{alices}"),
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/admin/comments/{alices}"),
+        None,
+        Some(&admin),
+    )
+    .await;
+    let page = ctx.get_ok("/comments?target=entity:dune-2021", None).await;
+    assert_eq!(page["total"], 0);
+}
+
+/// Реакции на коллекцию: сводка, замена своей, приватная коллекция не видна чужому.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn collection_reactions(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+    let public = ctx
+        .collection(&alice, json!({ "title": "Публичная" }))
+        .await;
+    let private = ctx
+        .collection(&alice, json!({ "title": "Приватная", "is_public": false }))
+        .await;
+
+    let reaction = format!("/collections/{public}/reaction");
+    let summary = format!("/collections/{public}/reactions");
+
+    // Гостю сводка видна, своей реакции нет.
+    let empty = ctx.get_ok(&summary, None).await;
+    assert_eq!(
+        empty["reactions"],
+        json!({ "fire": 0, "sad": 0, "think": 0, "bored": 0 })
+    );
+    assert_eq!(empty["mine"], Value::Null);
+
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &reaction,
+        Some(json!({ "kind": "fire" })),
+        Some(&bob),
+    )
+    .await;
+    let seen = ctx.get_ok(&summary, Some(&bob)).await;
+    assert_eq!(seen["reactions"]["fire"], 1);
+    assert_eq!(seen["mine"], "fire");
+
+    // Другая реакция заменяет прежнюю, а не добавляется.
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &reaction,
+        Some(json!({ "kind": "think" })),
+        Some(&bob),
+    )
+    .await;
+    let seen = ctx.get_ok(&summary, Some(&bob)).await;
+    assert_eq!(
+        seen["reactions"],
+        json!({ "fire": 0, "sad": 0, "think": 1, "bored": 0 })
+    );
+
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &reaction,
+        None,
+        Some(&bob),
+    )
+    .await;
+    // Повторное снятие — тоже 204.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &reaction,
+        None,
+        Some(&bob),
+    )
+    .await;
+    assert_eq!(
+        ctx.get_ok(&summary, Some(&bob)).await["reactions"]["think"],
+        0
+    );
+
+    // Неизвестная реакция — 400, гость — 401.
+    ctx.expect(
+        StatusCode::BAD_REQUEST,
+        Method::PUT,
+        &reaction,
+        Some(json!({ "kind": "clap" })),
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::PUT,
+        &reaction,
+        Some(json!({ "kind": "fire" })),
+        None,
+    )
+    .await;
+
+    // Чужая приватная — 404 и для сводки, и для реакции; владельцу — можно.
+    for user in [Some(&bob), None] {
+        ctx.expect(
+            StatusCode::NOT_FOUND,
+            Method::GET,
+            &format!("/collections/{private}/reactions"),
+            None,
+            user,
+        )
+        .await;
+    }
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::PUT,
+        &format!("/collections/{private}/reaction"),
+        Some(json!({ "kind": "fire" })),
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &format!("/collections/{private}/reaction"),
+        Some(json!({ "kind": "fire" })),
         Some(&alice),
     )
     .await;
