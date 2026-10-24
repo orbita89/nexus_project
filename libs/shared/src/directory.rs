@@ -100,8 +100,11 @@ pub trait UserDirectory: Send + Sync {
     /// регистре. Для `@упоминаний` в чате: один запрос на сообщение, не по запросу на имя.
     async fn by_usernames(&self, usernames: &[String]) -> AppResult<HashMap<String, UserRef>>;
     /// Активные пользователи по подстроке username или имени, до `limit` штук: автодополнение
-    /// «@» в чате и поиск людей. Порядок — по близости к запросу.
-    async fn search(&self, q: &str, limit: i64) -> AppResult<Vec<UserRef>>;
+    /// «@» в чате и поиск людей. Порядок — по близости к запросу. `exclude` — кого не отдавать
+    /// (блокировки живут в `social`, оно их и передаёт).
+    async fn search(&self, q: &str, limit: i64, exclude: &[Uuid]) -> AppResult<Vec<UserRef>>;
+    /// Подтверждён ли email: без этого нельзя начать переписку (защита от рассылок).
+    async fn is_verified(&self, id: Uuid) -> AppResult<bool>;
     /// Сколько активных пользователей всего. Нужно `social`: участник системной комнаты чата —
     /// каждый, строк в `chat_room_members` для неё нет, а `members_count` отдавать надо.
     async fn count(&self) -> AppResult<i64>;
@@ -170,6 +173,8 @@ pub enum ChatRoom {
     Person(Uuid),
     Tag(Uuid),
     Room(Uuid),
+    /// Личная переписка 1:1 (`dm:<id>`); id — сама комната, как у [`ChatRoom::Room`].
+    Dm(Uuid),
 }
 
 /// Чат для `realtime`: сообщения, пришедшие по WebSocket (`chat.send`, `chat.read`), пишет
@@ -202,6 +207,11 @@ pub trait Chat: Send + Sync {
         -> AppResult<Option<(Uuid, String)>>;
     /// slug своих комнат по id (удалённые пропускаются).
     async fn room_slugs(&self, state: &AppState, ids: &[Uuid]) -> AppResult<HashMap<Uuid, String>>;
+    /// id личных переписок пользователя: `realtime` подписывает каналы `dm:<id>` сам.
+    /// Имя канала — сам id, читать ничего не нужно.
+    async fn dm_room_ids(&self, state: &AppState, user_id: Uuid) -> AppResult<Vec<Uuid>>;
+    /// Участник ли пользователь этой переписки: доступ к истории и к панели.
+    async fn dm_member(&self, state: &AppState, dm_id: Uuid, user_id: Uuid) -> AppResult<bool>;
 }
 
 /// Все справочники разом: аргумент [`AppState::new`](crate::AppState::new).

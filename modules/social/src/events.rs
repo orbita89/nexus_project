@@ -184,6 +184,7 @@ pub fn room_parts(room: ChatRoom) -> (&'static str, Uuid) {
         ChatRoom::Person(id) => ("person", id),
         ChatRoom::Tag(id) => ("tag", id),
         ChatRoom::Room(id) => ("room", id),
+        ChatRoom::Dm(id) => ("dm", id),
     }
 }
 
@@ -194,6 +195,7 @@ fn room_channel(room: ChatRoom) -> Channel {
         ChatRoom::Person(id) => Channel::Person(id),
         ChatRoom::Tag(id) => Channel::Tag(id),
         ChatRoom::Room(id) => Channel::Room(id),
+        ChatRoom::Dm(id) => Channel::Dm(id),
     }
 }
 
@@ -205,6 +207,16 @@ pub fn chat_room_changed(kind: &'static str, room_id: Uuid) -> Event {
         kind,
         vec![Channel::Room(room_id), Channel::Rooms],
         json!({ "room_id": room_id }),
+    )
+}
+
+/// `dm.created`: с вами завели личную переписку — она появляется в списке без перезагрузки.
+/// В личный канал получателя; `dm_id` — комната, читать `GET /chat/dm/{id}`.
+pub fn dm_created(user_id: Uuid, dm_id: Uuid) -> Event {
+    Event::new(
+        "dm.created",
+        vec![Channel::User(user_id)],
+        json!({ "dm_id": dm_id }),
     )
 }
 

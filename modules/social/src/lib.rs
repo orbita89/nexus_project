@@ -14,6 +14,7 @@ pub mod collection_links;
 pub mod collections;
 pub mod comments;
 pub mod directory;
+pub mod dm;
 mod events;
 pub mod feed;
 pub mod follows;
@@ -101,6 +102,11 @@ pub fn router() -> OpenApiRouter<AppState> {
         ))
         .routes(routes!(chat::list_own))
         .routes(routes!(chat::search))
+        .routes(routes!(dm::open))
+        .routes(routes!(dm::delete))
+        .routes(routes!(dm::block, dm::unblock))
+        .routes(routes!(dm::list_blocked))
+        .routes(routes!(dm::settings, dm::update_settings))
         .routes(routes!(chat::info))
         .routes(routes!(chat::history))
         .routes(routes!(chat::get, chat::update, chat::delete))

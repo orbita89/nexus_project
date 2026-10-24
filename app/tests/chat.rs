@@ -1828,3 +1828,404 @@ async fn hidden_system_rooms(pool: PgPool) {
     ctx.api(StatusCode::UNAUTHORIZED, Method::PUT, hidden, None, None)
         .await;
 }
+
+/// Личные переписки: открытие, тот же протокол комнаты, доступ только двоим, удаление у себя.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn direct_messages(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+    let carol = ctx.login("carol", "user").await;
+
+    let mut bob_ws = ctx.authed(&bob).await;
+    let dm = ctx
+        .api(
+            StatusCode::OK,
+            Method::PUT,
+            "/users/bob/dm",
+            None,
+            Some(&alice),
+        )
+        .await;
+    let id = dm["dm"]["id"].as_str().unwrap().to_string();
+    assert_eq!(dm["kind"], "dm");
+    assert_eq!(dm["room"], format!("dm:{id}"));
+    assert_eq!(dm["dm"]["peer"]["username"], "bob");
+    assert_eq!(dm["me"]["member"], true);
+    // Собеседник узнаёт о переписке событием.
+    let created = bob_ws.event("dm.created").await;
+    assert_eq!(created["data"]["dm_id"], dm["dm"]["id"]);
+
+    // Повторное открытие — та же переписка, нового события нет.
+    let again = ctx
+        .api(
+            StatusCode::OK,
+            Method::PUT,
+            "/users/bob/dm",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(again["dm"]["id"], dm["dm"]["id"]);
+    bob_ws.silent().await;
+
+    // Себе — 400, несуществующему — 404.
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::PUT,
+        "/users/alice/dm",
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::PUT,
+        "/users/nobody/dm",
+        None,
+        Some(&alice),
+    )
+    .await;
+
+    // Тот же протокол: отправка по WebSocket, канал dm:<id>, история.
+    let room = format!("dm:{id}");
+    let mut alice_ws = ctx.authed(&alice).await;
+    let sent = alice_ws
+        .request(
+            json!({ "type": "chat.send", "room": room, "body": "Привет" }),
+            "chat.sent",
+        )
+        .await;
+    assert_eq!(sent["message"]["kind"], "dm");
+    let event = bob_ws.event("chat.message.created").await;
+    assert_eq!(event["channels"], json!([room]));
+
+    let path = format!("/chat/dm/{id}/messages");
+    let history = ctx
+        .api(StatusCode::OK, Method::GET, &path, None, Some(&bob))
+        .await;
+    assert_eq!(history["items"][0]["body"], "Привет");
+    // Третьему и гостю переписки не существует.
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        &path,
+        None,
+        Some(&carol),
+    )
+    .await;
+    ctx.api(StatusCode::NOT_FOUND, Method::GET, &path, None, None)
+        .await;
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        &format!("/chat/dm/{id}"),
+        None,
+        Some(&carol),
+    )
+    .await;
+    // Чужой канал не подписать.
+    let mut carol_ws = ctx.authed(&carol).await;
+    let denied = carol_ws
+        .request(json!({ "type": "subscribe", "channels": [room] }), "error")
+        .await;
+    assert!(denied["error"].as_str().unwrap().contains("unknown dm"));
+
+    // Переписка в «моих чатах» у обоих.
+    let chats = ctx.chats(&bob).await;
+    let found = chats.iter().find(|c| c["kind"] == "dm").unwrap();
+    assert_eq!(found["dm"]["peer"]["username"], "alice");
+    assert_eq!(found["room"], room);
+    assert_eq!(found["unread"], 1);
+
+    // Убрать у себя: у собеседника остаётся, новое сообщение возвращает обратно.
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/chat/dm/{id}"),
+        None,
+        Some(&bob),
+    )
+    .await;
+    assert!(ctx.chats(&bob).await.iter().all(|c| c["kind"] != "dm"));
+    assert!(ctx.chats(&alice).await.iter().any(|c| c["kind"] == "dm"));
+    alice_ws
+        .request(
+            json!({ "type": "chat.send", "room": room, "body": "Ты тут?" }),
+            "chat.sent",
+        )
+        .await;
+    assert!(ctx.chats(&bob).await.iter().any(|c| c["kind"] == "dm"));
+    // Чужую переписку не удалить.
+    ctx.api(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        &format!("/chat/dm/{id}"),
+        None,
+        Some(&carol),
+    )
+    .await;
+}
+
+/// Блокировки: закрывают личные сообщения в обе стороны, видны в профиле и в поиске людей.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn blocking_closes_direct_messages(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    let dm = ctx
+        .api(
+            StatusCode::OK,
+            Method::PUT,
+            "/users/bob/dm",
+            None,
+            Some(&alice),
+        )
+        .await;
+    let room = format!("dm:{}", dm["dm"]["id"].as_str().unwrap());
+    let mut alice_ws = ctx.authed(&alice).await;
+
+    // Боб блокирует Алису.
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        "/users/alice/block",
+        None,
+        Some(&bob),
+    )
+    .await;
+    // Открыть заново и написать в существующую — нельзя обоим.
+    let error = ctx
+        .api(
+            StatusCode::FORBIDDEN,
+            Method::PUT,
+            "/users/bob/dm",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(error["code"], "blocked");
+    let denied = alice_ws
+        .request(
+            json!({ "type": "chat.send", "room": room, "body": "Эй" }),
+            "error",
+        )
+        .await;
+    assert_eq!(denied["error"], "forbidden");
+    // Сам Боб тоже не пишет — блокировка закрывает переписку целиком.
+    ctx.api(
+        StatusCode::FORBIDDEN,
+        Method::PUT,
+        "/users/alice/dm",
+        None,
+        Some(&bob),
+    )
+    .await;
+    // В общий канал заблокированный пишет как раньше.
+    alice_ws
+        .request(
+            json!({ "type": "chat.send", "room": "room:general", "body": "Всем привет" }),
+            "chat.sent",
+        )
+        .await;
+
+    // Профиль: у Боба blocked, у Алисы blocked_by.
+    let bobs_view = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/users/alice",
+            None,
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(bobs_view["blocked"], true);
+    assert_eq!(bobs_view["blocked_by"], false);
+    let alices_view = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/users/bob",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(alices_view["blocked"], false);
+    assert_eq!(alices_view["blocked_by"], true);
+    // Гостю блокировок не видно.
+    let guest = ctx
+        .api(StatusCode::OK, Method::GET, "/users/bob", None, None)
+        .await;
+    assert_eq!(guest["blocked"], false);
+    assert_eq!(guest["blocked_by"], Value::Null);
+
+    // Поиск людей не отдаёт ни того, кого я заблокировал, ни того, кто заблокировал меня.
+    let for_bob = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/users?q=ali",
+            None,
+            Some(&bob),
+        )
+        .await;
+    assert!(for_bob.as_array().unwrap().is_empty());
+    let for_alice = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/users?q=bob",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert!(for_alice.as_array().unwrap().is_empty());
+    // Гостю и третьим — отдаёт.
+    let for_guest = ctx
+        .api(StatusCode::OK, Method::GET, "/users?q=bob", None, None)
+        .await;
+    assert_eq!(for_guest[0]["username"], "bob");
+
+    // Список блокировок и снятие.
+    let blocked = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/users/blocked",
+            None,
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(blocked["total"], 1);
+    assert_eq!(blocked["items"][0]["username"], "alice");
+    for _ in 0..2 {
+        ctx.api(
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            "/users/alice/block",
+            None,
+            Some(&bob),
+        )
+        .await;
+    }
+    ctx.api(
+        StatusCode::OK,
+        Method::PUT,
+        "/users/bob/dm",
+        None,
+        Some(&alice),
+    )
+    .await;
+    // Себя заблокировать нельзя.
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::PUT,
+        "/users/bob/block",
+        None,
+        Some(&bob),
+    )
+    .await;
+}
+
+/// `dm_policy`: кто может написать первым.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn dm_policy_controls_who_writes_first(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    let settings = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/users/me/chat-settings",
+            None,
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(settings["dm_policy"], "all");
+
+    // none — не пишет никто.
+    ctx.api(
+        StatusCode::OK,
+        Method::PATCH,
+        "/users/me/chat-settings",
+        Some(json!({ "dm_policy": "none" })),
+        Some(&bob),
+    )
+    .await;
+    let closed = ctx
+        .api(
+            StatusCode::FORBIDDEN,
+            Method::PUT,
+            "/users/bob/dm",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(closed["code"], "dm_closed");
+
+    // following — пишет тот, на кого Боб подписан сам.
+    ctx.api(
+        StatusCode::OK,
+        Method::PATCH,
+        "/users/me/chat-settings",
+        Some(json!({ "dm_policy": "following" })),
+        Some(&bob),
+    )
+    .await;
+    ctx.api(
+        StatusCode::FORBIDDEN,
+        Method::PUT,
+        "/users/bob/dm",
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        "/users/alice/follow",
+        None,
+        Some(&bob),
+    )
+    .await;
+    let opened = ctx
+        .api(
+            StatusCode::OK,
+            Method::PUT,
+            "/users/bob/dm",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(opened["kind"], "dm");
+
+    // Политика действует только на первое обращение: переписка уже есть.
+    ctx.api(
+        StatusCode::OK,
+        Method::PATCH,
+        "/users/me/chat-settings",
+        Some(json!({ "dm_policy": "none" })),
+        Some(&bob),
+    )
+    .await;
+    ctx.api(
+        StatusCode::OK,
+        Method::PUT,
+        "/users/bob/dm",
+        None,
+        Some(&alice),
+    )
+    .await;
+
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::PATCH,
+        "/users/me/chat-settings",
+        Some(json!({ "dm_policy": "whatever" })),
+        Some(&bob),
+    )
+    .await;
+}

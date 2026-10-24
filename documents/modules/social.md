@@ -346,6 +346,52 @@
 Жалоба одна на пользователя: повторная — `ON CONFLICT DO UPDATE` причины и `created_at`, дубля
 нет. Админский разбор — `GET /admin/chat/rooms/reports`.
 
+### Личные переписки, блокировки и `dm_policy` ✅ — чат, этап 8
+
+Миграция `20261115100000_social_chat_dm.sql` (2026-10-24). Переписка — строка `chat_rooms`
+того же протокола, что и остальные комнаты: канал `dm:<id>`, та же история, та же отправка по
+WebSocket, те же `chat.message.*`. `chat_rooms` получает `dm_user_a` / `dm_user_b` (FK → `users`
+CASCADE); CHECK `chat_rooms_one_target` теперь
+`num_nonnulls(entity_id, person_id, tag_id, slug, dm_user_a) = 1`, CHECK `chat_rooms_dm_pair` —
+собеседника либо два, либо ни одного, и порядок канонический (`dm_user_a < dm_user_b`), поэтому
+на двоих ровно одна строка и повторный `PUT` возвращает её же. Индексы: UNIQUE
+`chat_rooms_dm_idx` (пара), `chat_rooms_dm_a_idx` / `chat_rooms_dm_b_idx` (мои переписки, без OR
+по индексам), `chat_rooms_dm_started_idx` (`created_by`, `created_at DESC`) — суточный лимит.
+
+`ChatRoom::Dm(id)` и `Channel::Dm(id)` в `shared`; `kind = dm`, `target_id` = id самой комнаты,
+как у своих комнат. Имя канала — просто id, читать для него ничего не нужно.
+
+**Доступ.** Это единственная комната, которую видят не все: только её двое. Проверяет
+`dm::visible` внутри `chat::room_by_slug`, поэтому история, панель и заглушение закрыты разом;
+отправку закрывает `dm::peer_of` в `PgChat::send`. Для всех остальных, включая гостя, переписки
+не существует — **404, а не 403**: иначе ответ подтверждал бы, что двое переписываются.
+`realtime` не даёт подписаться на чужой `dm:` (`Chat::dm_member`), а свои подписывает сам
+(`Chat::dm_room_ids`, имя канала — id).
+
+**Убрать у себя** — та же `chat_room_hidden`, что у системных комнат: `DELETE /chat/dm/{id}`
+прячет строку из `GET /chats`, история цела, у собеседника она остаётся. Новое сообщение
+снимает скрытие у получателя (в `PgChat::send`), повторный `PUT .../dm` — у отправителя.
+
+| Таблица | Колонки | Индексы |
+|---|---|---|
+| `user_blocks` | PK (`user_id`, `blocked_id`), оба FK → `users` CASCADE; `created_at`; CHECK `user_blocks_not_self` | `blocked_id` — «кто меня заблокировал» |
+| `user_chat_settings` | `user_id` PK FK → `users` CASCADE; `dm_policy` text (`all` \| `following` \| `none`, по умолчанию `all`); `created_at`, `updated_at` (триггер) | — |
+
+**Блокировка** односторонняя и не уведомляет, но личные сообщения закрывает в обе стороны
+(`dm::check_not_blocked`, зовётся и при открытии, и на каждой отправке — значит, действует и на
+уже открытую переписку). Общие каналы не трогает. Строки `user_chat_settings` заводятся по
+требованию: её отсутствие равно значениям по умолчанию.
+
+**Кто пишет первым** (`dm::DmPolicy`, проверяется только при создании переписки): `all` — любой
+вошедший **с подтверждённым email** (`UserDirectory::is_verified`, иначе 403
+`email_not_verified`), `following` — только те, на кого собеседник подписан сам, `none` — никто
+(403 `dm_closed`). Плюс `dm::MAX_NEW_DMS_PER_DAY` = 20 новых переписок в сутки на пользователя
+(429 с `Retry-After`); ответ в существующую под лимит не попадает.
+
+**Поиск людей** `GET /users?q=` исключает обе стороны блокировки: `dm::hidden_from` собирает
+список в `social`, а `UserDirectory::search` принимает его параметром `exclude` — блокировки
+живут в `social`, и `auth` о них не знает.
+
 ### Скрытые комнаты в «Моих чатах» ✅ — чат, этап 7
 
 Миграция `20261114100000_social_chat_hidden_rooms.sql` (2026-10-23): таблица
@@ -459,7 +505,7 @@ Meilisearch: комнат десятки, а сообщения ищутся в�
 | Трейт | Реализует | Методы |
 |---|---|---|
 | `EntityDirectory` | `catalog::directory::PgEntityDirectory` | `by_slug` → `EntityRef`, `by_ids` → `HashMap<Uuid, EntityRef>`, `by_slugs` → `HashMap<String, EntityRef>`, `overviews(ids)` → `HashMap<Uuid, String>` (краткие описания для детали коллекции). По slug — только видимые сущности каталога (активные; фильмы из TMDB — вышедшие или «Скоро премьера», либо включённые вручную): невидимая (её нет на сайте) — как неизвестная, эндпоинты по slug сущности отвечают 404, а в `/ratings` её нет. По id — все: коллекции, ленты и интересы со скрытой сущностью её не теряют |
-| `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных), `by_usernames` (пакетно, для `@упоминаний`), `search` (по username и имени — автодополнение «@»), `count` (активных — `members_count` системных комнат чата) |
+| `UserDirectory` | `auth::directory::PgUserDirectory` | `by_username` (только активные) → `UserRef`, `by_ids` (включая заблокированных), `by_usernames` (пакетно, для `@упоминаний`), `search` (по username и имени, с `exclude` — блокировки передаёт `social`), `is_verified` (подтверждён ли email — право начать переписку), `count` (активных — `members_count` системных комнат чата) |
 | `EntityRatings` | `catalog::directory::PgEntityRatings` | `set`, `replace_all` — `social` сообщает каталогу сводки оценок для сортировок `popular` и `rating` (`social::ratings`: после записи рецензии и при старте) |
 
 В обратную сторону `social` сам реализует `InterestDirectory` (`social::directory::PgInterestDirectory`):
@@ -508,7 +554,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | Метод | Путь | Доступ | Что делает |
 |---|---|---|---|
 | GET | `/users` | все | Поиск пользователей для автодополнения «@»: `?q=` (1–50, по username и имени), `?limit=` 1–50 (8) → `[UserRef]`, только активные. 400 — пустой/длинный `q`, `limit` вне 1–50 |
-| GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых) и `relation` |
+| GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых), `relation`, `blocked` (я заблокировал его; гостю и в своём профиле `false`) и `blocked_by` (он заблокировал меня; `null` — гость или свой профиль) |
 
 `relation` — `{"following": true, "followed_by": false}`: подписан ли вошедший на пользователя и
 пользователь на него. Для гостя и своего профиля — `null`. Так фронтенд рисует кнопку
@@ -636,13 +682,18 @@ WebSocket-соединений пользователя (`interest.added` / `int
 
 | Метод | Путь | Кто | Что делает |
 |---|---|---|---|
-| GET | `/chats` | user | Мои чаты = комнаты всех сущностей, людей и тегов из интересов и свои комнаты, в которые вступил (сообщений может не быть): `[{room: "entity:<slug>" \| "person:<slug>" \| "tag:<slug>" \| "room:<slug>", kind, entity \| null, person \| null, tag \| null, custom \| null, last_message \| null, unread (до 100), muted}]` — из `entity`/`person`/`tag`/`custom` заполнено одно, по `kind`; сверху со свежими сообщениями, затем без сообщений (новые интересы сверху). Без пагинации (интересов ≤ 3 × 500) |
+| GET | `/chats` | user | Мои чаты = комнаты всех сущностей, людей и тегов из интересов и свои комнаты, в которые вступил (сообщений может не быть): `[{room: "entity:<slug>" \| "person:<slug>" \| "tag:<slug>" \| "room:<slug>" \| "dm:<id>", kind, entity \| null, person \| null, tag \| null, custom \| null, dm \| null, last_message \| null, unread (до 100), muted}]` — из `entity`/`person`/`tag`/`custom` заполнено одно, по `kind`; сверху со свежими сообщениями, затем без сообщений (новые интересы сверху). Без пагинации (интересов ≤ 3 × 500) |
 | GET | `/chat/{kind}/{slug}` | все (`Option<AuthUser>`) | Комната для открытой панели, в том числе не из «моих чатов» (открыта с карточки): `{room, kind, entity \| person \| tag \| custom, last_message \| null, me}`. `me` — вошедшему `{member, muted, unread (до 100), last_read_id}`: `member` — сущность, человек или тег в интересах / в свою комнату вступил; `last_read_id` — для разделителя «новые сообщения». Гостю `me: null`. 404 — неизвестный `kind` или slug; 401 — неверный токен |
 | GET | `/chat/{kind}/{slug}/messages?before=&limit=` | все | История комнаты (`kind` — `entity`, `person`, `tag`, `room`): `{items, next_before}` — `limit` 1–100 (50) сообщений старше `before` (без него — последние), в `items` старые сверху; `next_before` — курсор дальше в прошлое, `null` — начало. 400 — `limit` вне 1–100; 404 — неизвестный `kind` или slug |
 | GET | `/chat/search` | все (`Option<AuthUser>`) | Поиск по сообщениям: `?q=` (1–100, по словам с русской морфологией), `?room=<kind>:<slug>` (без него — по всем моим чатам, нужен вход), `?limit=` 1–100 (50), `?before=` — курсор. `{items: [{room, message}], next_before}`, новые сверху; удалённые не находятся. 400 — пустой/длинный `q`, `limit` вне 1–100, `room` не вида `kind:slug`; 401 — без `room` и без входа; 404 — нет комнаты |
 | GET | `/chat/messages/{id}` | все | Одно сообщение (перечитать по `chat.message.updated` / `deleted`). 404 — нет |
 | PATCH | `/chat/messages/{id}` | автор | `{body}` 1–2000 → 200 сообщение с `edited_at`. 403 — чужое, 400 — пусто/длинно/удалено, 404 — нет |
 | DELETE | `/chat/messages/{id}` | автор или admin | Мягкое удаление → 204 (повторно — 204). 403 — чужое, 404 — нет |
+| PUT | `/users/{username}/dm` | user | Открыть переписку, заведя при первом обращении: 200 `ChatRoomInfo` (`kind = dm`, `dm: {id, peer}`); повторный вызов — та же, скрытую возвращает в список. 400 — себе (`dm_self`); 403 — блокировка (`blocked`), закрытые личные (`dm_closed`), неподтверждённый email (`email_not_verified`); 404 — нет пользователя; 429 — больше 20 новых за сутки |
+| DELETE | `/chat/dm/{id}` | участник | Убрать переписку у себя → 204. У собеседника остаётся, история цела, новое сообщение возвращает обратно. 404 — нет или чужая |
+| PUT / DELETE | `/users/{username}/block` | user | Заблокировать / снять → 204 (повторно — 204). 400 — себя; 404 — нет пользователя |
+| GET | `/users/blocked` | user | Мои блокировки, новые сверху: `Page<UserRef>` |
+| GET / PATCH | `/users/me/chat-settings` | user | `{dm_policy}` — `all` (по умолчанию), `following`, `none`. PATCH с `{dm_policy}` → 200. 400 — неизвестное значение |
 | PUT / DELETE | `/chat/rooms/{slug}/hidden` | user | Убрать комнату из «Моих чатов» / вернуть → 204 (повторно — 204). Скрытая не приходит в `GET /chats`, но остаётся рабочей: история, отправка и канал не меняются. 400 — комната не системная (из неё выходят); 404 — нет комнаты |
 | PUT / DELETE | `/chat/{kind}/{slug}/mute` | user | Заглушить / снять → 204 (повторно — 204). 404 — неизвестный `kind` или slug |
 | GET | `/chat/rooms` | все (`Option<AuthUser>`) | Комнаты: системные сверху, дальше по `?sort=active\|members\|new` (`active` — по умолчанию): `Page<CustomRoom>` (`?limit=&offset=`). `?q=` — поиск по названию и описанию (тогда порядок по близости, системные не первыми). `joined` — вступил ли вошедший (одним запросом на страницу), гостю `null`. 400 — неизвестный `sort`, `q` длиннее 100 |
@@ -765,6 +816,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `chat.rs` | Чат: `PgChat` (`shared::directory::Chat` для realtime), мои чаты, история, поиск по сообщениям, разбор `@упоминаний`, правка, удаление, заглушение |
 | `feed.rs` | Лента: ярусы, курсор |
 | `events.rs` | События для `realtime` |
+| `dm.rs` | Личные переписки 1:1: открытие и удаление у себя, блокировки и их список, `dm_policy`, доступ (`visible`, `peer_of`, `check_not_blocked`) |
 | `directory.rs` | `InterestDirectory` для других модулей: `entity_ids`, `entities_in_use` |
 | `collection_links.rs` | Связанные подборки: выдача (`related` для детали), замена списка, добавление на позицию, удаление, перенумерация |
 | `collection_comments.rs` | Обсуждение коллекции: список, запись (ответы — к корню, лимит частоты, закрытое обсуждение), удаление своего, `remove` для модерации |
@@ -796,6 +848,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `interest.added`, `interest.removed` | пользователь | `entity_id`, `person_id`, `tag_id` или `room_id` (вступил в свою комнату / вышел) |
 | `chat.message.created` | комната: `entity:`, `person:`, `tag:` или `room:` | `kind`, `target_id`, `message` — **сообщение целиком** (`ChatMessage`). Исключение из правила «только id»: иначе каждое сообщение — запрос каждого онлайн-клиента |
 | `chat.message.updated`, `chat.message.deleted` | комната | `kind`, `target_id`, `message_id` — перечитать `GET /chat/messages/{id}` |
+| `dm.created` | пользователь (`user:`) | `dm_id` — с вами завели переписку: она появляется в списке без перезагрузки. Читать `GET /chat/dm/{id}` |
 | `chat.room.created` | каталог комнат (`rooms`) | `room_id` — завели новую комнату: открытый список добавляет строку. Только в `rooms`: на канал самой комнаты ещё никто не подписан |
 | `chat.room.updated`, `chat.room.deleted` | комната (`room:`) и каталог (`rooms`) | `room_id` — перечитать `GET /chat/rooms/{slug}` или закрыть |
 | `chat.mention` | пользователь (`user:`) | `kind`, `target_id`, `message` — в сообщении назвали `@username`. Второе исключение из «только id» после `chat.message.created`: текст нужен сразу, чтобы показать уведомление. Комната — `kind` + `target_id` (в `channels` здесь `user:`, имени комнаты в них нет) |

@@ -244,7 +244,7 @@ impl Conn {
         let Some(session) = &self.session else {
             return Err(error("not authenticated"));
         };
-        match channels::chat_room(&self.state, room).await {
+        match channels::chat_room(&self.state, room, Some(session.user_id)).await {
             Ok((chat_room, name)) => Ok((session.user_id, chat_room, name)),
             Err(AppError::BadRequest(message)) => Err(error(message)),
             Err(e) => Err(internal(e)),
@@ -306,7 +306,8 @@ impl Conn {
     async fn subscribe(&mut self, names: &[String]) -> Value {
         let mut parsed = Vec::with_capacity(names.len());
         for name in names {
-            match channels::parse(&self.state, name).await {
+            let viewer = self.session.as_ref().map(|s| s.user_id);
+            match channels::parse(&self.state, name, viewer).await {
                 Ok(channel) => parsed.push(channel),
                 Err(AppError::BadRequest(message)) => return error(message),
                 Err(e) => return internal(e),

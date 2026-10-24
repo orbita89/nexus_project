@@ -16,7 +16,11 @@ pub const USER_ME: &str = "user:me";
 pub const ROOMS: &str = "rooms";
 
 /// Разобрать имя канала из `subscribe`: канал и его каноничное имя.
-pub async fn parse(state: &AppState, name: &str) -> AppResult<(Channel, String)> {
+pub async fn parse(
+    state: &AppState,
+    name: &str,
+    state_user: Option<Uuid>,
+) -> AppResult<(Channel, String)> {
     let bad = |message: String| AppError::BadRequest(message);
     match name.split_once(':') {
         Some(("thread", id)) => {
@@ -55,6 +59,18 @@ pub async fn parse(state: &AppState, name: &str) -> AppResult<(Channel, String)>
                 .ok_or_else(|| bad(format!("unknown room in channel: {name}")))?;
             Ok((Channel::Room(id), format!("room:{slug}")))
         }
+        Some(("dm", id)) => {
+            let id: Uuid = id
+                .parse()
+                .map_err(|_| bad(format!("invalid dm id in channel: {name}")))?;
+            // Переписка видна только её двоим; гостю — нет.
+            let user_id =
+                state_user.ok_or_else(|| bad(format!("unknown dm in channel: {name}")))?;
+            if !state.chat.dm_member(state, id, user_id).await? {
+                return Err(bad(format!("unknown dm in channel: {name}")));
+            }
+            Ok((Channel::Dm(id), format!("dm:{id}")))
+        }
         Some(("tag", slug)) => {
             let tag = state
                 .tags
@@ -71,19 +87,24 @@ pub async fn parse(state: &AppState, name: &str) -> AppResult<(Channel, String)>
 
 /// Комната чата из `chat.send` / `chat.read`: `entity:`, `person:` или `tag:<slug>` → комната и
 /// каноничное имя. Сообщения комнаты приходят в канал с тем же именем.
-pub async fn chat_room(state: &AppState, name: &str) -> AppResult<(ChatRoom, String)> {
+pub async fn chat_room(
+    state: &AppState,
+    name: &str,
+    state_user: Option<Uuid>,
+) -> AppResult<(ChatRoom, String)> {
     let unknown = || AppError::BadRequest(format!("unknown chat room: {name}"));
-    if !["entity:", "person:", "tag:", "room:"]
+    if !["entity:", "person:", "tag:", "room:", "dm:"]
         .iter()
         .any(|prefix| name.starts_with(prefix))
     {
         return Err(unknown());
     }
-    match parse(state, name).await? {
+    match parse(state, name, state_user).await? {
         (Channel::Entity(id), name) => Ok((ChatRoom::Entity(id), name)),
         (Channel::Person(id), name) => Ok((ChatRoom::Person(id), name)),
         (Channel::Tag(id), name) => Ok((ChatRoom::Tag(id), name)),
         (Channel::Room(id), name) => Ok((ChatRoom::Room(id), name)),
+        (Channel::Dm(id), name) => Ok((ChatRoom::Dm(id), name)),
         _ => Err(unknown()),
     }
 }
@@ -146,5 +167,14 @@ pub async fn interests(state: &AppState, user_id: Uuid) -> AppResult<Vec<(Channe
     channels.extend(people(state, &state.interests.person_ids(user_id).await?).await?);
     channels.extend(tags(state, &state.interests.tag_ids(user_id).await?).await?);
     channels.extend(rooms(state, &state.interests.room_ids(user_id).await?).await?);
+    // Личные переписки: имя канала — сам id, читать ничего не нужно.
+    channels.extend(
+        state
+            .chat
+            .dm_room_ids(state, user_id)
+            .await?
+            .into_iter()
+            .map(|id| (Channel::Dm(id), format!("dm:{id}"))),
+    );
     Ok(channels)
 }

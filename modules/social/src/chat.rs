@@ -10,6 +10,7 @@
 //! сообщение (исключение из правила «в событиях только id»: иначе каждое сообщение — запрос
 //! каждого клиента); правка и удаление — только id, клиент перечитывает `GET /chat/messages/{id}`.
 
+use crate::dm::{self, DmRef};
 use crate::events::{self, room_parts};
 use crate::refs;
 use crate::validate::{self, MAX_CHAT_BODY};
@@ -40,7 +41,8 @@ const MAX_HISTORY_LIMIT: i64 = 100;
 /// У своей комнаты (`slug`) target — id самой комнаты.
 const ROOM_COLUMNS: &str = "CASE WHEN r.entity_id IS NOT NULL THEN 'entity'
           WHEN r.person_id IS NOT NULL THEN 'person'
-          WHEN r.tag_id IS NOT NULL THEN 'tag' ELSE 'room' END AS kind,
+          WHEN r.tag_id IS NOT NULL THEN 'tag'
+          WHEN r.dm_user_a IS NOT NULL THEN 'dm' ELSE 'room' END AS kind,
      coalesce(r.entity_id, r.person_id, r.tag_id, r.id) AS target_id";
 
 const MESSAGE_COLUMNS: &str = "m.id, m.author_id, m.reply_to, m.body, m.created_at,
@@ -52,7 +54,7 @@ fn column(room: ChatRoom) -> &'static str {
         ChatRoom::Entity(_) => "entity_id",
         ChatRoom::Person(_) => "person_id",
         ChatRoom::Tag(_) => "tag_id",
-        ChatRoom::Room(_) => "id",
+        ChatRoom::Room(_) | ChatRoom::Dm(_) => "id",
     }
 }
 
@@ -61,6 +63,7 @@ fn room_from(kind: &str, id: Uuid) -> ChatRoom {
         "entity" => ChatRoom::Entity(id),
         "person" => ChatRoom::Person(id),
         "tag" => ChatRoom::Tag(id),
+        "dm" => ChatRoom::Dm(id),
         _ => ChatRoom::Room(id),
     }
 }
@@ -186,6 +189,8 @@ pub struct ChatRoomInfo {
     pub person: Option<PersonRef>,
     pub tag: Option<TagRef>,
     pub custom: Option<CustomRoom>,
+    /// Личная переписка (`kind = dm`): id и собеседник.
+    pub dm: Option<DmRef>,
     /// `null` — сообщений ещё нет.
     pub last_message: Option<ChatMessage>,
     /// Состояние текущего пользователя; `null` — гость.
@@ -229,8 +234,10 @@ pub struct ChatSummary {
     pub entity: Option<EntityRef>,
     pub person: Option<PersonRef>,
     pub tag: Option<TagRef>,
-    /// Своя комната админа (`kind = room`).
+    /// Комната со slug (`kind = room`).
     pub custom: Option<CustomRoom>,
+    /// Личная переписка (`kind = dm`): id и собеседник.
+    pub dm: Option<DmRef>,
     /// `null` — сообщений ещё нет.
     pub last_message: Option<ChatMessage>,
     /// Непрочитанные чужие сообщения, не больше 100.
@@ -262,12 +269,25 @@ pub struct UpdateChatMessage {
 }
 
 /// Комната из пути REST: `/chat/{kind}/{slug}/...`. Неизвестный вид или slug — 404.
-async fn room_by_slug(state: &AppState, kind: &str, slug: &str) -> AppResult<ChatRoom> {
+/// Комната из пути REST с проверкой доступа: личная переписка видна только её двоим,
+/// для всех остальных её нет (404, а не 403 — чужая переписка не подтверждает своё
+/// существование). `viewer` — кто смотрит; гость переписок не видит.
+async fn room_by_slug(
+    state: &AppState,
+    kind: &str,
+    slug: &str,
+    viewer: Option<Uuid>,
+) -> AppResult<ChatRoom> {
     Ok(match kind {
         "entity" => ChatRoom::Entity(refs::entity(state, slug).await?.id),
         "person" => ChatRoom::Person(refs::person(state, slug).await?.id),
         "tag" => ChatRoom::Tag(refs::tag(state, slug).await?.id),
         "room" => ChatRoom::Room(custom_room_id(&state.db, slug).await?),
+        "dm" => {
+            let id: Uuid = slug.parse().map_err(|_| AppError::NotFound)?;
+            dm::visible(state, id, viewer).await?;
+            ChatRoom::Dm(id)
+        }
         _ => return Err(AppError::NotFound),
     })
 }
@@ -411,6 +431,14 @@ impl Chat for PgChat {
         reply_to: Option<Uuid>,
     ) -> AppResult<Value> {
         let body = validate::required("body", body, MAX_CHAT_BODY)?;
+        // В личную переписку пишут только её двое и только если никто никого не заблокировал.
+        let dm_peer = match room {
+            ChatRoom::Dm(id) => Some(dm::peer_of(state, id, user_id).await?),
+            _ => None,
+        };
+        if let Some(peer) = dm_peer {
+            dm::check_not_blocked(state, user_id, peer).await?;
+        }
         let recent: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM chat_messages
              WHERE author_id = $1 AND created_at > now() - make_interval(secs => $2)",
@@ -489,6 +517,14 @@ impl Chat for PgChat {
         };
         let message = serde_json::json!(messages(state, vec![row]).await?.remove(0));
         events::publish(state, events::chat_message_created(room, &message));
+        // Новое сообщение возвращает переписку в список собеседнику, если он её убирал.
+        if let Some(peer) = dm_peer {
+            sqlx::query("DELETE FROM chat_room_hidden WHERE user_id = $1 AND room_id = $2")
+                .bind(peer)
+                .bind(room_id)
+                .execute(&state.db)
+                .await?;
+        }
         notify_mentions(state, user_id, room, &message_body, &message).await?;
         Ok(message)
     }
@@ -528,6 +564,19 @@ impl Chat for PgChat {
                 .fetch_optional(&state.db)
                 .await?,
         )
+    }
+
+    async fn dm_room_ids(&self, state: &AppState, user_id: Uuid) -> AppResult<Vec<Uuid>> {
+        Ok(
+            sqlx::query_scalar("SELECT id FROM chat_rooms WHERE dm_user_a = $1 OR dm_user_b = $1")
+                .bind(user_id)
+                .fetch_all(&state.db)
+                .await?,
+        )
+    }
+
+    async fn dm_member(&self, state: &AppState, dm_id: Uuid, user_id: Uuid) -> AppResult<bool> {
+        dm::member(state, dm_id, user_id).await
     }
 
     async fn room_slugs(&self, state: &AppState, ids: &[Uuid]) -> AppResult<HashMap<Uuid, String>> {
@@ -611,7 +660,13 @@ pub async fn list_own(
              -- В системных комнатах состоят все: своих строк в chat_room_members у них нет.
              SELECT 'room', sr.id, sr.created_at, sr.id FROM chat_rooms sr
              WHERE sr.system AND NOT EXISTS (SELECT 1 FROM chat_room_hidden h
-                                             WHERE h.user_id = $1 AND h.room_id = sr.id))
+                                             WHERE h.user_id = $1 AND h.room_id = sr.id)
+             UNION ALL
+             -- Личные переписки: участников двое, своих строк участия у них нет.
+             SELECT 'dm', d.id, d.created_at, d.id FROM chat_rooms d
+             WHERE (d.dm_user_a = $1 OR d.dm_user_b = $1)
+               AND NOT EXISTS (SELECT 1 FROM chat_room_hidden h
+                               WHERE h.user_id = $1 AND h.room_id = d.id))
          SELECT mine.kind, mine.target_id, r.last_message_id,
                 (SELECT count(*) FROM (
                      SELECT 1 FROM chat_messages m
@@ -653,6 +708,7 @@ pub async fn list_own(
             .map(|row| row.target_id)
             .collect()
     };
+    let dms = dm::refs_for(&state, ids_of("dm"), user.id).await?;
     let entities = refs::entities(&state, ids_of("entity")).await?;
     let people = refs::people(&state, ids_of("person")).await?;
     let tags = refs::tags(&state, ids_of("tag")).await?;
@@ -682,6 +738,7 @@ pub async fn list_own(
         rows.into_iter()
             .filter_map(|row| {
                 let (mut entity, mut person, mut tag, mut own) = (None, None, None, None);
+                let mut peer = None;
                 let slug = match row.kind.as_str() {
                     "entity" => {
                         let found = entities.get(&row.target_id)?.clone();
@@ -701,6 +758,12 @@ pub async fn list_own(
                         tag = Some(found);
                         slug
                     }
+                    "dm" => {
+                        let found = dms.get(&row.target_id)?.clone();
+                        let slug = found.id.to_string();
+                        peer = Some(found);
+                        slug
+                    }
                     _ => {
                         let found = custom.get(&row.target_id)?.clone();
                         let slug = found.slug.clone();
@@ -715,6 +778,7 @@ pub async fn list_own(
                     person,
                     tag,
                     custom: own,
+                    dm: peer,
                     last_message: row.last_message_id.and_then(|id| last.remove(&id)),
                     unread: row.unread,
                     muted: row.muted,
@@ -731,6 +795,8 @@ fn membership(room: ChatRoom) -> (&'static str, &'static str) {
         ChatRoom::Person(_) => ("user_person_interests", "person_id"),
         ChatRoom::Tag(_) => ("user_tag_interests", "tag_id"),
         ChatRoom::Room(_) => ("chat_room_members", "room_id"),
+        // У переписки «участие» — сама пара: её проверяет dm::member.
+        ChatRoom::Dm(_) => ("chat_room_members", "room_id"),
     }
 }
 
@@ -754,7 +820,30 @@ pub async fn info(
     viewer: Option<AuthUser>,
     Path((kind, slug)): Path<(String, String)>,
 ) -> AppResult<Json<ChatRoomInfo>> {
-    let (mut entity, mut person, mut tag, mut custom) = (None, None, None, None);
+    let viewer = viewer.map(|user| user.id);
+    Ok(Json(room_info(&state, &kind, &slug, viewer).await?))
+}
+
+/// Панель переписки сразу после `PUT /users/{username}/dm`.
+pub(crate) async fn dm_info(
+    state: &AppState,
+    id: Uuid,
+    user: &AuthUser,
+) -> AppResult<ChatRoomInfo> {
+    room_info(state, "dm", &id.to_string(), Some(user.id)).await
+}
+
+/// Комната для панели: что это, последнее сообщение и состояние зрителя.
+pub(crate) async fn room_info(
+    state: &AppState,
+    kind: &str,
+    slug: &str,
+    viewer: Option<Uuid>,
+) -> AppResult<ChatRoomInfo> {
+    let state = state.clone();
+    let kind = kind.to_string();
+    let slug = slug.to_string();
+    let (mut entity, mut person, mut tag, mut custom, mut dm_ref) = (None, None, None, None, None);
     let (room, slug) = match kind.as_str() {
         "entity" => {
             let found = refs::entity(&state, &slug).await?;
@@ -779,6 +868,17 @@ pub async fn info(
             let room = (ChatRoom::Room(found.id), found.slug.clone());
             custom = Some(found);
             room
+        }
+        "dm" => {
+            let id: Uuid = slug.parse().map_err(|_| AppError::NotFound)?;
+            dm::visible(&state, id, viewer).await?;
+            let me = viewer.ok_or(AppError::NotFound)?;
+            let found = dm::refs_for(&state, vec![id], me)
+                .await?
+                .remove(&id)
+                .ok_or(AppError::NotFound)?;
+            dm_ref = Some(found);
+            (ChatRoom::Dm(id), id.to_string())
         }
         _ => return Err(AppError::NotFound),
     };
@@ -808,7 +908,8 @@ pub async fn info(
 
     let me = match viewer {
         None => None,
-        Some(user) => {
+        Some(viewer_id) => {
+            let user = ViewerId { id: viewer_id };
             let (table, member_column) = membership(room);
             let member: bool = sqlx::query_scalar(&format!(
                 "SELECT EXISTS (SELECT 1 FROM {table} WHERE user_id = $1 AND {member_column} = $2)"
@@ -818,7 +919,9 @@ pub async fn info(
             .fetch_one(&state.db)
             .await?;
             // В системной комнате состоят все: строк в chat_room_members для неё нет.
-            let member = member || custom.as_ref().is_some_and(|room| room.system);
+            // В системной комнате состоят все, в переписке — оба её участника.
+            let member =
+                member || custom.as_ref().is_some_and(|room| room.system) || dm_ref.is_some();
             let (muted, unread, last_read_id) = match room_id {
                 None => (false, 0, None),
                 Some(room_id) => {
@@ -865,16 +968,22 @@ pub async fn info(
             })
         }
     };
-    Ok(Json(ChatRoomInfo {
+    Ok(ChatRoomInfo {
         room: format!("{kind}:{slug}"),
         kind,
         entity,
         person,
         tag,
         custom,
+        dm: dm_ref,
         last_message,
         me,
-    }))
+    })
+}
+
+/// Id зрителя в теле [`room_info`]: раньше там был `AuthUser`, поля читаются как `user.id`.
+struct ViewerId {
+    id: Uuid,
 }
 
 /// История комнаты: страница по 50 (до 100), старые сверху; дальше в прошлое —
@@ -894,6 +1003,7 @@ pub async fn info(
 )]
 pub async fn history(
     State(state): State<AppState>,
+    viewer: Option<AuthUser>,
     Path((kind, slug)): Path<(String, String)>,
     Query(query): Query<HistoryQuery>,
 ) -> AppResult<Json<ChatHistory>> {
@@ -903,7 +1013,7 @@ pub async fn history(
             "limit must be 1-{MAX_HISTORY_LIMIT}"
         )));
     }
-    let room = room_by_slug(&state, &kind, &slug).await?;
+    let room = room_by_slug(&state, &kind, &slug, viewer.map(|user| user.id)).await?;
     let mut rows: Vec<MessageRow> = sqlx::query_as(&format!(
         "SELECT {MESSAGE_COLUMNS}, {ROOM_COLUMNS}
          FROM chat_messages m JOIN chat_rooms r ON r.id = m.room_id
@@ -1057,7 +1167,7 @@ pub async fn mute(
     user: AuthUser,
     Path((kind, slug)): Path<(String, String)>,
 ) -> AppResult<StatusCode> {
-    let room = room_by_slug(&state, &kind, &slug).await?;
+    let room = room_by_slug(&state, &kind, &slug, Some(user.id)).await?;
     let mut tx = state.db.begin().await?;
     let room_id = room_id(&mut tx, room).await?;
     sqlx::query("INSERT INTO chat_mutes (user_id, room_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
@@ -1088,7 +1198,7 @@ pub async fn unmute(
     user: AuthUser,
     Path((kind, slug)): Path<(String, String)>,
 ) -> AppResult<StatusCode> {
-    let room = room_by_slug(&state, &kind, &slug).await?;
+    let room = room_by_slug(&state, &kind, &slug, Some(user.id)).await?;
     sqlx::query(&format!(
         "DELETE FROM chat_mutes mu USING chat_rooms r
          WHERE mu.room_id = r.id AND mu.user_id = $1 AND r.{} = $2",
@@ -1235,7 +1345,7 @@ pub async fn search(
             let (kind, slug) = name
                 .split_once(':')
                 .ok_or_else(|| AppError::BadRequest("room must be <kind>:<slug>".into()))?;
-            let room = room_by_slug(&state, kind, slug).await?;
+            let room = room_by_slug(&state, kind, slug, viewer.as_ref().map(|u| u.id)).await?;
             (
                 format!("r.{} = $3", column(room)),
                 "$2::uuid IS NULL".to_string(),
@@ -1250,6 +1360,7 @@ pub async fn search(
                  OR r.person_id IN (SELECT person_id FROM user_person_interests WHERE user_id = $2)
                  OR r.tag_id IN (SELECT tag_id FROM user_tag_interests WHERE user_id = $2)
                  OR r.id IN (SELECT room_id FROM chat_room_members WHERE user_id = $2)
+                 OR r.dm_user_a = $2 OR r.dm_user_b = $2
                  OR r.system";
             (
                 "$3::uuid IS NULL".to_string(),

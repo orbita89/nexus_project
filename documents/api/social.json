@@ -1586,6 +1586,57 @@
         ]
       }
     },
+    "/api/v1/social/chat/dm/{id}": {
+      "delete": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Убрать переписку у себя → 204. У собеседника она остаётся, история цела, новое сообщение\nвозвращает её в список.",
+        "operationId": "delete_dm",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id переписки",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Убрана из списка"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой переписки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/chat/messages/{id}": {
       "get": {
         "tags": [
@@ -6493,6 +6544,154 @@
         }
       }
     },
+    "/api/v1/social/users/blocked": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Мой список блокировок, новые сверху — для экрана настроек.",
+        "operationId": "list_blocked_users",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница заблокированных",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_UserRef"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/users/me/chat-settings": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Мои настройки чата.",
+        "operationId": "get_chat_settings",
+        "responses": {
+          "200": {
+            "description": "Настройки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Изменить настройки чата.",
+        "operationId": "update_chat_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateChatSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Настройки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестное значение `dm_policy`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/users/me/marks": {
       "get": {
         "tags": [
@@ -6634,6 +6833,116 @@
         ]
       }
     },
+    "/api/v1/social/users/{username}/block": {
+      "put": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Заблокировать пользователя → 204 (повторно — тоже 204). Блокировка односторонняя, его\nне уведомляют; личные сообщения закрываются в обе стороны, общие каналы не трогаются.",
+        "operationId": "block_user",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "alice"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Заблокирован"
+          },
+          "400": {
+            "description": "Нельзя заблокировать себя",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого пользователя",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Снять блокировку → 204 (даже если её не было).",
+        "operationId": "unblock_user",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "alice"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Не заблокирован"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого пользователя",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/users/{username}/collections": {
       "get": {
         "tags": [
@@ -6717,6 +7026,94 @@
         },
         "security": [
           {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/users/{username}/dm": {
+      "put": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Открыть переписку с пользователем, заведя её при первом обращении. Повторный вызов\nвозвращает ту же; скрытую у себя — возвращает в список.",
+        "operationId": "open_dm",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username собеседника",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "alice"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Переписка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatRoomInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Переписка с самим собой (`dm_self`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Блокировка (`blocked`), закрытые личные (`dm_closed`) или неподтверждённый email (`email_not_verified`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого пользователя",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Слишком много новых переписок за сутки (`Retry-After`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
           {
             "bearer": []
           }
@@ -7238,6 +7635,17 @@
               }
             ]
           },
+          "dm": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DmRef",
+                "description": "Личная переписка (`kind = dm`): id и собеседник."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "entity": {
             "oneOf": [
               {
@@ -7372,6 +7780,18 @@
           }
         }
       },
+      "ChatSettings": {
+        "type": "object",
+        "description": "Настройки чата пользователя.",
+        "required": [
+          "dm_policy"
+        ],
+        "properties": {
+          "dm_policy": {
+            "$ref": "#/components/schemas/DmPolicy"
+          }
+        }
+      },
       "ChatSummary": {
         "type": "object",
         "description": "Комната в списке «мои чаты». Заполнено ровно одно из `entity`, `person`, `tag`, `custom` —\nпо `kind`.",
@@ -7386,7 +7806,18 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/CustomRoom",
-                "description": "Своя комната админа (`kind = room`)."
+                "description": "Комната со slug (`kind = room`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dm": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DmRef",
+                "description": "Личная переписка (`kind = dm`): id и собеседник."
               },
               {
                 "type": "null"
@@ -8004,6 +8435,32 @@
           "title": {
             "type": "string",
             "example": "Киберпанк"
+          }
+        }
+      },
+      "DmPolicy": {
+        "type": "string",
+        "description": "Кто может начать переписку с пользователем.",
+        "enum": [
+          "all",
+          "following",
+          "none"
+        ]
+      },
+      "DmRef": {
+        "type": "object",
+        "description": "Переписка в списке чатов: id комнаты и собеседник (не вы).",
+        "required": [
+          "id",
+          "peer"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "peer": {
+            "$ref": "#/components/schemas/UserRef"
           }
         }
       },
@@ -9469,6 +9926,68 @@
           }
         }
       },
+      "Page_UserRef": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Пользователь в чужих ответах (автор рецензии, владелец коллекции, подписчик).",
+              "required": [
+                "id",
+                "username"
+              ],
+              "properties": {
+                "avatar_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "display_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "example": "Обычный пользователь"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "username": {
+                  "type": "string",
+                  "example": "user"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "PersonInterest": {
         "type": "object",
         "description": "Человек в интересах пользователя.",
@@ -10015,9 +10534,21 @@
           "reviews_count",
           "collections_count",
           "threads_count",
-          "posts_count"
+          "posts_count",
+          "blocked"
         ],
         "properties": {
+          "blocked": {
+            "type": "boolean",
+            "description": "Вошедший заблокировал этого пользователя. Гостю и в своём профиле — `false`."
+          },
+          "blocked_by": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Этот пользователь заблокировал вошедшего; `null` — гость или свой профиль.\nПо паре `blocked` + `blocked_by` фронтенд решает, показывать ли «Написать»."
+          },
           "collections_count": {
             "type": "integer",
             "format": "int64",
@@ -10218,6 +10749,22 @@
           "body": {
             "type": "string",
             "description": "1–2000 символов."
+          }
+        }
+      },
+      "UpdateChatSettings": {
+        "type": "object",
+        "properties": {
+          "dm_policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DmPolicy",
+                "description": "`all`, `following` или `none`; не передан — не меняется."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },

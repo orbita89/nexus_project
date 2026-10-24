@@ -40,7 +40,9 @@ pub async fn get(
             (SELECT count(*) FROM forum_posts WHERE author_id = $1 AND deleted_at IS NULL)
                 AS posts_count,
             EXISTS (SELECT 1 FROM follows WHERE follower_id = $3 AND followee_id = $1) AS following,
-            EXISTS (SELECT 1 FROM follows WHERE follower_id = $1 AND followee_id = $3) AS followed_by",
+            EXISTS (SELECT 1 FROM follows WHERE follower_id = $1 AND followee_id = $3) AS followed_by,
+            EXISTS (SELECT 1 FROM user_blocks WHERE user_id = $3 AND blocked_id = $1) AS blocked,
+            EXISTS (SELECT 1 FROM user_blocks WHERE user_id = $1 AND blocked_id = $3) AS blocked_by",
     )
     .bind(user.id)
     .bind(is_owner)
@@ -61,6 +63,9 @@ pub async fn get(
         collections_count: row.collections_count,
         threads_count: row.threads_count,
         posts_count: row.posts_count,
+        // Гостю и самому себе блокировок не показываем — как и отношения.
+        blocked: relation.is_some() && row.blocked,
+        blocked_by: relation.is_some().then_some(row.blocked_by),
         relation,
     }))
 }
@@ -75,6 +80,8 @@ struct Counts {
     posts_count: i64,
     following: bool,
     followed_by: bool,
+    blocked: bool,
+    blocked_by: bool,
 }
 
 /// Длина запроса и размер выдачи поиска пользователей.
@@ -104,6 +111,7 @@ pub struct UserSearchQuery {
 )]
 pub async fn search(
     State(state): State<AppState>,
+    viewer: Option<AuthUser>,
     shared::extract::Query(query): shared::extract::Query<UserSearchQuery>,
 ) -> AppResult<Json<Vec<shared::directory::UserRef>>> {
     let q = crate::validate::required("q", &query.q, MAX_USER_QUERY)?;
@@ -117,5 +125,11 @@ pub async fn search(
             .on_field("limit"))
         }
     };
-    Ok(Json(state.users.search(&q, limit).await?))
+    // Блокировки живут в social: кого я заблокировал и кто заблокировал меня — не показываем,
+    // иначе человек найдёт собеседника и упрётся в 403 без объяснения.
+    let exclude = match &viewer {
+        Some(user) => crate::dm::hidden_from(&state, user.id).await?,
+        None => Vec::new(),
+    };
+    Ok(Json(state.users.search(&q, limit, &exclude).await?))
 }

@@ -58,7 +58,17 @@ impl UserDirectory for PgUserDirectory {
             .collect())
     }
 
-    async fn search(&self, q: &str, limit: i64) -> AppResult<Vec<UserRef>> {
+    async fn is_verified(&self, id: Uuid) -> AppResult<bool> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT email_verified_at IS NOT NULL FROM users WHERE id = $1 AND is_active",
+        )
+        .bind(id)
+        .fetch_optional(&self.db)
+        .await?
+        .unwrap_or(false))
+    }
+
+    async fn search(&self, q: &str, limit: i64, exclude: &[Uuid]) -> AppResult<Vec<UserRef>> {
         let escaped = q
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -67,6 +77,7 @@ impl UserDirectory for PgUserDirectory {
             // Индексы users_username_trgm и users_display_name_trgm: без полного просмотра.
             "SELECT {REF_COLUMNS} FROM users
              WHERE is_active AND (username::text ILIKE $1 OR display_name ILIKE $1)
+               AND NOT (id = ANY($5))
              -- Начинается с запроса — выше, дальше по близости имени.
              ORDER BY (username::text ILIKE $2) DESC,
                       similarity(username::text, $3) DESC, username
@@ -76,6 +87,7 @@ impl UserDirectory for PgUserDirectory {
         .bind(format!("{escaped}%"))
         .bind(q)
         .bind(limit)
+        .bind(exclude)
         .fetch_all(&self.db)
         .await?)
     }
