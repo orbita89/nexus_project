@@ -56,11 +56,13 @@ impl EntityDirectory for PgEntityDirectory {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let rows: Vec<(String, i64)> =
-            sqlx::query_as("SELECT kind, count(*) FROM entities WHERE id = ANY($1) GROUP BY kind")
-                .bind(ids)
-                .fetch_all(&self.db)
-                .await?;
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            // kind — enum entity_kind: читаем как текст, иначе sqlx не разберёт колонку.
+            "SELECT kind::text, count(*) FROM entities WHERE id = ANY($1) GROUP BY kind",
+        )
+        .bind(ids)
+        .fetch_all(&self.db)
+        .await?;
         Ok(rows.into_iter().collect())
     }
 

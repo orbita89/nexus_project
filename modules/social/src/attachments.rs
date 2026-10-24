@@ -370,7 +370,8 @@ pub async fn cleanup_orphans(state: &AppState) -> AppResult<u64> {
          WHERE message_id IS NULL AND created_at < now() - make_interval(hours => $1)
          RETURNING id",
     )
-    .bind(ORPHAN_LIFETIME_HOURS as f64)
+    // `hours` у make_interval целочисленный: f64 сюда не подходит (такой функции нет).
+    .bind(ORPHAN_LIFETIME_HOURS as i32)
     .fetch_all(&state.db)
     .await?;
     for id in &ids {

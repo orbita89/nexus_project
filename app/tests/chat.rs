@@ -2420,6 +2420,50 @@ async fn dm_send_read_and_mute(pool: PgPool) {
     assert_eq!(history["items"].as_array().unwrap().len(), 2);
 }
 
+/// Уборка неотправленных вложений: её никто не вызывал в тестах, и в ней жил неверный тип
+/// аргумента `make_interval` — на проде она просто падала.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn orphan_attachments_are_cleaned_up(pool: PgPool) {
+    let dir = std::env::temp_dir().join(format!("nexus-orphans-{}", uuid::Uuid::new_v4()));
+    let ctx = Ctx::with_attachments(pool.clone(), dir.to_str().unwrap()).await;
+    let alice = ctx.login("alice", "user").await;
+
+    let (status, uploaded) = ctx.upload(png(64, 64), Some(&alice)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = uploaded["id"].as_str().unwrap().to_string();
+
+    // Свежее вложение уборка не трогает.
+    assert_eq!(
+        social::attachments::cleanup_orphans(&ctx.state)
+            .await
+            .unwrap(),
+        0
+    );
+
+    // Состарим его: загружено давно и никуда не отправлено.
+    sqlx::query(
+        "UPDATE chat_attachments SET created_at = now() - interval '2 hours' WHERE id = $1::uuid",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        social::attachments::cleanup_orphans(&ctx.state)
+            .await
+            .unwrap(),
+        1
+    );
+    ctx.file(
+        StatusCode::NOT_FOUND,
+        &format!("/chat/attachments/{id}"),
+        Some(&alice),
+    )
+    .await;
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Картинка нужного размера, собранная на лету: в фикстурах бинарников не держим.
 fn png(width: u32, height: u32) -> Vec<u8> {
     let buffer = image::RgbaImage::from_pixel(width, height, image::Rgba([80, 120, 200, 255]));

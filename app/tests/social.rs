@@ -4276,7 +4276,7 @@ async fn user_reputation(pool: PgPool) {
         .await;
     }
     ctx.expect(
-        StatusCode::NO_CONTENT,
+        StatusCode::OK,
         Method::DELETE,
         &format!("/reviews/{review_id}/vote"),
         None,
