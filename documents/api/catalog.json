@@ -4652,9 +4652,17 @@
               "studios",
               "tags",
               "credits",
-              "related"
+              "related",
+              "awards"
             ],
             "properties": {
+              "awards": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Award"
+                },
+                "description": "Награды и номинации из `metadata.awards`, полученные сверху, затем по годам (новые\nпервыми). Отдельным полем — чтобы карточке не приходилось разбирать `metadata`."
+              },
               "credits": {
                 "type": "array",
                 "items": {

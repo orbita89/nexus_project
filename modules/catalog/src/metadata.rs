@@ -200,6 +200,23 @@ pub struct Award {
     pub won: bool,
 }
 
+/// Награды и номинации сущности из её `metadata`: полученные сверху, внутри — новые по году.
+/// Неразобранные записи пропускаются: карточка не должна падать из-за одной кривой строки.
+pub fn awards_of(metadata: &serde_json::Value) -> Vec<Award> {
+    let mut awards: Vec<Award> = metadata
+        .get("awards")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    awards.sort_by(|a, b| b.won.cmp(&a.won).then(b.year.cmp(&a.year)));
+    awards
+}
+
 /// Видеосервис трейлера. Фронтенд сам строит адрес плеера по провайдеру и id, поэтому в БД не
 /// попадает произвольный URL (и чужой домен в iframe).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

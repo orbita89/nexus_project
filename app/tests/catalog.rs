@@ -282,6 +282,52 @@ async fn list_entities_rejects_bad_filters(pool: PgPool) {
     assert!(response.json()["error"].as_str().unwrap().contains("kind"));
 }
 
+/// Награды и номинации приходят отдельным полем карточки: полученные сверху, внутри — новые
+/// по году. Фронтенду не нужно разбирать `metadata`.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn entity_card_awards(pool: PgPool) {
+    let ctx = Ctx::new(pool.clone()).await;
+
+    // Без наград — пустой список, а не отсутствующее поле.
+    assert_eq!(ctx.get_ok("/entities/dune-2021").await["awards"], json!([]));
+
+    sqlx::query(r#"UPDATE entities SET metadata = metadata || $1::jsonb WHERE slug = 'dune-2021'"#)
+        .bind(
+            json!({ "awards": [
+            { "title": "«Оскар»: лучший фильм", "year": 2022, "won": false },
+            { "title": "«Оскар»: лучший звук", "year": 2022, "won": true },
+            { "title": "BAFTA: лучшая музыка", "year": 2021, "won": true },
+            { "title": "Без года", "won": false },
+            "мусор"
+        ] })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let awards = ctx.get_ok("/entities/dune-2021").await["awards"].clone();
+    let titles: Vec<&str> = awards
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            "«Оскар»: лучший звук",
+            "BAFTA: лучшая музыка",
+            "«Оскар»: лучший фильм",
+            "Без года",
+        ],
+        "полученные сверху, внутри — новые по году; кривая запись пропущена"
+    );
+    assert_eq!(awards[0]["won"], true);
+    assert_eq!(awards[0]["year"], 2022);
+    assert_eq!(awards[3]["year"], Value::Null);
+}
+
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn entity_card_with_tags_and_credits(pool: PgPool) {
     let ctx = Ctx::new(pool).await;

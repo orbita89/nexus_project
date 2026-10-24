@@ -376,6 +376,7 @@ pub(crate) async fn details(
             tags: tags_by.remove(&entity.id).unwrap_or_default(),
             credits: credits_by.remove(&entity.id).unwrap_or_default(),
             related: related_by.remove(&entity.id).unwrap_or_default(),
+            awards: crate::metadata::awards_of(&entity.metadata),
             entity,
         })
         .collect())

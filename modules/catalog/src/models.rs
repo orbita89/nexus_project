@@ -195,6 +195,9 @@ pub struct EntityDetail {
     pub tags: Vec<Tag>,
     pub credits: Vec<EntityCredit>,
     pub related: Vec<RelatedWork>,
+    /// Награды и номинации из `metadata.awards`, полученные сверху, затем по годам (новые
+    /// первыми). Отдельным полем — чтобы карточке не приходилось разбирать `metadata`.
+    pub awards: Vec<crate::metadata::Award>,
 }
 
 /// Связанное произведение в общей ленте карусели: сиквелы, ремейки и приквелы идут одним
