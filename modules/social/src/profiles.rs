@@ -58,6 +58,8 @@ pub async fn get(
     .fetch_one(&state.db)
     .await?;
 
+    let reputation = crate::reputation::of(&state, user.id).await?;
+
     // Гостю и самому себе отношение не показываем.
     let relation = (viewer.is_some() && !is_owner).then_some(Relation {
         following: row.following,
@@ -75,6 +77,7 @@ pub async fn get(
         threads_count: row.threads_count,
         posts_count: row.posts_count,
         likes_count: row.likes_count,
+        reputation,
         // Гостю и самому себе кнопка не нужна: лайк всегда «не поставлен».
         liked: row.liked,
         // Гостю и самому себе блокировок не показываем — как и отношения.

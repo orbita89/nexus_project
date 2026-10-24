@@ -1344,6 +1344,52 @@
         ]
       }
     },
+    "/api/v1/social/admin/reputation/recalc": {
+      "post": {
+        "tags": [
+          "social-admin"
+        ],
+        "summary": "Пересчитать рейтинги сейчас: для админки и для тестов, чтобы не ждать суточного прохода.",
+        "operationId": "admin_recalculate_reputation",
+        "responses": {
+          "200": {
+            "description": "Пересчитано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecalcResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/admin/review-comments/{id}": {
       "delete": {
         "tags": [
@@ -12054,6 +12100,21 @@
           }
         }
       },
+      "RecalcResult": {
+        "type": "object",
+        "description": "Сколько пользователей получили строку рейтинга (у остальных — [`BASE`]).",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "rows": {
+            "type": "integer",
+            "format": "int64",
+            "example": 128,
+            "minimum": 0
+          }
+        }
+      },
       "Relation": {
         "type": "object",
         "description": "Подписки между вошедшим и пользователем профиля.",
@@ -12125,6 +12186,33 @@
           },
           "room": {
             "$ref": "#/components/schemas/CustomRoom"
+          }
+        }
+      },
+      "Reputation": {
+        "type": "object",
+        "description": "Рейтинг пользователя: [`crate::reputation::BASE`] за регистрацию плюс веса за чужие лайки.",
+        "required": [
+          "score",
+          "parts"
+        ],
+        "properties": {
+          "computed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Когда считали в последний раз. `null` — слагаемых ещё нет, балл стартовый."
+          },
+          "parts": {
+            "type": "object",
+            "description": "Из чего сложился балл: `{\"profile_likes\": 3, \"review_likes\": 12, \"collection_reactions\": 2}`."
+          },
+          "score": {
+            "type": "integer",
+            "format": "int32",
+            "example": 42
           }
         }
       },
@@ -12287,6 +12375,7 @@
           "threads_count",
           "posts_count",
           "likes_count",
+          "reputation",
           "liked",
           "blocked"
         ],
@@ -12356,6 +12445,10 @@
                 "type": "null"
               }
             ]
+          },
+          "reputation": {
+            "$ref": "#/components/schemas/Reputation",
+            "description": "Рейтинг («карма»): пересчитывается раз в сутки, поэтому свежий лайк виден в\n`likes_count` сразу, а в `reputation.score` — после ближайшего пересчёта."
           },
           "reviews_count": {
             "type": "integer",

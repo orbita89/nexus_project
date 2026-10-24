@@ -240,6 +240,18 @@ pub struct Like {
     pub since: DateTime<Utc>,
 }
 
+/// Рейтинг пользователя: [`crate::reputation::BASE`] за регистрацию плюс веса за чужие лайки.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Reputation {
+    #[schema(example = 42)]
+    pub score: i32,
+    /// Из чего сложился балл: `{"profile_likes": 3, "review_likes": 12, "collection_reactions": 2}`.
+    #[schema(value_type = Object)]
+    pub parts: serde_json::Value,
+    /// Когда считали в последний раз. `null` — слагаемых ещё нет, балл стартовый.
+    pub computed_at: Option<DateTime<Utc>>,
+}
+
 // ---------------------------------------------------------------- профиль
 
 /// Социальный профиль пользователя.
@@ -271,6 +283,9 @@ pub struct SocialProfile {
     /// Сколько лайков у профиля (дизлайков нет).
     #[schema(example = 17)]
     pub likes_count: i64,
+    /// Рейтинг («карма»): пересчитывается раз в сутки, поэтому свежий лайк виден в
+    /// `likes_count` сразу, а в `reputation.score` — после ближайшего пересчёта.
+    pub reputation: Reputation,
     /// Лайкнул ли вошедший этот профиль. Гостю и в своём профиле — `false`.
     pub liked: bool,
     /// Отношение вошедшего к пользователю. `null` — гость или свой профиль.

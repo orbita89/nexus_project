@@ -4176,6 +4176,130 @@ async fn user_likes(pool: PgPool) {
     assert_eq!(seen_by_bob["liked"], false);
 }
 
+/// Рейтинг («карма»): стартовые 30, веса за чужие лайки, пересчёт с нуля.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn user_reputation(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+    let carol = ctx.user("carol").await;
+    let admin = ctx.login("admin@example.com", "admin").await;
+    let profile = format!("/users/{}", alice.username);
+    let recalc = "/admin/reputation/recalc";
+
+    // До всякого пересчёта у всех стартовые 30 и пустая разбивка.
+    let fresh = ctx.get_ok(&profile, None).await;
+    assert_eq!(fresh["reputation"]["score"], 30);
+    assert_eq!(fresh["reputation"]["computed_at"], Value::Null);
+    assert_eq!(fresh["reputation"]["parts"]["profile_likes"], 0);
+
+    // Два лайка профиля (×2), лайк рецензии (×1), реакция на коллекцию (×1) → 30 + 4 + 1 + 1.
+    for user in [&bob, &carol] {
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::PUT,
+            &format!("/users/{}/like", alice.username),
+            None,
+            Some(user),
+        )
+        .await;
+    }
+    let review = ctx
+        .review(
+            &alice,
+            "dune-2021",
+            json!({ "rating": 8, "body": "Рецензия" }),
+        )
+        .await;
+    let review_id = review["id"].as_str().unwrap();
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &format!("/reviews/{review_id}/vote"),
+        Some(json!({ "value": 1 })),
+        Some(&bob),
+    )
+    .await;
+    // Дизлайк рейтинг не уменьшает.
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &format!("/reviews/{review_id}/vote"),
+        Some(json!({ "value": -1 })),
+        Some(&carol),
+    )
+    .await;
+    let collection = ctx.collection(&alice, json!({ "title": "Подборка" })).await;
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        &format!("/collections/{collection}/reaction"),
+        Some(json!({ "kind": "fire" })),
+        Some(&bob),
+    )
+    .await;
+
+    // Пересчёт — только админу.
+    ctx.expect(
+        StatusCode::FORBIDDEN,
+        Method::POST,
+        recalc,
+        None,
+        Some(&bob),
+    )
+    .await;
+    let result = ctx
+        .expect(StatusCode::OK, Method::POST, recalc, None, Some(&admin))
+        .await;
+    assert_eq!(result["rows"], 1, "строка только у alice");
+
+    let scored = ctx.get_ok(&profile, None).await;
+    assert_eq!(scored["reputation"]["score"], 36);
+    assert_eq!(
+        scored["reputation"]["parts"],
+        json!({ "profile_likes": 2, "review_likes": 1, "collection_reactions": 1 })
+    );
+    assert!(scored["reputation"]["computed_at"].is_string());
+    // У тех, кого не лайкали, по-прежнему стартовые 30.
+    let bobs = ctx.get_ok(&format!("/users/{}", bob.username), None).await;
+    assert_eq!(bobs["reputation"]["score"], 30);
+
+    // Лайки сняли — пересчёт с нуля возвращает к стартовому баллу, строка исчезает.
+    for user in [&bob, &carol] {
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            &format!("/users/{}/like", alice.username),
+            None,
+            Some(user),
+        )
+        .await;
+    }
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/reviews/{review_id}/vote"),
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/collections/{collection}/reaction"),
+        None,
+        Some(&bob),
+    )
+    .await;
+    let result = ctx
+        .expect(StatusCode::OK, Method::POST, recalc, None, Some(&admin))
+        .await;
+    assert_eq!(result["rows"], 0);
+    let back = ctx.get_ok(&profile, None).await;
+    assert_eq!(back["reputation"]["score"], 30);
+    assert_eq!(back["reputation"]["computed_at"], Value::Null);
+}
+
 // ---------------------------------------------------------------- границы модулей
 
 /// Справочник сущностей, отдающий для `dune-2021` своё название: видно, что social берёт

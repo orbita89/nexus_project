@@ -60,6 +60,8 @@ async fn main() -> anyhow::Result<()> {
     catalog::search::spawn_reindex(state.clone());
     catalog::search::spawn_ratings_sync(state.clone());
     social::ratings::spawn_sync_all(state.clone());
+    // Рейтинг пользователей: полный пересчёт раз в сутки, первый — сразу после старта.
+    social::reputation::spawn(state.clone());
     // Вложения, которые загрузили и не отправили: висят на диске без сообщения.
     match social::attachments::cleanup_orphans(&state).await {
         Ok(0) => {}

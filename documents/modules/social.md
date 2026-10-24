@@ -17,6 +17,35 @@
 
 ## Таблицы
 
+### `user_reputation` ✅ — рейтинг пользователя («карма»)
+
+Миграция `20261120100000_social_reputation.sql`. Не счётчик на триггерах, а полный пересчёт раз
+в сутки: слагаемых будет больше (каналы, темы форума), веса будут меняться, а пересчёт с нуля
+всегда даёт одно и то же число — его не нужно чинить после каждой правки правил.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `user_id` | `uuid` | PK, FK → `users`, CASCADE | |
+| `score` | `integer` | NOT NULL, CHECK ≥ 0 | Балл вместе со стартовыми 30 |
+| `parts` | `jsonb` | NOT NULL, default `{}` | Разбивка: `{"profile_likes": 3, "review_likes": 12, "collection_reactions": 2}`. jsonb, а не колонки: новое слагаемое не потребует миграции |
+| `computed_at` | `timestamptz` | NOT NULL | Когда считали |
+
+**Слагаемые и веса** (`social::reputation`): `BASE = 30` за регистрацию, лайк профиля
+(`user_likes`) — 2, лайк чужой рецензии (`review_votes.value = 1`) — 1, реакция на коллекцию
+(`collection_reactions`) — 1. Дизлайки не вычитаются: рейтинг показывает пользу, а не разрешает
+минусовать за непопулярное мнение. Каналы и темы форума добавятся слагаемыми позже.
+
+**Строка только у тех, у кого есть слагаемые.** У остальных рейтинг равен `BASE`, и хранить его
+незачем: пересчёт удаляет строки, не обновлённые текущим проходом (`computed_at < now()`, а
+внутри транзакции `now()` неподвижен). Поэтому пересчёт ни разу не читает `users` — границы
+целы, а «пользователи без единого лайка» это ровно те, у кого `BASE`.
+
+**Пересчёт:** один запрос по своим таблицам, фоновая задача раз в сутки (`social::reputation::spawn`,
+первый проход сразу после старта) под `pg_try_advisory_lock` — при нескольких экземплярах
+приложения считает один; вручную — `POST /admin/reputation/recalc`.
+**Индексы:** (`score DESC`, `user_id`) — будущие таблицы лидеров; `computed_at` — отсев строк
+прошлых проходов.
+
 ### `follows` ✅ — подписки на пользователей
 
 Кто на кого подписан. Используется для ленты «что пишут люди, на которых я подписан».
@@ -674,7 +703,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | GET | `/users/{username}/stats` | гость / вошедший | Аналитика профиля: `ratings` (`average`, `count`, `distribution` 1–10), `reviews_with_text`, `marks` (`later`, `done`), `reactions` (все четыре ключа), `comments` (`reviews`, `collections`, без удалённых) и `by_kind` (`rated`, `done` по типам контента — из `EntityDirectory::kind_counts`, ключей без единой сущности нет). 403 `stats_private` — владелец не открыл аналитику; 404 — нет пользователя |
 | GET | `/users/{username}/ratings` | гость / вошедший | Что пользователь оценил: `Page<{entity, rating, has_text, created_at}>`, `?sort=new` (по умолчанию) `\|rating_desc\|rating_asc`, `?limit=1..100&offset=`. 400 — неизвестный `sort`; 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}/marks` | гость / вошедший | Отметки пользователя: `?kind=later\|done` (не передан — все), `limit`, `offset` → `Page<{entity, kind, created_at}>`. Своё без оглядки на приватность — `/users/me/marks`. 403 `stats_private`; 404 — нет пользователя |
-| GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых), `likes_count` и `liked` (лайкнул ли вошедший; гостю и в своём профиле `false`), `relation`, `blocked` (я заблокировал его; гостю и в своём профиле `false`), `blocked_by` (он заблокировал меня; `null` — гость или свой профиль), а также `bio`, `stats_public` (открыл ли пользователь свою аналитику всем) и `registered_at` — из `auth` через `UserDirectory::details` |
+| GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых), `likes_count` и `liked` (лайкнул ли вошедший; гостю и в своём профиле `false`), `reputation` (`score`, `parts`, `computed_at`; пересчёт раз в сутки, поэтому свежий лайк виден в `likes_count` сразу, а в `score` — после ближайшего прохода), `relation`, `blocked` (я заблокировал его; гостю и в своём профиле `false`), `blocked_by` (он заблокировал меня; `null` — гость или свой профиль), а также `bio`, `stats_public` (открыл ли пользователь свою аналитику всем) и `registered_at` — из `auth` через `UserDirectory::details` |
 
 `relation` — `{"following": true, "followed_by": false}`: подписан ли вошедший на пользователя и
 пользователь на него. Для гостя и своего профиля — `null`. Так фронтенд рисует кнопку
@@ -877,6 +906,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 
 | Метод | Путь | Что делает |
 |---|---|---|
+| POST | `/admin/reputation/recalc` | admin | Пересчитать рейтинги сейчас, не дожидаясь суточного прохода → 200 `{"rows": N}` — сколько пользователей получили строку (у остальных стартовые 30) |
 | DELETE | `/admin/reviews/{id}` | Удалить любую рецензию → 204 (голоса и комментарии — вместе с ней) |
 | DELETE | `/admin/review-comments/{id}` | Удалить любой комментарий к рецензии → 204 |
 | DELETE | `/admin/collections/{id}` | Удалить любую коллекцию, в том числе приватную → 204 |

@@ -28,6 +28,7 @@ pub mod profiles;
 pub mod ratings;
 pub mod reactions;
 mod refs;
+pub mod reputation;
 pub mod reviews;
 pub mod rooms;
 mod slug;
@@ -56,6 +57,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::delete_comment))
         .routes(routes!(likes::like, likes::unlike))
         .routes(routes!(likes::list))
+        .routes(routes!(reputation::recalc))
         .routes(routes!(stats::get))
         .routes(routes!(user_comments::list))
         .routes(routes!(stats::ratings))
