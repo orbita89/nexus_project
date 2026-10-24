@@ -60,6 +60,39 @@ impl Ctx {
         body
     }
 
+    /// Приложение с каталогом аватаров во временной папке: тесты не делят её между собой.
+    fn with_avatars(pool: PgPool, dir: &str) -> Self {
+        let mut config = shared::Config::from_env();
+        config.avatars_dir = dir.to_string();
+        let (state, outbox) = test_utils::state_with_config(pool.clone(), config);
+        Self {
+            state,
+            outbox,
+            pool,
+        }
+    }
+
+    /// Загрузка фото профиля: статус и разобранное тело.
+    async fn upload(&self, bytes: Vec<u8>, token: Option<&str>) -> (StatusCode, Value) {
+        let app = nexus::build_app(self.state.clone());
+        let response =
+            test_utils::upload(app, &format!("{AUTH}/me/avatar"), "me.png", bytes, token).await;
+        let body = if response.body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&response.body).unwrap_or(Value::Null)
+        };
+        (response.status, body)
+    }
+
+    /// Запрос за файлом: тело не JSON, разбирать его нельзя.
+    async fn file(&self, status: StatusCode, path: &str) -> Vec<u8> {
+        let app = nexus::build_app(self.state.clone());
+        let response = request(app, Method::GET, path, None, None).await;
+        assert_eq!(response.status, status, "GET {path}");
+        response.body.to_vec()
+    }
+
     async fn patch_me(&self, status: StatusCode, body: Value, token: &str) -> Value {
         self.expect(status, Method::PATCH, "/me", Some(body), Some(token))
             .await
@@ -153,7 +186,33 @@ async fn update_profile_fields(pool: PgPool) {
         .await;
     assert_eq!(me["avatar_url"], Value::Null);
 
+    // «О себе» и видимость аналитики — те же правила: не переданное не меняется.
+    let user = ctx
+        .patch_me(
+            StatusCode::OK,
+            json!({ "bio": "  Смотрю фантастику  ", "stats_public": true }),
+            &neo,
+        )
+        .await;
+    assert_eq!(user["bio"], "Смотрю фантастику");
+    assert_eq!(user["stats_public"], true);
+    let user = ctx
+        .patch_me(StatusCode::OK, json!({ "display_name": "Нео" }), &neo)
+        .await;
+    assert_eq!(user["bio"], "Смотрю фантастику");
+    assert_eq!(user["stats_public"], true);
+    let user = ctx
+        .patch_me(
+            StatusCode::OK,
+            json!({ "bio": null, "stats_public": false }),
+            &neo,
+        )
+        .await;
+    assert_eq!(user["bio"], Value::Null);
+    assert_eq!(user["stats_public"], false);
+
     for bad in [
+        json!({ "bio": "x".repeat(1001) }),
         json!({ "display_name": "x".repeat(65) }),
         json!({ "avatar_url": "http://example.com/neo.png" }),
         json!({ "avatar_url": "javascript:alert(1)" }),
@@ -172,6 +231,78 @@ async fn update_profile_fields(pool: PgPool) {
         None,
     )
     .await;
+}
+
+/// Картинка нужного размера, собранная на лету: в фикстурах бинарников не держим.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let buffer = image::RgbaImage::from_pixel(width, height, image::Rgba([80, 120, 200, 255]));
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(buffer)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+/// Фото профиля: загрузка, раздача, замена (старый файл исчезает), удаление.
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn avatar_upload_replaces_and_deletes_file(pool: PgPool) {
+    let dir = std::env::temp_dir().join(format!("nexus-avatars-{}", uuid::Uuid::new_v4()));
+    let ctx = Ctx::with_avatars(pool, dir.to_str().unwrap());
+    let neo = access(&ctx.register("neo").await);
+
+    // Не картинку не принимаем.
+    let (status, error) = ctx
+        .upload(b"this is definitely not a png".to_vec(), Some(&neo))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error["code"], "not_an_image");
+    // И без токена тоже.
+    let (status, _) = ctx.upload(png(64, 64), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, user) = ctx.upload(png(1024, 512), Some(&neo)).await;
+    assert_eq!(status, StatusCode::OK, "{user}");
+    let url = user["avatar_url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("/api/v1/auth/avatars/"), "{url}");
+
+    // Файл раздаётся всем и это WebP, уменьшенный до 512 по длинной стороне.
+    let bytes = ctx.file(StatusCode::OK, &url).await;
+    assert_eq!(&bytes[..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WEBP");
+    let decoded = image::load_from_memory(&bytes).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (512, 256));
+
+    // Новая загрузка даёт новый адрес, старый файл стирается.
+    let (_, user) = ctx.upload(png(64, 64), Some(&neo)).await;
+    let next = user["avatar_url"].as_str().unwrap().to_string();
+    assert_ne!(next, url);
+    ctx.file(StatusCode::NOT_FOUND, &url).await;
+    ctx.file(StatusCode::OK, &next).await;
+
+    // Свой https-адрес вместо загруженного — файл тоже уходит.
+    let user = ctx
+        .patch_me(
+            StatusCode::OK,
+            json!({ "avatar_url": "https://example.com/neo.png" }),
+            &neo,
+        )
+        .await;
+    assert_eq!(user["avatar_url"], "https://example.com/neo.png");
+    ctx.file(StatusCode::NOT_FOUND, &next).await;
+
+    // Удаление убирает и адрес от провайдера.
+    let user = ctx
+        .expect(
+            StatusCode::OK,
+            Method::DELETE,
+            "/me/avatar",
+            None,
+            Some(&neo),
+        )
+        .await;
+    assert_eq!(user["avatar_url"], Value::Null);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR")]

@@ -97,6 +97,8 @@ services:
       ARCHIVE_DIR: /var/lib/nexus/archive
       # Вложения чата — на том же томе: их надо бэкапить вместе с остальными данными.
       ATTACHMENTS_DIR: /var/lib/nexus/attachments
+      # Фото профиля — там же, рядом с вложениями.
+      AVATARS_DIR: /var/lib/nexus/avatars
     volumes:
       - archivedata:/var/lib/nexus
     depends_on:

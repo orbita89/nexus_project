@@ -1504,6 +1504,19 @@ async fn social_profile(pool: PgPool) {
     assert_eq!(profile["reviews_count"], 2);
     assert_eq!(profile["collections_count"], 1);
     assert_eq!(profile["relation"], Value::Null);
+    // «О себе» и видимость аналитики приходят из auth через справочник.
+    assert_eq!(profile["bio"], Value::Null);
+    assert_eq!(profile["stats_public"], false);
+    assert!(profile["registered_at"].is_string());
+    sqlx::query("UPDATE users SET bio = $1, stats_public = true WHERE username = $2::citext")
+        .bind("Смотрю фантастику")
+        .bind(&alice.username)
+        .execute(&ctx.state.db)
+        .await
+        .unwrap();
+    let profile = ctx.get_ok(&path, None).await;
+    assert_eq!(profile["bio"], "Смотрю фантастику");
+    assert_eq!(profile["stats_public"], true);
 
     // Владелец: приватные коллекции в счётчике, отношения к себе нет.
     let own = ctx.get_ok(&path, Some(&alice)).await;

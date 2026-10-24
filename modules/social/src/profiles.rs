@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::Json;
 use shared::error::ErrorBody;
 use shared::extract::Path;
-use shared::{AppResult, AppState, AuthUser};
+use shared::{AppError, AppResult, AppState, AuthUser};
 
 /// Профиль: сколько подписчиков, подписок, рецензий, коллекций, тем и сообщений форума; вошедшему — подписан ли он
 /// и подписан ли пользователь на него. Шапка профиля и кнопка «Подписаться» — одним запросом.
@@ -26,6 +26,12 @@ pub async fn get(
     Path(username): Path<String>,
 ) -> AppResult<Json<SocialProfile>> {
     let user = refs::user(&state, &username).await?;
+    // «О себе» и видимость аналитики живут в `users` — читаем их справочником, не SQL'ем.
+    let details = state
+        .users
+        .details(user.id)
+        .await?
+        .ok_or(AppError::NotFound)?;
     let viewer = viewer.map(|viewer| viewer.id);
     let is_owner = viewer == Some(user.id);
 
@@ -57,6 +63,9 @@ pub async fn get(
     });
     Ok(Json(SocialProfile {
         user,
+        bio: details.bio,
+        stats_public: details.stats_public,
+        registered_at: details.created_at,
         followers_count: row.followers_count,
         following_count: row.following_count,
         reviews_count: row.reviews_count,

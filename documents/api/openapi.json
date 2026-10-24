@@ -336,6 +336,45 @@
         ]
       }
     },
+    "/api/v1/auth/avatars/{id}": {
+      "get": {
+        "tags": [
+          "profile"
+        ],
+        "summary": "Отдать фото. Аватар виден всем: он стоит рядом с каждым сообщением и рецензией.",
+        "operationId": "get_avatar",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id файла из `avatar_url`",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Картинка WebP",
+            "content": {
+              "image/webp": {}
+            }
+          },
+          "404": {
+            "description": "Нет такого файла",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/dev/login": {
       "post": {
         "tags": [
@@ -836,6 +875,107 @@
           },
           "409": {
             "description": "Username занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/me/avatar": {
+      "post": {
+        "tags": [
+          "profile"
+        ],
+        "summary": "Загрузить фото профиля: заменяет прежнее (и загруженное, и адрес от провайдера).",
+        "operationId": "upload_avatar",
+        "requestBody": {
+          "description": "multipart/form-data с одним файловым полем",
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Профиль с новым `avatar_url`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Не картинка (`not_an_image`), больше 2 МБ (`file_too_large`), пустой запрос",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена или аккаунт заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Больше 10 загрузок за 10 минут (`Retry-After`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "profile"
+        ],
+        "summary": "Убрать фото профиля: и загруженное, и адрес от провайдера.",
+        "operationId": "delete_avatar",
+        "responses": {
+          "200": {
+            "description": "Профиль без аватара",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена или аккаунт заблокирован",
             "content": {
               "application/json": {
                 "schema": {
@@ -1814,6 +1954,7 @@
                 "id",
                 "email",
                 "username",
+                "stats_public",
                 "role",
                 "is_active",
                 "has_password",
@@ -1824,7 +1965,15 @@
                   "type": [
                     "string",
                     "null"
-                  ]
+                  ],
+                  "description": "Ссылка на фото: `/api/v1/auth/avatars/{id}` у загруженного, внешний https-адрес у\nпришедшего от провайдера."
+                },
+                "bio": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "«О себе», до 1000 символов. Видно всем в профиле."
                 },
                 "created_at": {
                   "type": "string",
@@ -1862,6 +2011,10 @@
                 },
                 "role": {
                   "$ref": "#/components/schemas/Role"
+                },
+                "stats_public": {
+                  "type": "boolean",
+                  "description": "Видна ли аналитика профиля (оценки, «просмотрено», «посмотрю позже») другим.\nПо умолчанию `false` — только владельцу."
                 },
                 "username": {
                   "type": "string",
@@ -2088,8 +2241,16 @@
               "string",
               "null"
             ],
-            "description": "Ссылка `https://…` до 500 символов. `null` или пустая строка — очистить.",
+            "description": "Ссылка `https://…` до 500 символов. `null` или пустая строка — очистить. Загруженное\nфото ставится отдельным запросом (`POST /me/avatar`) и пишется в это же поле.",
             "example": "https://example.com/neo.png"
+          },
+          "bio": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "«О себе», до 1000 символов. `null` или пустая строка — очистить.",
+            "example": "Смотрю фантастику, читаю Стругацких."
           },
           "display_name": {
             "type": [
@@ -2098,6 +2259,13 @@
             ],
             "description": "До 64 символов. `null` или пустая строка — очистить.",
             "example": "Нео"
+          },
+          "stats_public": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Открыть аналитику профиля всем (`true`) или снова спрятать (`false`)."
           },
           "username": {
             "type": [
@@ -2117,6 +2285,7 @@
           "id",
           "email",
           "username",
+          "stats_public",
           "role",
           "is_active",
           "has_password",
@@ -2127,7 +2296,15 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Ссылка на фото: `/api/v1/auth/avatars/{id}` у загруженного, внешний https-адрес у\nпришедшего от провайдера."
+          },
+          "bio": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "«О себе», до 1000 символов. Видно всем в профиле."
           },
           "created_at": {
             "type": "string",
@@ -2165,6 +2342,10 @@
           },
           "role": {
             "$ref": "#/components/schemas/Role"
+          },
+          "stats_public": {
+            "type": "boolean",
+            "description": "Видна ли аналитика профиля (оценки, «просмотрено», «посмотрю позже») другим.\nПо умолчанию `false` — только владельцу."
           },
           "username": {
             "type": "string",

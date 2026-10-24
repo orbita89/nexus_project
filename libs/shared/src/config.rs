@@ -16,6 +16,9 @@ pub struct Config {
     /// Куда класть вложения чата. Файлы раздаёт приложение, а не nginx: вложение из личной
     /// переписки не должно открываться по прямой ссылке.
     pub attachments_dir: String,
+    /// Куда класть загруженные фото профиля. Их раздаёт приложение тем же способом, что и
+    /// вложения: отдельный каталог нужен, чтобы уборка вложений не трогала аватары.
+    pub avatars_dir: String,
     /// Кэш карточек каталога ([`crate::cache`]): L1 в памяти процесса, `CACHE_L1_TTL_SECS`.
     pub cache_l1_ttl_secs: u64,
     /// Сколько записей держит L1, `CACHE_L1_CAPACITY`.
@@ -178,6 +181,7 @@ impl Config {
             meili_url: var_or("MEILI_URL", "http://localhost:7700"),
             meili_master_key: env::var("MEILI_MASTER_KEY").ok(),
             attachments_dir: var_or("ATTACHMENTS_DIR", "data/attachments"),
+            avatars_dir: var_or("AVATARS_DIR", "data/avatars"),
             cache_l1_ttl_secs: number_or("CACHE_L1_TTL_SECS", 30),
             cache_l1_capacity: number_or("CACHE_L1_CAPACITY", 10_000),
             cache_l2_ttl_secs: number_or("CACHE_L2_TTL_SECS", 86_400),

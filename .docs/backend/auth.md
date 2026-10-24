@@ -22,7 +22,10 @@
 | `username` | `citext` | NOT NULL, UNIQUE | Логин, тоже без учёта регистра |
 | `password_hash` | `text` | | Хеш Argon2id. `NULL` — пароль не задан (вход по ссылке или через провайдера) |
 | `display_name` | `text` | | Отображаемое имя |
-| `avatar_url` | `text` | | Ссылка на аватар |
+| `avatar_url` | `text` | | Фото: `/api/v1/auth/avatars/{id}` у загруженного, внешний `https://…` у аватара от провайдера или заданного вручную |
+| `avatar_id` | `uuid` | | Загруженный файл: им же называется файл на диске. `NULL` — фото не загружали. Миграция `20261117100000_auth_profile_bio_avatar.sql` |
+| `bio` | `text` | CHECK ≤ 1000 символов | «О себе» в профиле. Та же миграция |
+| `stats_public` | `boolean` | NOT NULL, default `false` | Видна ли аналитика профиля (оценки, «просмотрено», «посмотрю позже») другим. Та же миграция |
 | `role` | `user_role` | NOT NULL, default `user` | `user`, `author`, `admin` |
 | `is_active` | `boolean` | NOT NULL, default `true` | `false` — заблокирован админом |
 | `email_verified_at` | `timestamptz` | | Когда подтверждён email. `NULL` — вход по паролю запрещён |
@@ -31,6 +34,22 @@
 
 **`user_role`** — enum (`user`, `author`, `admin`). Порядок значений задаёт старшинство, в SQL
 работает `role >= 'author'`.
+
+### `avatar_uploads` ✅ — журнал загрузок фото профиля
+
+Миграция `20261117100000_auth_profile_bio_avatar.sql`. Нужен только для лимита частоты (10
+загрузок за 10 минут): счётчики входа живут в памяти процесса, а здесь запись и так идёт в той
+же транзакции, что и смена аватара. `id` строки = имя файла на диске
+(`<AVATARS_DIR>/<2 символа id>/<id>.webp`). Старые строки убирает фоновая уборка
+(`auth::cleanup`, раз в час).
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK, `uuidv7()` | Имя файла на диске |
+| `user_id` | `uuid` | NOT NULL, FK → `users`, CASCADE | Кто загрузил |
+| `created_at` | `timestamptz` | NOT NULL | |
+
+**Индексы:** (`user_id`, `created_at DESC`) — загрузки за окно лимита.
 
 ### `refresh_tokens` ✅ — сессии
 
@@ -92,6 +111,8 @@
 - `libs/shared/src/mail.rs` — письма (SMTP/`lettre`, dev — Mailpit).
 - `libs/shared/src/config.rs` — `OAuthProviderConfig::presets()`: пресеты OAuth-провайдеров.
 - `shared::directory::UserDirectory` реализует `auth` (`by_username` только активные, `by_ids` включая заблокированных) — его читают `social` и другие модули, не обращаясь к `users` напрямую.
+- `UserDirectory::details(id)` → `UserDetails` `{bio, stats_public, created_at}` — поля страницы профиля: в `UserRef` им не место, он стоит рядом с каждой рецензией и каждым сообщением. Читает `social::profiles` для `GET /api/v1/social/users/{username}`.
+- **Файлы на диске:** фото профиля в `AVATARS_DIR` (по умолчанию `data/avatars`, в docker — `/var/lib/nexus/avatars`). Раздаёт приложение (`GET /avatars/{id}`), а не nginx: путь остаётся за API.
 
 </deps>
 
@@ -180,12 +201,29 @@ username генерируется из email (`neo.anderson_3f9a1c`).
 Всё — с токеном (`Authorization: Bearer`), кроме подтверждения нового email по ссылке.
 
 - **`PATCH /me`** — `username`, `display_name` (до 64 символов), `avatar_url` (только `https://…`,
-  до 500 символов). Не переданное не меняется, `null` или пустая строка очищают имя и аватар.
+  до 500 символов), `bio` («о себе», до 1000 символов), `stats_public` (открыть аналитику профиля
+  всем). Не переданное не меняется, `null` или пустая строка очищают имя, аватар и «о себе».
   Неизвестные поля — 400 (email и роль так не меняются).
 - **username** — раз в 30 дней (`username_changed_at` в профиле; первый раз — сразу, в том числе
   сгенерированный `neo.anderson_3f9a1c`). Тот же username — не смена. Занят — 409. Старое имя
   освобождается сразу; ссылки на профиль в `social` идут по username, старые перестают работать.
-- **Аватар** — только ссылка. Загрузка файлов появится вместе с хранилищем (S3/MinIO).
+- **Аватар** — ссылка или загруженный файл:
+  - `POST /me/avatar` — `multipart/form-data` с одним файловым полем → 200 `UserView` с новым
+    `avatar_url` вида `/api/v1/auth/avatars/{id}`. Присланное не сохраняется байт-в-байт:
+    декодируем, ограничиваем длинную сторону 512 px и кодируем в WebP — так подтверждается, что
+    это действительно картинка, и пропадают EXIF с GPS. 400 — не картинка (`not_an_image`),
+    больше 2 МБ (`file_too_large`), пустой запрос; 429 — больше 10 загрузок за 10 минут
+    (`Retry-After`).
+  - `DELETE /me/avatar` — убрать фото (и адрес от провайдера тоже) → 200 `UserView`.
+  - `GET /avatars/{id}` — сам файл (`image/webp`), виден всем: аватар стоит рядом с каждой
+    рецензией и каждым сообщением. `Cache-Control: public, max-age=31536000, immutable` — id
+    новый на каждую загрузку.
+  - Новая загрузка и свой `avatar_url` в `PATCH /me` стирают прежний файл. S3/MinIO вместо
+    локального каталога — впереди.
+- **«О себе» и аналитика** — `bio` (до 1000 символов) и `stats_public`. Статистика профиля
+  (оценки, «просмотрено», «посмотрю позже») по умолчанию видна только владельцу; `stats_public:
+  true` открывает её всем. Оба поля и дату регистрации `social` читает через
+  `UserDirectory::details`.
 - **`has_password`** в профиле (`UserView`) — задан ли пароль. `false` у аккаунтов, созданных входом
   по ссылке или через провайдера: пароль при смене email не спрашивается, задать его можно через
   «забыли пароль». Сам хеш наружу не отдаётся никогда.
@@ -255,6 +293,10 @@ API видно в PR. Обновить: `UPDATE_OPENAPI=1 cargo test -p nexus op
 | GET | `sessions` | вошедший | Мои активные сессии |
 | DELETE | `sessions/{id}` | вошедший | Завершить сессию → 204 |
 | GET | `me` | вошедший | Мой профиль |
+| PATCH | `me` | вошедший | Изменить профиль: `username`, `display_name`, `avatar_url`, `bio`, `stats_public` |
+| POST | `me/avatar` | вошедший | Загрузить фото (multipart) → профиль с новым `avatar_url` |
+| DELETE | `me/avatar` | вошедший | Убрать фото → профиль |
+| GET | `avatars/{id}` | все | Файл фото (`image/webp`) |
 | PATCH | `me` | вошедший | Изменить username (раз в 30 дней), имя, аватар |
 | POST | `me/email` | вошедший | Сменить email: ссылка на новый адрес → 202 |
 | POST | `email/change/confirm` | все (по ссылке) | Подтвердить новый email → профиль |
@@ -398,6 +440,7 @@ async fn admin_action(AdminUser(admin): AdminUser, ...) -> AppResult<...> { ... 
 |---|---|
 | `modules/auth/` | Выдача токенов, эндпоинты модуля |
 | `modules/auth/src/oauth/provider.rs` | Разбор профиля провайдера без OpenID Connect |
+| `modules/auth/src/avatars.rs` | Фото профиля: загрузка (пережатие в WebP), раздача, удаление, лимит частоты |
 | `libs/shared/src/auth.rs` | Выдача и проверка токенов, ролей (`AuthUser`, `AdminUser`, `Role`) — общие для всех модулей |
 | `libs/shared/src/mail.rs` | Письма (SMTP/`lettre`, dev — Mailpit) |
 | `libs/shared/src/config.rs` | `OAuthProviderConfig::presets()` — пресеты провайдеров |
@@ -431,7 +474,7 @@ async fn admin_action(AdminUser(admin): AdminUser, ...) -> AppResult<...> { ... 
 
 ## Дальше 🕓
 
-- Загрузка аватара файлом — вместе с хранилищем (S3/MinIO).
+- Хранилище файлов (S3/MinIO) вместо локального каталога аватаров.
 - Удаление своего аккаунта: решить, удалять ли рецензии, темы и коллекции или обезличивать.
 - VK ID (нестандартный OAuth, нужен отдельный разбор профиля).
 - Rate limiting в Redis — когда экземпляров приложения станет несколько.

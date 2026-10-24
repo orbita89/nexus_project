@@ -10753,6 +10753,8 @@
         "description": "Социальный профиль пользователя.",
         "required": [
           "user",
+          "stats_public",
+          "registered_at",
           "followers_count",
           "following_count",
           "reviews_count",
@@ -10762,6 +10764,13 @@
           "blocked"
         ],
         "properties": {
+          "bio": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "«О себе» из профиля (`auth`), до 1000 символов."
+          },
           "blocked": {
             "type": "boolean",
             "description": "Вошедший заблокировал этого пользователя. Гостю и в своём профиле — `false`."
@@ -10795,6 +10804,11 @@
             "description": "Сообщения на форуме, без удалённых.",
             "example": 25
           },
+          "registered_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Когда зарегистрировался."
+          },
           "relation": {
             "oneOf": [
               {
@@ -10811,6 +10825,10 @@
             "format": "int64",
             "description": "Все рецензии, включая оценки без текста.",
             "example": 40
+          },
+          "stats_public": {
+            "type": "boolean",
+            "description": "Открыл ли пользователь свою аналитику всем. В своём профиле — своё значение."
           },
           "threads_count": {
             "type": "integer",

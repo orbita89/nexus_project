@@ -28,11 +28,12 @@ pub struct Deleted {
     pub sessions: u64,
     pub email_tokens: u64,
     pub oauth_states: u64,
+    pub avatar_uploads: u64,
 }
 
 impl Deleted {
     fn total(&self) -> u64 {
-        self.sessions + self.email_tokens + self.oauth_states
+        self.sessions + self.email_tokens + self.oauth_states + self.avatar_uploads
     }
 }
 
@@ -53,9 +54,18 @@ pub async fn run(db: &PgPool) -> Result<Deleted, sqlx::Error> {
         .execute(db)
         .await?
         .rows_affected();
+    // Журнал загрузок аватаров нужен только для лимита частоты: старше окна — мусор.
+    let avatar_uploads = sqlx::query(
+        "DELETE FROM avatar_uploads WHERE created_at < now() - make_interval(secs => $1)",
+    )
+    .bind(crate::avatars::RATE_WINDOW_SECS as f64)
+    .execute(db)
+    .await?
+    .rows_affected();
     Ok(Deleted {
         sessions,
         email_tokens,
         oauth_states,
+        avatar_uploads,
     })
 }

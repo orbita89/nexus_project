@@ -10,6 +10,7 @@
 //! Подробно — `documents/modules/auth.md`.
 
 mod admin;
+mod avatars;
 pub mod cleanup;
 pub mod crypto;
 pub mod directory;
@@ -39,6 +40,8 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(account::refresh))
         .routes(routes!(account::logout))
         .routes(routes!(account::me, profile::update))
+        .routes(routes!(avatars::upload, avatars::delete))
+        .routes(routes!(avatars::get))
         .routes(routes!(profile::change_email))
         .routes(routes!(profile::confirm_email_change))
         .routes(routes!(oauth::link::list))

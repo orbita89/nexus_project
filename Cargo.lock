@@ -129,6 +129,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "governor",
+ "image",
  "reqwest",
  "serde",
  "serde_json",

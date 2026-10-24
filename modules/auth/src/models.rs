@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 /// Колонки `users` для [`UserView`]. citext приводим к text: так sqlx читает их как `String`.
 pub const USER_COLUMNS: &str = "id, email::text AS email, username::text AS username, \
-     display_name, avatar_url, role, is_active, email_verified_at, username_changed_at, \
-     password_hash IS NOT NULL AS has_password, created_at";
+     display_name, avatar_url, bio, stats_public, role, is_active, email_verified_at, \
+     username_changed_at, password_hash IS NOT NULL AS has_password, created_at";
 
 /// Пользователь. Хеш пароля наружу не отдаётся никогда.
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
@@ -20,7 +20,14 @@ pub struct UserView {
     #[schema(example = "user")]
     pub username: String,
     pub display_name: Option<String>,
+    /// Ссылка на фото: `/api/v1/auth/avatars/{id}` у загруженного, внешний https-адрес у
+    /// пришедшего от провайдера.
     pub avatar_url: Option<String>,
+    /// «О себе», до 1000 символов. Видно всем в профиле.
+    pub bio: Option<String>,
+    /// Видна ли аналитика профиля (оценки, «просмотрено», «посмотрю позже») другим.
+    /// По умолчанию `false` — только владельцу.
+    pub stats_public: bool,
     pub role: Role,
     /// `false` — заблокирован админом.
     pub is_active: bool,
@@ -150,10 +157,17 @@ pub struct UpdateProfileRequest {
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<String>, example = "Нео")]
     pub display_name: Option<Option<String>>,
-    /// Ссылка `https://…` до 500 символов. `null` или пустая строка — очистить.
+    /// Ссылка `https://…` до 500 символов. `null` или пустая строка — очистить. Загруженное
+    /// фото ставится отдельным запросом (`POST /me/avatar`) и пишется в это же поле.
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<String>, example = "https://example.com/neo.png")]
     pub avatar_url: Option<Option<String>>,
+    /// «О себе», до 1000 символов. `null` или пустая строка — очистить.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>, example = "Смотрю фантастику, читаю Стругацких.")]
+    pub bio: Option<Option<String>>,
+    /// Открыть аналитику профиля всем (`true`) или снова спрятать (`false`).
+    pub stats_public: Option<bool>,
 }
 
 /// Отличает «поле не передано» (`None`) от `null` (`Some(None)`).

@@ -1,6 +1,6 @@
 //! Справочник пользователей для других модулей (`shared::directory::UserDirectory`).
 
-use shared::directory::{async_trait, UserDirectory, UserRef};
+use shared::directory::{async_trait, UserDetails, UserDirectory, UserRef};
 use shared::AppResult;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -66,6 +66,15 @@ impl UserDirectory for PgUserDirectory {
         .fetch_optional(&self.db)
         .await?
         .unwrap_or(false))
+    }
+
+    async fn details(&self, id: Uuid) -> AppResult<Option<UserDetails>> {
+        Ok(
+            sqlx::query_as("SELECT bio, stats_public, created_at FROM users WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.db)
+                .await?,
+        )
     }
 
     async fn search(&self, q: &str, limit: i64, exclude: &[Uuid]) -> AppResult<Vec<UserRef>> {

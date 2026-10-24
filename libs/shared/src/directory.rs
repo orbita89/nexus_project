@@ -73,6 +73,18 @@ pub struct UserRef {
     pub avatar_url: Option<String>,
 }
 
+/// То, что показывает только страница профиля: в [`UserRef`] этому не место — он стоит рядом с
+/// каждой рецензией и каждым сообщением.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow, ToSchema)]
+pub struct UserDetails {
+    /// «О себе», до 1000 символов.
+    pub bio: Option<String>,
+    /// Открыл ли владелец свою аналитику всем.
+    pub stats_public: bool,
+    /// Когда зарегистрировался.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Сущности каталога. Реализует `catalog`.
 #[async_trait]
 pub trait EntityDirectory: Send + Sync {
@@ -105,6 +117,10 @@ pub trait UserDirectory: Send + Sync {
     async fn search(&self, q: &str, limit: i64, exclude: &[Uuid]) -> AppResult<Vec<UserRef>>;
     /// Подтверждён ли email: без этого нельзя начать переписку (защита от рассылок).
     async fn is_verified(&self, id: Uuid) -> AppResult<bool>;
+
+    /// Поля для страницы профиля: «о себе», видимость аналитики, дата регистрации.
+    /// `None` — нет такого пользователя или он заблокирован.
+    async fn details(&self, id: Uuid) -> AppResult<Option<UserDetails>>;
     /// Сколько активных пользователей всего. Нужно `social`: участник системной комнаты чата —
     /// каждый, строк в `chat_room_members` для неё нет, а `members_count` отдавать надо.
     async fn count(&self) -> AppResult<i64>;

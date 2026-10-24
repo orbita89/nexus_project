@@ -4,7 +4,7 @@ use crate::email_tokens::{self, Purpose};
 use crate::models::EmailTokenRequest;
 use crate::models::{ChangeEmailRequest, UpdateProfileRequest, UserView, USER_COLUMNS};
 use crate::rate_limit::RateLimits;
-use crate::{crypto, emails, session, users, validate};
+use crate::{avatars, crypto, emails, session, users, validate};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::{Extension, Json};
@@ -36,22 +36,28 @@ pub async fn update(
 ) -> AppResult<Json<UserView>> {
     let display_name = req.display_name.map(non_empty);
     let avatar_url = req.avatar_url.map(non_empty);
+    let bio = req.bio.map(non_empty);
     if let Some(name) = &display_name {
         validate::display_name(name.as_deref())?;
     }
     if let Some(url) = &avatar_url {
         validate::avatar_url(url.as_deref())?;
     }
+    if let Some(bio) = &bio {
+        validate::bio(bio.as_deref())?;
+    }
+    let avatar_replaced = avatar_url.is_some();
 
     let mut tx = state.db.begin().await?;
-    let current: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT username::text, username_changed_at FROM users
+    let current: Option<(String, Option<DateTime<Utc>>, Option<uuid::Uuid>)> = sqlx::query_as(
+        "SELECT username::text, username_changed_at, avatar_id FROM users
          WHERE id = $1 AND is_active FOR UPDATE",
     )
     .bind(auth.id)
     .fetch_optional(&mut *tx)
     .await?;
-    let (current_username, changed_at) = current.ok_or(AppError::Unauthorized)?;
+    let (current_username, changed_at, current_avatar_id) =
+        current.ok_or(AppError::Unauthorized)?;
 
     // Тот же username — не смена (и не тратит попытку).
     let username = req
@@ -76,7 +82,11 @@ pub async fn update(
             username = COALESCE($2, username),
             username_changed_at = CASE WHEN $2 IS NULL THEN username_changed_at ELSE now() END,
             display_name = CASE WHEN $3 THEN $4 ELSE display_name END,
-            avatar_url = CASE WHEN $5 THEN $6 ELSE avatar_url END
+            avatar_url = CASE WHEN $5 THEN $6 ELSE avatar_url END,
+            -- Свой адрес аватара заменяет загруженное фото: файл после коммита стирается.
+            avatar_id = CASE WHEN $5 THEN NULL ELSE avatar_id END,
+            bio = CASE WHEN $7 THEN $8 ELSE bio END,
+            stats_public = COALESCE($9, stats_public)
          WHERE id = $1
          RETURNING {USER_COLUMNS}"
     ))
@@ -86,10 +96,17 @@ pub async fn update(
     .bind(display_name.flatten())
     .bind(avatar_url.is_some())
     .bind(avatar_url.flatten())
+    .bind(bio.is_some())
+    .bind(bio.flatten())
+    .bind(req.stats_public)
     .fetch_one(&mut *tx)
     .await
     .map_err(users::unique_violation)?;
     tx.commit().await?;
+
+    if avatar_replaced {
+        avatars::remove_file(&state, current_avatar_id).await;
+    }
 
     if let Some(username) = username {
         tracing::info!(user_id = %auth.id, from = %current_username, to = %username, "username changed");

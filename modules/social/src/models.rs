@@ -238,6 +238,12 @@ pub struct Follow {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SocialProfile {
     pub user: UserRef,
+    /// «О себе» из профиля (`auth`), до 1000 символов.
+    pub bio: Option<String>,
+    /// Открыл ли пользователь свою аналитику всем. В своём профиле — своё значение.
+    pub stats_public: bool,
+    /// Когда зарегистрировался.
+    pub registered_at: chrono::DateTime<chrono::Utc>,
     #[schema(example = 12)]
     pub followers_count: i64,
     #[schema(example = 3)]
