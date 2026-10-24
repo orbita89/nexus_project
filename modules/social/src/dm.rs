@@ -303,8 +303,8 @@ pub async fn open(
             .fetch_one(&state.db)
             .await
             .map_err(crate::validate::missing_reference)?;
-            // Собеседник узнаёт о переписке без перезагрузки.
-            events::publish(&state, events::dm_created(peer.id, id));
+            // Обе стороны узнают о переписке и подписываются на её канал без перезагрузки.
+            events::publish(&state, events::dm_created([user.id, peer.id], id));
             id
         }
     };
@@ -314,6 +314,27 @@ pub async fn open(
         .bind(id)
         .execute(&state.db)
         .await?;
+    Ok(Json(chat::dm_info(&state, id, &user).await?))
+}
+
+/// Панель переписки: то же, что `GET /chat/{kind}/{slug}` при `kind = dm`. Отдельный
+/// обработчик нужен потому, что `DELETE /chat/dm/{id}` делает путь статическим и без него
+/// GET на него отвечал бы 405 вместо панели.
+#[utoipa::path(
+    get, operation_id = "get_dm", path = "/chat/dm/{id}", tag = "chat",
+    security(("bearer" = [])),
+    params(("id" = Uuid, Path, description = "id переписки")),
+    responses(
+        (status = 200, description = "Переписка", body = ChatRoomInfo),
+        (status = 401, description = "Неверный токен", body = ErrorBody),
+        (status = 404, description = "Нет такой переписки или вы не её участник", body = ErrorBody),
+    )
+)]
+pub async fn get(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<ChatRoomInfo>> {
     Ok(Json(chat::dm_info(&state, id, &user).await?))
 }
 

@@ -139,17 +139,33 @@ fn error(message: impl Into<String>) -> Value {
 }
 
 /// Ошибка чата → `error`; у лимита частоты — `retry_after` (секунды).
-fn chat_error(e: AppError) -> Value {
+fn chat_error(room: &str, e: AppError) -> Value {
+    // У ошибки может быть уточнённый код (`blocked`, `dm_closed`): разворачиваем, иначе
+    // осмысленный отказ уехал бы в ветку internal и клиент увидел бы «internal error».
+    let (code, e) = match e {
+        AppError::Coded { code, source } => (Some(code), *source),
+        e => (None, e),
+    };
+    let with_code = |mut reply: Value| {
+        if let Some(code) = code {
+            reply["code"] = json!(code);
+        }
+        reply
+    };
     match e {
-        AppError::BadRequest(message) => error(message),
-        AppError::NotFound => error("not found"),
-        AppError::Forbidden => error("forbidden"),
-        AppError::TooManyRequests { retry_after_secs } => json!({
+        AppError::BadRequest(message) => with_code(error(message)),
+        AppError::NotFound => with_code(error("not found")),
+        AppError::Forbidden => with_code(error("forbidden")),
+        AppError::TooManyRequests { retry_after_secs } => with_code(json!({
             "type": "error",
             "error": "too many messages",
             "retry_after": retry_after_secs,
-        }),
-        e => internal(e),
+        })),
+        // В лог — комната: без неё «internal error» у клиента не с чем сопоставить.
+        e => {
+            tracing::error!(room, error = %e, "chat");
+            error("internal error")
+        }
     }
 }
 
@@ -213,7 +229,7 @@ impl Conn {
                     .await
                 {
                     Ok(message) => json!({ "type": "chat.sent", "room": name, "message": message }),
-                    Err(e) => chat_error(e),
+                    Err(e) => chat_error(&name, e),
                 }
             }
         };
@@ -235,7 +251,7 @@ impl Conn {
             .await
         {
             Ok(()) => json!({ "type": "chat.read_saved", "room": name, "message_id": message_id }),
-            Err(e) => chat_error(e),
+            Err(e) => chat_error(&name, e),
         }
     }
 
@@ -390,6 +406,14 @@ impl Conn {
                 .and_then(Value::as_str)
                 .and_then(|id| id.parse::<Uuid>().ok())
         };
+        // Новая переписка: подписываем её канал на лету — иначе сообщения в ней дошли бы
+        // до уже открытого соединения только после переподключения.
+        if event.kind == "dm.created" {
+            if let Some(id) = id_of("dm_id") {
+                self.interests.insert(Channel::Dm(id), format!("dm:{id}"));
+            }
+            return Ok(());
+        }
         let added = match event.kind {
             "interest.added" => true,
             "interest.removed" => false,

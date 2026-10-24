@@ -451,7 +451,10 @@ async fn expired_token_downgrades_to_guest(pool: PgPool) {
     // До конца меньше минуты — предупреждение сразу.
     client.expect("auth_expiring").await;
     let expired = client.expect("auth_expired").await;
-    assert_eq!(names(&expired), ["user:me", "entity:witcher-3"]);
+    // Плюс системные комнаты чата: они подписаны у всех вошедших и отключаются вместе с ними.
+    let dropped = names(&expired);
+    assert!(dropped.starts_with(&["user:me", "entity:witcher-3"]));
+    assert!(dropped.contains(&"room:general"));
 
     // Теперь гость: личное и интересы не приходят, ручная подписка осталась.
     let thread = ctx.thread(&author, &["dune-2021"]).await;

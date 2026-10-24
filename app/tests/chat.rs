@@ -56,6 +56,8 @@ struct Ctx {
 struct User {
     id: String,
     token: String,
+    /// dev-login добавляет к username случайный суффикс, поэтому его нельзя писать руками.
+    username: String,
 }
 
 impl Ctx {
@@ -104,6 +106,7 @@ impl Ctx {
         User {
             id: body["user"]["id"].as_str().unwrap().to_string(),
             token: body["access_token"].as_str().unwrap().to_string(),
+            username: body["user"]["username"].as_str().unwrap().to_string(),
         }
     }
 
@@ -206,9 +209,26 @@ impl Client {
         self.expect(reply).await
     }
 
+    /// Ответ на запрос, пропуская события: автор подписан на свои комнаты и получает
+    /// `chat.message.created` на собственное сообщение — порядок с ответом не гарантирован.
+    async fn reply_to(&mut self, message: Value, reply: &str) -> Value {
+        self.send(message).await;
+        loop {
+            let message = self
+                .next(WAIT)
+                .await
+                .unwrap_or_else(|| panic!("no {reply} message"));
+            if message["type"] == "event" {
+                continue;
+            }
+            assert_eq!(message["type"], reply, "{message}");
+            return message;
+        }
+    }
+
     async fn say(&mut self, body: &str) -> Value {
         let reply = self
-            .request(
+            .reply_to(
                 json!({ "type": "chat.send", "room": ROOM, "body": body, "client_id": "c1" }),
                 "chat.sent",
             )
@@ -283,7 +303,7 @@ async fn message_sent_over_websocket_reaches_room_and_history(pool: PgPool) {
 
     // Ответ на сообщение.
     let reply = bob_ws
-        .request(
+        .reply_to(
             json!({ "type": "chat.send", "room": ROOM, "body": "Я", "reply_to": message["id"] }),
             "chat.sent",
         )
@@ -311,7 +331,7 @@ async fn chat_errors_over_websocket(pool: PgPool) {
 
     let mut ws = ctx.authed(&alice).await;
     let other = ws
-        .request(
+        .reply_to(
             json!({ "type": "chat.send", "room": "entity:dune-part-two-2024", "body": "x" }),
             "chat.sent",
         )
@@ -617,7 +637,7 @@ async fn person_and_tag_rooms(pool: PgPool) {
     let mut alice_ws = ctx.authed(&alice).await;
     for room in ["person:denis-villeneuve", "tag:sci-fi"] {
         let sent = alice_ws
-            .request(
+            .reply_to(
                 json!({ "type": "chat.send", "room": room, "body": room }),
                 "chat.sent",
             )
@@ -675,7 +695,7 @@ async fn person_and_tag_rooms(pool: PgPool) {
     .await;
     bob_ws.event("interest.removed").await;
     alice_ws
-        .request(
+        .reply_to(
             json!({ "type": "chat.send", "room": "tag:sci-fi", "body": "x" }),
             "chat.sent",
         )
@@ -783,7 +803,7 @@ async fn admin_rooms(pool: PgPool) {
 
     let mut alice_ws = ctx.authed(&alice).await;
     let sent = alice_ws
-        .request(
+        .reply_to(
             json!({ "type": "chat.send", "room": "room:cyberpunk-fans", "body": "Привет" }),
             "chat.sent",
         )
@@ -939,22 +959,44 @@ async fn room_info_for_viewer(pool: PgPool) {
         StatusCode::CREATED,
         Method::POST,
         "/admin/chat/rooms",
-        Some(json!({ "slug": "books", "title": "Книги" })),
+        Some(json!({ "slug": "books-club", "title": "Книги" })),
         Some(&admin),
     )
     .await;
+    // Системные комнаты идут первыми, своя — дальше: ищем её по слагу.
+    let joined_of = |list: &Value| -> Value {
+        list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|room| room["slug"] == "books-club")
+            .unwrap()["joined"]
+            .clone()
+    };
     let rooms = ctx
-        .api(StatusCode::OK, Method::GET, "/chat/rooms", None, None)
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/rooms?limit=100",
+            None,
+            None,
+        )
         .await;
-    assert_eq!(rooms["items"][0]["joined"], Value::Null);
+    assert_eq!(joined_of(&rooms), Value::Null);
     let rooms = ctx
-        .api(StatusCode::OK, Method::GET, "/chat/rooms", None, Some(&bob))
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/rooms?limit=100",
+            None,
+            Some(&bob),
+        )
         .await;
-    assert_eq!(rooms["items"][0]["joined"], false);
+    assert_eq!(joined_of(&rooms), false);
     ctx.api(
         StatusCode::NO_CONTENT,
         Method::PUT,
-        "/chat/rooms/books/membership",
+        "/chat/rooms/books-club/membership",
         None,
         Some(&bob),
     )
@@ -963,7 +1005,7 @@ async fn room_info_for_viewer(pool: PgPool) {
         .api(
             StatusCode::OK,
             Method::GET,
-            "/chat/rooms/books",
+            "/chat/rooms/books-club",
             None,
             Some(&bob),
         )
@@ -973,7 +1015,7 @@ async fn room_info_for_viewer(pool: PgPool) {
         .api(
             StatusCode::OK,
             Method::GET,
-            "/chat/room/books",
+            "/chat/room/books-club",
             None,
             Some(&bob),
         )
@@ -1273,9 +1315,9 @@ async fn own_rooms(pool: PgPool) {
     .await;
     ctx.api(StatusCode::NOT_FOUND, Method::GET, path, None, None)
         .await;
-    // Удалённая освободила место: можно завести взамен (суточный лимит считает заведённые).
+    // Удаление освобождает и суточный счёт: строка уходит из таблицы, считать нечего.
     ctx.api(
-        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::CREATED,
         Method::POST,
         "/chat/rooms",
         Some(json!({ "slug": "cyberpunk-fans", "title": "Снова" })),
@@ -1340,7 +1382,7 @@ async fn room_activity_and_sort(pool: PgPool) {
     .await;
     let mut ws = ctx.authed(&alice).await;
     for body in ["Раз", "Два"] {
-        ws.request(
+        ws.reply_to(
             json!({ "type": "chat.send", "room": "room:loud", "body": body }),
             "chat.sent",
         )
@@ -1408,9 +1450,10 @@ async fn mentions_notify_named_users(pool: PgPool) {
 
     let mut bob_ws = ctx.authed(&bob).await;
     let mut alice_ws = ctx.authed(&alice).await;
+    let body = format!("@{} глянь, @nobody_at_all тоже", bob.username);
     let sent = alice_ws
-        .request(
-            json!({ "type": "chat.send", "room": "room:general", "body": "@bob глянь, @nobody тоже" }),
+        .reply_to(
+            json!({ "type": "chat.send", "room": "room:general", "body": body }),
             "chat.sent",
         )
         .await;
@@ -1421,15 +1464,13 @@ async fn mentions_notify_named_users(pool: PgPool) {
     assert_eq!(mention["channels"], json!(["user:me"]));
     assert_eq!(mention["data"]["kind"], "room");
     assert_eq!(mention["data"]["message"]["id"], sent["message"]["id"]);
-    assert_eq!(
-        mention["data"]["message"]["body"],
-        "@bob глянь, @nobody тоже"
-    );
+    assert_eq!(mention["data"]["message"]["body"], body);
 
     // Себя упомянуть — тишина (кроме самого сообщения в канале комнаты).
     alice_ws
-        .request(
-            json!({ "type": "chat.send", "room": "room:general", "body": "@alice сам себе" }),
+        .reply_to(
+            json!({ "type": "chat.send", "room": "room:general",
+                    "body": format!("@{} сам себе", alice.username) }),
             "chat.sent",
         )
         .await;
@@ -1492,7 +1533,7 @@ async fn search_rooms_messages_and_users(pool: PgPool) {
         ("room:cyberpunk-fans", "Дюна тут ни при чём"),
         ("room:general", "А это про другое"),
     ] {
-        ws.request(
+        ws.reply_to(
             json!({ "type": "chat.send", "room": room, "body": body }),
             "chat.sent",
         )
@@ -1634,9 +1675,9 @@ async fn search_rooms_messages_and_users(pool: PgPool) {
 
     // Пользователи для «@».
     let users = ctx
-        .api(StatusCode::OK, Method::GET, "/users?q=ali", None, None)
+        .api(StatusCode::OK, Method::GET, "/users?q=alice", None, None)
         .await;
-    assert_eq!(users[0]["username"], "alice");
+    assert_eq!(users[0]["username"], alice.username);
     let none = ctx
         .api(StatusCode::OK, Method::GET, "/users?q=zzz", None, None)
         .await;
@@ -1771,7 +1812,7 @@ async fn hidden_system_rooms(pool: PgPool) {
         )
         .await;
     assert!(subscribed(&auth).contains(&"room:general"));
-    ws.request(
+    ws.reply_to(
         json!({ "type": "chat.send", "room": "room:general", "body": "Я ещё тут" }),
         "chat.sent",
     )
@@ -1842,7 +1883,7 @@ async fn direct_messages(pool: PgPool) {
         .api(
             StatusCode::OK,
             Method::PUT,
-            "/users/bob/dm",
+            &format!("/users/{}/dm", bob.username),
             None,
             Some(&alice),
         )
@@ -1850,7 +1891,7 @@ async fn direct_messages(pool: PgPool) {
     let id = dm["dm"]["id"].as_str().unwrap().to_string();
     assert_eq!(dm["kind"], "dm");
     assert_eq!(dm["room"], format!("dm:{id}"));
-    assert_eq!(dm["dm"]["peer"]["username"], "bob");
+    assert_eq!(dm["dm"]["peer"]["username"], bob.username);
     assert_eq!(dm["me"]["member"], true);
     // Собеседник узнаёт о переписке событием.
     let created = bob_ws.event("dm.created").await;
@@ -1861,7 +1902,7 @@ async fn direct_messages(pool: PgPool) {
         .api(
             StatusCode::OK,
             Method::PUT,
-            "/users/bob/dm",
+            &format!("/users/{}/dm", bob.username),
             None,
             Some(&alice),
         )
@@ -1873,7 +1914,7 @@ async fn direct_messages(pool: PgPool) {
     ctx.api(
         StatusCode::BAD_REQUEST,
         Method::PUT,
-        "/users/alice/dm",
+        &format!("/users/{}/dm", alice.username),
         None,
         Some(&alice),
     )
@@ -1881,7 +1922,7 @@ async fn direct_messages(pool: PgPool) {
     ctx.api(
         StatusCode::NOT_FOUND,
         Method::PUT,
-        "/users/nobody/dm",
+        "/users/nobody_at_all/dm",
         None,
         Some(&alice),
     )
@@ -1891,7 +1932,7 @@ async fn direct_messages(pool: PgPool) {
     let room = format!("dm:{id}");
     let mut alice_ws = ctx.authed(&alice).await;
     let sent = alice_ws
-        .request(
+        .reply_to(
             json!({ "type": "chat.send", "room": room, "body": "Привет" }),
             "chat.sent",
         )
@@ -1934,7 +1975,7 @@ async fn direct_messages(pool: PgPool) {
     // Переписка в «моих чатах» у обоих.
     let chats = ctx.chats(&bob).await;
     let found = chats.iter().find(|c| c["kind"] == "dm").unwrap();
-    assert_eq!(found["dm"]["peer"]["username"], "alice");
+    assert_eq!(found["dm"]["peer"]["username"], alice.username);
     assert_eq!(found["room"], room);
     assert_eq!(found["unread"], 1);
 
@@ -1950,7 +1991,7 @@ async fn direct_messages(pool: PgPool) {
     assert!(ctx.chats(&bob).await.iter().all(|c| c["kind"] != "dm"));
     assert!(ctx.chats(&alice).await.iter().any(|c| c["kind"] == "dm"));
     alice_ws
-        .request(
+        .reply_to(
             json!({ "type": "chat.send", "room": room, "body": "Ты тут?" }),
             "chat.sent",
         )
@@ -1978,7 +2019,7 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
         .api(
             StatusCode::OK,
             Method::PUT,
-            "/users/bob/dm",
+            &format!("/users/{}/dm", bob.username),
             None,
             Some(&alice),
         )
@@ -1990,7 +2031,7 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
     ctx.api(
         StatusCode::NO_CONTENT,
         Method::PUT,
-        "/users/alice/block",
+        &format!("/users/{}/block", alice.username),
         None,
         Some(&bob),
     )
@@ -2000,7 +2041,7 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
         .api(
             StatusCode::FORBIDDEN,
             Method::PUT,
-            "/users/bob/dm",
+            &format!("/users/{}/dm", bob.username),
             None,
             Some(&alice),
         )
@@ -2017,14 +2058,14 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
     ctx.api(
         StatusCode::FORBIDDEN,
         Method::PUT,
-        "/users/alice/dm",
+        &format!("/users/{}/dm", alice.username),
         None,
         Some(&bob),
     )
     .await;
     // В общий канал заблокированный пишет как раньше.
     alice_ws
-        .request(
+        .reply_to(
             json!({ "type": "chat.send", "room": "room:general", "body": "Всем привет" }),
             "chat.sent",
         )
@@ -2035,7 +2076,7 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
         .api(
             StatusCode::OK,
             Method::GET,
-            "/users/alice",
+            &format!("/users/{}", alice.username),
             None,
             Some(&bob),
         )
@@ -2046,7 +2087,7 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
         .api(
             StatusCode::OK,
             Method::GET,
-            "/users/bob",
+            &format!("/users/{}", bob.username),
             None,
             Some(&alice),
         )
@@ -2055,7 +2096,13 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
     assert_eq!(alices_view["blocked_by"], true);
     // Гостю блокировок не видно.
     let guest = ctx
-        .api(StatusCode::OK, Method::GET, "/users/bob", None, None)
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            &format!("/users/{}", bob.username),
+            None,
+            None,
+        )
         .await;
     assert_eq!(guest["blocked"], false);
     assert_eq!(guest["blocked_by"], Value::Null);
@@ -2065,7 +2112,7 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
         .api(
             StatusCode::OK,
             Method::GET,
-            "/users?q=ali",
+            "/users?q=alice",
             None,
             Some(&bob),
         )
@@ -2085,7 +2132,7 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
     let for_guest = ctx
         .api(StatusCode::OK, Method::GET, "/users?q=bob", None, None)
         .await;
-    assert_eq!(for_guest[0]["username"], "bob");
+    assert_eq!(for_guest[0]["username"], bob.username);
 
     // Список блокировок и снятие.
     let blocked = ctx
@@ -2098,12 +2145,12 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
         )
         .await;
     assert_eq!(blocked["total"], 1);
-    assert_eq!(blocked["items"][0]["username"], "alice");
+    assert_eq!(blocked["items"][0]["username"], alice.username);
     for _ in 0..2 {
         ctx.api(
             StatusCode::NO_CONTENT,
             Method::DELETE,
-            "/users/alice/block",
+            &format!("/users/{}/block", alice.username),
             None,
             Some(&bob),
         )
@@ -2112,7 +2159,7 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
     ctx.api(
         StatusCode::OK,
         Method::PUT,
-        "/users/bob/dm",
+        &format!("/users/{}/dm", bob.username),
         None,
         Some(&alice),
     )
@@ -2121,7 +2168,7 @@ async fn blocking_closes_direct_messages(pool: PgPool) {
     ctx.api(
         StatusCode::BAD_REQUEST,
         Method::PUT,
-        "/users/bob/block",
+        &format!("/users/{}/block", bob.username),
         None,
         Some(&bob),
     )
@@ -2159,7 +2206,7 @@ async fn dm_policy_controls_who_writes_first(pool: PgPool) {
         .api(
             StatusCode::FORBIDDEN,
             Method::PUT,
-            "/users/bob/dm",
+            &format!("/users/{}/dm", bob.username),
             None,
             Some(&alice),
         )
@@ -2178,7 +2225,7 @@ async fn dm_policy_controls_who_writes_first(pool: PgPool) {
     ctx.api(
         StatusCode::FORBIDDEN,
         Method::PUT,
-        "/users/bob/dm",
+        &format!("/users/{}/dm", bob.username),
         None,
         Some(&alice),
     )
@@ -2186,7 +2233,7 @@ async fn dm_policy_controls_who_writes_first(pool: PgPool) {
     ctx.api(
         StatusCode::NO_CONTENT,
         Method::PUT,
-        "/users/alice/follow",
+        &format!("/users/{}/follow", alice.username),
         None,
         Some(&bob),
     )
@@ -2195,7 +2242,7 @@ async fn dm_policy_controls_who_writes_first(pool: PgPool) {
         .api(
             StatusCode::OK,
             Method::PUT,
-            "/users/bob/dm",
+            &format!("/users/{}/dm", bob.username),
             None,
             Some(&alice),
         )
@@ -2214,7 +2261,7 @@ async fn dm_policy_controls_who_writes_first(pool: PgPool) {
     ctx.api(
         StatusCode::OK,
         Method::PUT,
-        "/users/bob/dm",
+        &format!("/users/{}/dm", bob.username),
         None,
         Some(&alice),
     )
@@ -2228,4 +2275,100 @@ async fn dm_policy_controls_who_writes_first(pool: PgPool) {
         Some(&bob),
     )
     .await;
+}
+
+/// Регрессия: `chat.send`, `chat.read` и `mute` в личной переписке. `room_id` заводила комнату
+/// по колонке-цели, а у переписки такой колонки нет — INSERT ломал CHECK и давал 500.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn dm_send_read_and_mute(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    let dm = ctx
+        .api(
+            StatusCode::OK,
+            Method::PUT,
+            &format!("/users/{}/dm", bob.username),
+            None,
+            Some(&alice),
+        )
+        .await;
+    let id = dm["dm"]["id"].as_str().unwrap().to_string();
+    let room = format!("dm:{id}");
+
+    let mut alice_ws = ctx.authed(&alice).await;
+    let mut bob_ws = ctx.authed(&bob).await;
+    let sent = alice_ws
+        .reply_to(
+            json!({ "type": "chat.send", "room": room, "body": "Первое" }),
+            "chat.sent",
+        )
+        .await;
+    let message_id = sent["message"]["id"].as_str().unwrap().to_string();
+    assert_eq!(sent["room"], room);
+    bob_ws.event("chat.message.created").await;
+
+    // Прочитано: счётчик гаснет, своё устройство получает chat.read в user:me.
+    let saved = bob_ws
+        .request(
+            json!({ "type": "chat.read", "room": room, "message_id": message_id }),
+            "chat.read_saved",
+        )
+        .await;
+    assert_eq!(saved["room"], room);
+    let chats = ctx.chats(&bob).await;
+    let found = chats.iter().find(|c| c["kind"] == "dm").unwrap();
+    assert_eq!(found["unread"], 0);
+
+    // Заглушение переписки — тоже через room_id.
+    let mute = format!("/chat/dm/{id}/mute");
+    ctx.api(StatusCode::NO_CONTENT, Method::PUT, &mute, None, Some(&bob))
+        .await;
+    assert_eq!(
+        ctx.chats(&bob)
+            .await
+            .iter()
+            .find(|c| c["kind"] == "dm")
+            .unwrap()["muted"],
+        true
+    );
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &mute,
+        None,
+        Some(&bob),
+    )
+    .await;
+
+    // Ответ в обратную сторону и правка своего сообщения.
+    bob_ws
+        .reply_to(
+            json!({ "type": "chat.send", "room": room, "body": "Второе", "reply_to": message_id }),
+            "chat.sent",
+        )
+        .await;
+    alice_ws.event("chat.message.created").await;
+    let edited = ctx
+        .api(
+            StatusCode::OK,
+            Method::PATCH,
+            &format!("/chat/messages/{message_id}"),
+            Some(json!({ "body": "Первое, поправлено" })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(edited["body"], "Первое, поправлено");
+
+    let history = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            &format!("/chat/dm/{id}/messages"),
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(history["items"].as_array().unwrap().len(), 2);
 }

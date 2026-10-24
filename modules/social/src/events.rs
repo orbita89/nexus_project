@@ -210,12 +210,14 @@ pub fn chat_room_changed(kind: &'static str, room_id: Uuid) -> Event {
     )
 }
 
-/// `dm.created`: с вами завели личную переписку — она появляется в списке без перезагрузки.
-/// В личный канал получателя; `dm_id` — комната, читать `GET /chat/dm/{id}`.
-pub fn dm_created(user_id: Uuid, dm_id: Uuid) -> Event {
+/// `dm.created`: завели личную переписку — она появляется в списке без перезагрузки.
+/// В личные каналы обоих: по нему же открытые соединения подписываются на `dm:<id>`, иначе
+/// сообщения в новой переписке дошли бы до них только после переподключения.
+/// `dm_id` — комната, читать `GET /chat/dm/{id}`.
+pub fn dm_created(users: [Uuid; 2], dm_id: Uuid) -> Event {
     Event::new(
         "dm.created",
-        vec![Channel::User(user_id)],
+        users.map(Channel::User).to_vec(),
         json!({ "dm_id": dm_id }),
     )
 }

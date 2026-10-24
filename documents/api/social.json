@@ -1587,6 +1587,62 @@
       }
     },
     "/api/v1/social/chat/dm/{id}": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Панель переписки: то же, что `GET /chat/{kind}/{slug}` при `kind = dm`. Отдельный\nобработчик нужен потому, что `DELETE /chat/dm/{id}` делает путь статическим и без него\nGET на него отвечал бы 405 вместо панели.",
+        "operationId": "get_dm",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id переписки",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Переписка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatRoomInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой переписки или вы не её участник",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
       "delete": {
         "tags": [
           "chat"

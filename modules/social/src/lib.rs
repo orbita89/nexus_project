@@ -103,7 +103,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(chat::list_own))
         .routes(routes!(chat::search))
         .routes(routes!(dm::open))
-        .routes(routes!(dm::delete))
+        .routes(routes!(dm::get, dm::delete))
         .routes(routes!(dm::block, dm::unblock))
         .routes(routes!(dm::list_blocked))
         .routes(routes!(dm::settings, dm::update_settings))

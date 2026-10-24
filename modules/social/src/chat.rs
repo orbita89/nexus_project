@@ -345,7 +345,9 @@ async fn message_row(db: &mut PgConnection, id: Uuid) -> AppResult<Option<Messag
 /// конца транзакции — счётчик и последнее сообщение меняются по очереди. Нет сущности, человека,
 /// тега или своей комнаты — 404.
 async fn room_id(tx: &mut PgConnection, room: ChatRoom) -> AppResult<Uuid> {
-    if let ChatRoom::Room(id) = room {
+    // Комнату со slug и личную переписку заводят отдельные эндпоинты: здесь их только находят.
+    // Создавать их этим INSERT'ом нельзя — у них нет колонки-цели, по которой он работает.
+    if let ChatRoom::Room(id) | ChatRoom::Dm(id) = room {
         return sqlx::query_scalar("SELECT id FROM chat_rooms WHERE id = $1 FOR UPDATE")
             .bind(id)
             .fetch_optional(tx)
