@@ -95,6 +95,8 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       # Холодный архив каталога (Tantivy, mmap): ~1 млн фильмов — сотни МБ на диске.
       ARCHIVE_DIR: /var/lib/nexus/archive
+      # Вложения чата — на том же томе: их надо бэкапить вместе с остальными данными.
+      ATTACHMENTS_DIR: /var/lib/nexus/attachments
     volumes:
       - archivedata:/var/lib/nexus
     depends_on:

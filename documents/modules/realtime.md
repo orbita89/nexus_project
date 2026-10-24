@@ -50,7 +50,7 @@ JSON-сообщения с полем `type`. Соединение открыв�
 | `{"type":"subscribe","channels":["thread:<id>","entity:<slug>"]}` | Подписаться. Всё или ничего: при любой ошибке не подписывается ни на один | `subscribed` или `error` |
 | `{"type":"unsubscribe","channels":[...]}` | Отписаться от каналов, подписанных вручную | `unsubscribed` |
 | `{"type":"ping"}` | Проверка связи на уровне приложения | `pong` |
-| `{"type":"chat.send","room":"entity:<slug>","body":"…","reply_to":null,"client_id":"tmp-1"}` | Сообщение в чат комнаты `entity:`, `person:`, `tag:` или `room:<slug>` (только после `auth`). Пишет `social` через `state.chat`; `reply_to`, `client_id` необязательны | `chat.sent` или `error` (с тем же `client_id`) |
+| `{"type":"chat.send","room":"entity:<slug>","body":"…","reply_to":null,"attachment_id":null,"client_id":"tmp-1"}` | Сообщение в чат комнаты `entity:`, `person:`, `tag:`, `room:<slug>` или `dm:<id>` (только после `auth`). Пишет `social` через `state.chat`; `reply_to`, `attachment_id`, `client_id` необязательны. С `attachment_id` (из `POST /chat/attachments`) текст можно не передавать | `chat.sent` или `error` (с тем же `client_id`) |
 | `{"type":"chat.read","room":"entity:<slug>","message_id":"…"}` | Прочитано в комнате до сообщения (только после `auth`) | `chat.read_saved` или `error` |
 
 ### Сервер → клиент

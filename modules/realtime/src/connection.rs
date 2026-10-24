@@ -43,9 +43,13 @@ enum ClientMessage {
     #[serde(rename = "chat.send")]
     ChatSend {
         room: String,
+        #[serde(default)]
         body: String,
         #[serde(default)]
         reply_to: Option<Uuid>,
+        /// Вложение из `POST /chat/attachments`; с ним `body` можно не присылать.
+        #[serde(default)]
+        attachment_id: Option<Uuid>,
         #[serde(default)]
         client_id: Option<String>,
     },
@@ -202,8 +206,12 @@ impl Conn {
                 room,
                 body,
                 reply_to,
+                attachment_id,
                 client_id,
-            } => vec![self.chat_send(&room, &body, reply_to, client_id).await],
+            } => vec![
+                self.chat_send(&room, &body, reply_to, attachment_id, client_id)
+                    .await,
+            ],
             ClientMessage::ChatRead { room, message_id } => {
                 vec![self.chat_read(&room, message_id).await]
             }
@@ -217,6 +225,7 @@ impl Conn {
         room: &str,
         body: &str,
         reply_to: Option<Uuid>,
+        attachment_id: Option<Uuid>,
         client_id: Option<String>,
     ) -> Value {
         let mut reply = match self.chat_room(room).await {
@@ -225,7 +234,14 @@ impl Conn {
                 match self
                     .state
                     .chat
-                    .send(&self.state, user_id, chat_room, body, reply_to)
+                    .send(
+                        &self.state,
+                        user_id,
+                        chat_room,
+                        body,
+                        reply_to,
+                        attachment_id,
+                    )
                     .await
                 {
                     Ok(message) => json!({ "type": "chat.sent", "room": name, "message": message }),

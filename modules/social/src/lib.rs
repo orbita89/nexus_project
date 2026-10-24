@@ -8,6 +8,7 @@
 //! справочники `shared::directory` (`AppState::entities`, `AppState::users`), см. `refs`.
 
 pub mod admin;
+pub mod attachments;
 pub mod chat;
 pub mod collection_comments;
 pub mod collection_links;
@@ -102,6 +103,17 @@ pub fn router() -> OpenApiRouter<AppState> {
         ))
         .routes(routes!(chat::list_own))
         .routes(routes!(chat::search))
+        .routes(routes!(attachments::get))
+        // Лимит тела — только на загрузку: `layer` на общей цепочке поднял бы его всем
+        // маршрутам выше. Чуть больше своего предела, чтобы на превышении отвечала наша
+        // ошибка с понятным кодом, а не 413 от фреймворка.
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(attachments::upload))
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    attachments::MAX_UPLOAD_BYTES + 64 * 1024,
+                )),
+        )
         .routes(routes!(dm::open))
         .routes(routes!(dm::get, dm::delete))
         .routes(routes!(dm::block, dm::unblock))

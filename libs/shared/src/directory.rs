@@ -182,7 +182,8 @@ pub enum ChatRoom {
 /// реализация публикует сама — после `commit`, через `state.events`.
 #[async_trait]
 pub trait Chat: Send + Sync {
-    /// Отправить сообщение от `user_id` (ответ на `reply_to` той же комнаты). Возвращает
+    /// Отправить сообщение от `user_id` (ответ на `reply_to` той же комнаты, с картинкой
+    /// `attachment_id` из `POST /chat/attachments` — тогда текст необязателен). Возвращает
     /// сообщение в виде для клиента. Ошибки: 400 — текст или `reply_to`, 404 — нет сущности,
     /// 429 — лимит частоты.
     async fn send(
@@ -192,6 +193,7 @@ pub trait Chat: Send + Sync {
         room: ChatRoom,
         body: &str,
         reply_to: Option<Uuid>,
+        attachment_id: Option<Uuid>,
     ) -> AppResult<Value>;
     /// Прочитано до `message_id` включительно (назад не двигается). 404 — нет такого сообщения
     /// в комнате.

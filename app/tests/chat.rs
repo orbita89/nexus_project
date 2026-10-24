@@ -91,6 +91,53 @@ impl Ctx {
         client
     }
 
+    /// Приложение с каталогом вложений во временной папке: тесты не делят её между собой.
+    async fn with_attachments(pool: PgPool, dir: &str) -> Self {
+        let mut config = Config::from_env();
+        config.dev_login = true;
+        config.attachments_dir = dir.to_string();
+        let (state, _) = test_utils::state_with_config(pool, config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = nexus::build_app(state.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Self { state, addr }
+    }
+
+    /// Загрузка картинки: статус и разобранное тело.
+    async fn upload(&self, bytes: Vec<u8>, user: Option<&User>) -> (StatusCode, Value) {
+        let app = nexus::build_app(self.state.clone());
+        let response = test_utils::upload(
+            app,
+            &format!("{SOCIAL}/chat/attachments"),
+            "picture.png",
+            bytes,
+            user.map(|u| u.token.as_str()),
+        )
+        .await;
+        let body = if response.body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&response.body).unwrap_or(Value::Null)
+        };
+        (response.status, body)
+    }
+
+    /// Запрос за файлом: тело не JSON, разбирать его нельзя.
+    async fn file(&self, status: StatusCode, path: &str, user: Option<&User>) -> Vec<u8> {
+        let app = nexus::build_app(self.state.clone());
+        let response = request(
+            app,
+            Method::GET,
+            &format!("{SOCIAL}{path}"),
+            None,
+            user.map(|u| u.token.as_str()),
+        )
+        .await;
+        assert_eq!(response.status, status, "GET {path}");
+        response.body.to_vec()
+    }
+
     async fn login(&self, name: &str, role: &str) -> User {
         let app = nexus::build_app(self.state.clone());
         let response = request(
@@ -2371,4 +2418,167 @@ async fn dm_send_read_and_mute(pool: PgPool) {
         )
         .await;
     assert_eq!(history["items"].as_array().unwrap().len(), 2);
+}
+
+/// Картинка нужного размера, собранная на лету: в фикстурах бинарников не держим.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let buffer = image::RgbaImage::from_pixel(width, height, image::Rgba([80, 120, 200, 255]));
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(buffer)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+/// Вложения: загрузка, пережатие, отправка картинки без текста, раздача с проверкой доступа.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn chat_attachments(pool: PgPool) {
+    let dir = std::env::temp_dir().join(format!("nexus-attach-{}", uuid::Uuid::new_v4()));
+    let ctx = Ctx::with_attachments(pool, dir.to_str().unwrap()).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+
+    // Не картинку не принимаем.
+    let error = ctx
+        .upload(b"this is definitely not a png".to_vec(), Some(&alice))
+        .await;
+    assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    assert_eq!(error.1["code"], "not_an_image");
+    // Гостю загрузка закрыта.
+    assert_eq!(
+        ctx.upload(png(10, 10), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Большую картинку принимаем, но ужимаем: длинная сторона — не больше 1600.
+    let (status, uploaded) = ctx.upload(png(3200, 1600), Some(&alice)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(uploaded["width"], 1600);
+    assert_eq!(uploaded["height"], 800);
+    assert_eq!(uploaded["kind"], "image");
+    let attachment_id = uploaded["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        uploaded["url"],
+        format!("/api/v1/social/chat/attachments/{attachment_id}")
+    );
+
+    // Пока не отправлено — видит только загрузивший.
+    let file = format!("/chat/attachments/{attachment_id}");
+    ctx.file(StatusCode::OK, &file, Some(&alice)).await;
+    ctx.file(StatusCode::NOT_FOUND, &file, Some(&bob)).await;
+
+    // Сообщение из одной картинки, без текста.
+    let mut alice_ws = ctx.authed(&alice).await;
+    let sent = alice_ws
+        .reply_to(
+            json!({ "type": "chat.send", "room": "room:general",
+                    "attachment_id": attachment_id }),
+            "chat.sent",
+        )
+        .await;
+    assert_eq!(sent["message"]["body"], "");
+    assert_eq!(sent["message"]["attachment"]["id"], attachment_id);
+    assert_eq!(sent["message"]["attachment"]["width"], 1600);
+    let message_id = sent["message"]["id"].as_str().unwrap().to_string();
+
+    // Теперь картинка в общей комнате — её видят все, включая гостя.
+    ctx.file(StatusCode::OK, &file, Some(&bob)).await;
+    ctx.file(StatusCode::OK, &file, None).await;
+
+    // Вложение приходит и в истории.
+    let history = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/room/general/messages",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(history["items"][0]["attachment"]["id"], attachment_id);
+
+    // Повторно то же вложение не приложить.
+    let reused = alice_ws
+        .reply_to(
+            json!({ "type": "chat.send", "room": "room:general", "body": "ещё раз",
+                    "attachment_id": attachment_id }),
+            "error",
+        )
+        .await;
+    assert_eq!(reused["code"], "unknown_attachment");
+
+    // Чужое вложение не приложить.
+    let (_, bobs) = ctx.upload(png(20, 20), Some(&bob)).await;
+    let stolen = alice_ws
+        .reply_to(
+            json!({ "type": "chat.send", "room": "room:general",
+                    "attachment_id": bobs["id"] }),
+            "error",
+        )
+        .await;
+    assert_eq!(stolen["code"], "unknown_attachment");
+
+    // Удаление сообщения снимает вложение и стирает файл.
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/chat/messages/{message_id}"),
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.file(StatusCode::NOT_FOUND, &file, Some(&alice)).await;
+
+    // Без вложения пустое сообщение по-прежнему нельзя.
+    let empty = alice_ws
+        .reply_to(
+            json!({ "type": "chat.send", "room": "room:general", "body": "   " }),
+            "error",
+        )
+        .await;
+    assert_eq!(empty["error"], "body must not be empty");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Вложение в личной переписке не открывается посторонним по прямой ссылке.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn dm_attachment_is_private(pool: PgPool) {
+    let dir = std::env::temp_dir().join(format!("nexus-attach-{}", uuid::Uuid::new_v4()));
+    let ctx = Ctx::with_attachments(pool, dir.to_str().unwrap()).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+    let carol = ctx.login("carol", "user").await;
+
+    let dm = ctx
+        .api(
+            StatusCode::OK,
+            Method::PUT,
+            &format!("/users/{}/dm", bob.username),
+            None,
+            Some(&alice),
+        )
+        .await;
+    let room = format!("dm:{}", dm["dm"]["id"].as_str().unwrap());
+    let (_, uploaded) = ctx.upload(png(30, 30), Some(&alice)).await;
+    let attachment_id = uploaded["id"].as_str().unwrap().to_string();
+
+    let mut alice_ws = ctx.authed(&alice).await;
+    alice_ws
+        .reply_to(
+            json!({ "type": "chat.send", "room": room, "body": "смотри",
+                    "attachment_id": attachment_id }),
+            "chat.sent",
+        )
+        .await;
+
+    let file = format!("/chat/attachments/{attachment_id}");
+    // Оба собеседника видят.
+    ctx.file(StatusCode::OK, &file, Some(&alice)).await;
+    ctx.file(StatusCode::OK, &file, Some(&bob)).await;
+    // Посторонний и гость — нет, даже зная ссылку.
+    ctx.file(StatusCode::NOT_FOUND, &file, Some(&carol)).await;
+    ctx.file(StatusCode::NOT_FOUND, &file, None).await;
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

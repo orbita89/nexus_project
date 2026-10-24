@@ -1586,6 +1586,122 @@
         ]
       }
     },
+    "/api/v1/social/chat/attachments": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Загрузить картинку. Возвращает `id`, который потом уходит в `chat.send` как `attachment_id`.",
+        "operationId": "upload_chat_attachment",
+        "requestBody": {
+          "description": "multipart/form-data с одним файловым полем",
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Загружено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Attachment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Не картинка (`not_an_image`), больше 2 МБ (`file_too_large`), пустой запрос",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Больше 10 загрузок за 10 минут (`Retry-After`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/chat/attachments/{id}": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Отдать картинку. Доступ — как к сообщению, в котором она лежит: пока вложение никуда не\nприложено, его видит только загрузивший; дальше решает комната (личную переписку видят\nтолько её двое).",
+        "operationId": "get_chat_attachment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id вложения",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Картинка WebP",
+            "content": {
+              "image/webp": {}
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет вложения или нет доступа",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/social/chat/dm/{id}": {
       "get": {
         "tags": [
@@ -7585,6 +7701,47 @@
         },
         "additionalProperties": false
       },
+      "Attachment": {
+        "type": "object",
+        "description": "Вложение сообщения.",
+        "required": [
+          "id",
+          "url",
+          "kind",
+          "width",
+          "height",
+          "size"
+        ],
+        "properties": {
+          "height": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Пока только `image`. Поле оставлено на будущее — под файлы.",
+            "example": "image"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Вес готового файла в байтах."
+          },
+          "url": {
+            "type": "string",
+            "description": "Где взять картинку: `/api/v1/social/chat/attachments/{id}`.",
+            "example": "/api/v1/social/chat/attachments/01932f3e-0000-7000-8000-000000000000"
+          },
+          "width": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "ChatHistory": {
         "type": "object",
         "description": "Страница истории: старые сверху, последнее — самое новое.",
@@ -7619,6 +7776,17 @@
           "deleted"
         ],
         "properties": {
+          "attachment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Attachment",
+                "description": "Картинка, приложенная к сообщению; `null` — нет или сообщение удалено."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "author": {
             "oneOf": [
               {

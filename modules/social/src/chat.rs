@@ -10,6 +10,7 @@
 //! сообщение (исключение из правила «в событиях только id»: иначе каждое сообщение — запрос
 //! каждого клиента); правка и удаление — только id, клиент перечитывает `GET /chat/messages/{id}`.
 
+use crate::attachments::{self, Attachment};
 use crate::dm::{self, DmRef};
 use crate::events::{self, room_parts};
 use crate::refs;
@@ -100,6 +101,8 @@ pub struct ChatMessage {
     pub body: Option<String>,
     /// Ответ на сообщение той же комнаты (`null` — нет или оно удалено насовсем).
     pub reply_to: Option<Uuid>,
+    /// Картинка, приложенная к сообщению; `null` — нет или сообщение удалено.
+    pub attachment: Option<Attachment>,
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
     pub deleted: bool,
@@ -301,6 +304,27 @@ pub(crate) async fn custom_room_id(db: &sqlx::PgPool, slug: &str) -> AppResult<U
         .ok_or(AppError::NotFound)
 }
 
+/// Виден ли зрителю такой-то месседж: решает его комната. Публичные комнаты открыты всем,
+/// личную переписку видят только её двое. Нет сообщения — 404.
+pub(crate) async fn visible_message(
+    state: &AppState,
+    message_id: Uuid,
+    viewer: Option<Uuid>,
+) -> AppResult<()> {
+    let row: Option<(String, Uuid)> = sqlx::query_as(&format!(
+        "SELECT {ROOM_COLUMNS} FROM chat_messages m JOIN chat_rooms r ON r.id = m.room_id
+         WHERE m.id = $1"
+    ))
+    .bind(message_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (kind, target_id) = row.ok_or(AppError::NotFound)?;
+    if kind == "dm" {
+        dm::visible(state, target_id, viewer).await?;
+    }
+    Ok(())
+}
+
 /// Строки → сообщения: авторы одним запросом.
 async fn messages(state: &AppState, rows: Vec<MessageRow>) -> AppResult<Vec<ChatMessage>> {
     let ids = rows
@@ -309,6 +333,13 @@ async fn messages(state: &AppState, rows: Vec<MessageRow>) -> AppResult<Vec<Chat
         .map(|row| row.author_id)
         .collect();
     let users = refs::users(state, ids).await?;
+    // Вложения живых сообщений — одним запросом на страницу истории, не по запросу на строку.
+    let live: Vec<Uuid> = rows
+        .iter()
+        .filter(|row| row.deleted_at.is_none())
+        .map(|row| row.id)
+        .collect();
+    let mut files = attachments::for_messages(state, &live).await?;
     Ok(rows
         .into_iter()
         .map(|row| {
@@ -322,6 +353,7 @@ async fn messages(state: &AppState, rows: Vec<MessageRow>) -> AppResult<Vec<Chat
                     .flatten(),
                 body: (!deleted).then_some(row.body),
                 reply_to: row.reply_to,
+                attachment: (!deleted).then(|| files.remove(&row.id)).flatten(),
                 created_at: row.created_at,
                 edited_at: row.edited_at,
                 deleted,
@@ -431,8 +463,14 @@ impl Chat for PgChat {
         room: ChatRoom,
         body: &str,
         reply_to: Option<Uuid>,
+        attachment_id: Option<Uuid>,
     ) -> AppResult<Value> {
-        let body = validate::required("body", body, MAX_CHAT_BODY)?;
+        // С вложением текст необязателен: одна картинка — законное сообщение.
+        let body = match attachment_id {
+            Some(_) => validate::optional("body", Some(body.to_string()), MAX_CHAT_BODY)?
+                .unwrap_or_default(),
+            None => validate::required("body", body, MAX_CHAT_BODY)?,
+        };
         // В личную переписку пишут только её двое и только если никто никого не заблокировал.
         let dm_peer = match room {
             ChatRoom::Dm(id) => Some(dm::peer_of(state, id, user_id).await?),
@@ -500,6 +538,10 @@ impl Chat for PgChat {
         .bind(created_at)
         .execute(&mut *tx)
         .await?;
+        // Вложение привязываем здесь же: не своё или уже использованное откатит всю отправку.
+        if let Some(attachment_id) = attachment_id {
+            attachments::attach(&mut tx, attachment_id, user_id, id).await?;
+        }
         // Своё сообщение прочитано.
         mark_read(&mut tx, user_id, room_id, id).await?;
         tx.commit().await?;
@@ -1138,11 +1180,15 @@ pub async fn delete(
     if row.deleted_at.is_some() {
         return Ok(StatusCode::NO_CONTENT);
     }
+    // Строку вложения убираем в той же транзакции, файл — после коммита: если удаление
+    // сообщения откатится, вложение останется на месте.
+    let file = attachments::detach(&mut tx, id).await?;
     sqlx::query("UPDATE chat_messages SET body = '', deleted_at = now() WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    attachments::remove_file(&state, file).await;
     events::publish(
         &state,
         events::chat_message_changed("chat.message.deleted", row.room(), id),

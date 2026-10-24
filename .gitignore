@@ -10,3 +10,6 @@ infra/.env.prod
 http/http-client.private.env.json
 scripts/games-import/.venv/
 .claude/worktrees/
+
+# Вложения чата при локальном запуске без docker (ATTACHMENTS_DIR по умолчанию).
+data/

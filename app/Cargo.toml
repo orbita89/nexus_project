@@ -29,6 +29,8 @@ utoipa-swagger-ui = { workspace = true }
 
 [dev-dependencies]
 test-utils = { workspace = true }
+# Картинки для проверки вложений чата собираются на лету, а не лежат в фикстурах.
+image = { workspace = true }
 # Фейковый дамп TMDB в тестах «обновить popularity».
 flate2 = { workspace = true }
 tokio-tungstenite = { workspace = true }

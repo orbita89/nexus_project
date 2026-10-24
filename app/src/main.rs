@@ -60,6 +60,12 @@ async fn main() -> anyhow::Result<()> {
     catalog::search::spawn_reindex(state.clone());
     catalog::search::spawn_ratings_sync(state.clone());
     social::ratings::spawn_sync_all(state.clone());
+    // Вложения, которые загрузили и не отправили: висят на диске без сообщения.
+    match social::attachments::cleanup_orphans(&state).await {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(removed, "cleaned up orphan chat attachments"),
+        Err(e) => tracing::warn!(error = %e, "orphan attachment cleanup failed"),
+    }
     let app = nexus::build_app(state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;

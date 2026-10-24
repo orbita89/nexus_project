@@ -226,6 +226,32 @@ pub async fn request(
     send(app, builder.body(body).expect("valid request")).await
 }
 
+/// Загрузка файла (`multipart/form-data`) с одним файловым полем — для вложений чата.
+pub async fn upload(
+    app: Router,
+    uri: &str,
+    filename: &str,
+    bytes: Vec<u8>,
+    token: Option<&str>,
+) -> TestResponse {
+    const BOUNDARY: &str = "nexus-test-boundary";
+    let mut body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+    let mut builder = Request::builder().method(Method::POST).uri(uri).header(
+        header::CONTENT_TYPE,
+        format!("multipart/form-data; boundary={BOUNDARY}"),
+    );
+    if let Some(token) = token {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    send(app, builder.body(Body::from(body)).expect("valid request")).await
+}
+
 /// Значение параметра из query-строки URL (без URL-декодирования: для токенов и кодов его не нужно).
 pub fn query_param(url: &str, name: &str) -> Option<String> {
     url.split_once('?')?
