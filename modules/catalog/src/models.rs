@@ -369,6 +369,11 @@ pub struct PersonDetail {
     #[serde(flatten)]
     pub person: Person,
     pub credits: Vec<PersonCredit>,
+    /// Сколько лайков у человека (данные `social`, читаются справочником `PersonLikes`).
+    #[schema(example = 42)]
+    pub likes_count: i64,
+    /// Лайкнул ли его вошедший. Гостю — `false`.
+    pub liked: bool,
 }
 
 /// Участие человека в сущности, со стороны человека.

@@ -106,7 +106,7 @@ pub async fn get(
     } else {
         None
     };
-    let items = items(&state, rows, &followees, &interests).await?;
+    let items = items(&state, rows, &followees, &interests, user.id).await?;
     Ok(Json(FeedPage {
         items,
         next_cursor,
@@ -190,6 +190,7 @@ async fn items(
     rows: Vec<(u8, Row)>,
     followees: &[Uuid],
     interests: &[Uuid],
+    viewer: Uuid,
 ) -> AppResult<Vec<FeedItem>> {
     let ids = |kind: &str| -> Vec<Uuid> {
         rows.iter()
@@ -228,7 +229,7 @@ async fn items(
     .bind(ids("collection"))
     .fetch_all(&state.db)
     .await?;
-    let mut collections: HashMap<Uuid, _> = refs::collections(state, collection_rows)
+    let mut collections: HashMap<Uuid, _> = refs::collections(state, collection_rows, Some(viewer))
         .await?
         .into_iter()
         .map(|collection| (collection.id, collection))

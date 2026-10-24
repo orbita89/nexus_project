@@ -67,6 +67,15 @@ impl Ctx {
         body
     }
 
+    /// GET по полному пути (не под `/api/v1/social`): карточка человека из каталога.
+    async fn get_ok_at(&self, path: &str, user: Option<&User>) -> Value {
+        let app = nexus::build_app(self.state.clone());
+        let token = user.map(|user| user.token.as_str());
+        let response = request(app, Method::GET, path, None, token).await;
+        assert_eq!(response.status, StatusCode::OK, "GET {path}");
+        response.json()
+    }
+
     async fn get_ok(&self, path: &str, user: Option<&User>) -> Value {
         self.expect(StatusCode::OK, Method::GET, path, None, user)
             .await
@@ -4298,6 +4307,212 @@ async fn user_reputation(pool: PgPool) {
     let back = ctx.get_ok(&profile, None).await;
     assert_eq!(back["reputation"]["score"], 30);
     assert_eq!(back["reputation"]["computed_at"], Value::Null);
+}
+
+/// Лайки подборкам: голос, замена, счётчики прямо в Collection, приватная чужому не видна.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn collection_likes(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+    let id = ctx
+        .collection(&alice, json!({ "title": "Публичная" }))
+        .await;
+    let private = ctx
+        .collection(&alice, json!({ "title": "Приватная", "is_public": false }))
+        .await;
+    let like = format!("/collections/{id}/like");
+    let likes = format!("/collections/{id}/likes");
+
+    let empty = ctx.get_ok(&likes, None).await;
+    assert_eq!(empty["likes"], 0);
+    assert_eq!(empty["dislikes"], 0);
+    assert_eq!(empty["mine"], Value::Null);
+
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        &like,
+        Some(json!({ "value": 1 })),
+        Some(&bob),
+    )
+    .await;
+    let seen = ctx.get_ok(&likes, Some(&bob)).await;
+    assert_eq!(seen["likes"], 1);
+    assert_eq!(seen["mine"], 1);
+
+    // Счётчики и свой голос приходят прямо в Collection — фронту второй запрос не нужен.
+    let detail = ctx.get_ok(&format!("/collections/{id}"), Some(&bob)).await;
+    assert_eq!(detail["likes_count"], 1);
+    assert_eq!(detail["dislikes_count"], 0);
+    assert_eq!(detail["mine"], 1);
+    let page = ctx.get_ok("/collections", Some(&bob)).await;
+    assert_eq!(page["items"][0]["likes_count"], 1);
+    assert_eq!(page["items"][0]["mine"], 1);
+    // Гостю свой голос не положен.
+    assert_eq!(
+        ctx.get_ok(&format!("/collections/{id}"), None).await["mine"],
+        Value::Null
+    );
+
+    // Другой голос переставляет, а не добавляет.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        &like,
+        Some(json!({ "value": -1 })),
+        Some(&bob),
+    )
+    .await;
+    let seen = ctx.get_ok(&likes, Some(&bob)).await;
+    assert_eq!(
+        (seen["likes"].as_i64(), seen["dislikes"].as_i64()),
+        (Some(0), Some(1))
+    );
+    assert_eq!(seen["mine"], -1);
+
+    // Снятие идемпотентно.
+    for _ in 0..2 {
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            &like,
+            None,
+            Some(&bob),
+        )
+        .await;
+    }
+    assert_eq!(ctx.get_ok(&likes, Some(&bob)).await["dislikes"], 0);
+
+    // Неверное значение, гость и чужая приватная.
+    let error = ctx
+        .expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            &like,
+            Some(json!({ "value": 2 })),
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(error["code"], "validation");
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::PUT,
+        &like,
+        Some(json!({ "value": 1 })),
+        None,
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::PUT,
+        &format!("/collections/{private}/like"),
+        Some(json!({ "value": 1 })),
+        Some(&bob),
+    )
+    .await;
+}
+
+/// Лайки людям и лента «Что нравится» в аналитике профиля.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn person_likes_and_given_feed(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+    let like = "/people/denis-villeneuve/like";
+
+    for _ in 0..2 {
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::PUT,
+            like,
+            None,
+            Some(&alice),
+        )
+        .await;
+    }
+    let page = ctx.get_ok("/people/denis-villeneuve/likes", None).await;
+    assert_eq!(page["total"], 1, "повторный лайк не удваивается");
+    assert_eq!(
+        page["items"][0]["user"]["username"],
+        alice.username.as_str()
+    );
+
+    // Счётчик и свой лайк — на странице человека (каталог читает их справочником).
+    let person = ctx
+        .get_ok_at("/api/v1/catalog/people/denis-villeneuve", Some(&alice))
+        .await;
+    assert_eq!(person["likes_count"], 1);
+    assert_eq!(person["liked"], true);
+    let seen_by_bob = ctx
+        .get_ok_at("/api/v1/catalog/people/denis-villeneuve", Some(&bob))
+        .await;
+    assert_eq!(seen_by_bob["likes_count"], 1);
+    assert_eq!(seen_by_bob["liked"], false);
+
+    // Лента «Что нравится»: подборка и человек вперемешку, новые сверху.
+    let collection = ctx.collection(&bob, json!({ "title": "Подборка" })).await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        &format!("/collections/{collection}/like"),
+        Some(json!({ "value": 1 })),
+        Some(&alice),
+    )
+    .await;
+
+    let given = format!("/users/{}/likes/given", alice.username);
+    // Закрытость — как у остальной аналитики.
+    let error = ctx
+        .expect(StatusCode::FORBIDDEN, Method::GET, &given, None, Some(&bob))
+        .await;
+    assert_eq!(error["code"], "stats_private");
+    ctx.expect(StatusCode::FORBIDDEN, Method::GET, &given, None, None)
+        .await;
+
+    let feed = ctx.get_ok(&given, Some(&alice)).await;
+    assert_eq!(feed["total"], 2);
+    assert_eq!(feed["items"][0]["target"]["kind"], "collection");
+    assert_eq!(feed["items"][0]["target"]["title"], "Подборка");
+    assert_eq!(feed["items"][0]["value"], 1);
+    assert_eq!(feed["items"][1]["target"]["kind"], "person");
+    assert_eq!(
+        feed["items"][1]["target"]["person"]["slug"],
+        "denis-villeneuve"
+    );
+
+    // Фильтр по виду; entity принимается, но лайков у произведений нет.
+    let only_people = ctx
+        .get_ok(&format!("{given}?target=person"), Some(&alice))
+        .await;
+    assert_eq!(only_people["total"], 1);
+    assert_eq!(only_people["items"][0]["target"]["kind"], "person");
+    let entities = ctx
+        .get_ok(&format!("{given}?target=entity"), Some(&alice))
+        .await;
+    assert_eq!(entities["total"], 0);
+
+    // Счётчики в сводке статистики.
+    let stats = ctx
+        .get_ok(&format!("/users/{}/stats", alice.username), Some(&alice))
+        .await;
+    assert_eq!(
+        stats["likes_given"],
+        json!({ "collections": 1, "people": 1, "entities": 0 })
+    );
+
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        like,
+        None,
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(
+        ctx.get_ok("/people/denis-villeneuve/likes", None).await["total"],
+        0
+    );
 }
 
 // ---------------------------------------------------------------- границы модулей

@@ -45,6 +45,7 @@ pub fn directories(db: PgPool) -> Directories {
         people: Arc::new(catalog::directory::PgPersonDirectory::new(db.clone())),
         tags: Arc::new(catalog::directory::PgTagDirectory::new(db.clone())),
         studios: Arc::new(catalog::directory::PgStudioDirectory::new(db.clone())),
+        person_likes: Arc::new(social::directory::PgPersonLikes::new(db.clone())),
     }
 }
 

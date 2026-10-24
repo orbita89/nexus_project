@@ -316,7 +316,7 @@ pub async fn feature_collection(
     let row = collections::load(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(Json(refs::collection(&state, row).await?))
+    Ok(Json(refs::collection(&state, row, Some(admin.id)).await?))
 }
 
 /// Снять с коллекции отметку «особая». slug уходит в историю: старый адрес ведёт на
@@ -389,7 +389,7 @@ const MAX_COLLECTION_QUERY: usize = 200;
 )]
 pub async fn search_collections(
     State(state): State<AppState>,
-    AdminUser(_admin): AdminUser,
+    AdminUser(admin): AdminUser,
     Query(query): Query<AdminCollectionsQuery>,
 ) -> AppResult<Json<Page<Collection>>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
@@ -440,7 +440,7 @@ pub async fn search_collections(
     .fetch_all(&state.db)
     .await?;
     Ok(Json(Page {
-        items: refs::collections(&state, rows).await?,
+        items: refs::collections(&state, rows, Some(admin.id)).await?,
         total,
         limit,
         offset,
@@ -501,7 +501,7 @@ pub async fn update_collection(
     let row = collections::load(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(Json(refs::collection(&state, row).await?))
+    Ok(Json(refs::collection(&state, row, Some(admin.id)).await?))
 }
 
 /// URL оформления (обои, обложка): https, до 2048 символов; `null` — убрать.

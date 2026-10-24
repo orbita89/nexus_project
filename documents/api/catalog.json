@@ -5822,7 +5822,9 @@
           {
             "type": "object",
             "required": [
-              "credits"
+              "credits",
+              "likes_count",
+              "liked"
             ],
             "properties": {
               "credits": {
@@ -5830,6 +5832,16 @@
                 "items": {
                   "$ref": "#/components/schemas/PersonCredit"
                 }
+              },
+              "liked": {
+                "type": "boolean",
+                "description": "Лайкнул ли его вошедший. Гостю — `false`."
+              },
+              "likes_count": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Сколько лайков у человека (данные `social`, читаются справочником `PersonLikes`).",
+                "example": 42
               }
             }
           }

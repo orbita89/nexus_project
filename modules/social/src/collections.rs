@@ -29,9 +29,17 @@ use uuid::Uuid;
 )]
 pub async fn list_public(
     State(state): State<AppState>,
+    viewer: Option<AuthUser>,
     Query(query): Query<PageQuery>,
 ) -> AppResult<Json<Page<Collection>>> {
-    page(&state, "c.is_public", None, query).await
+    page(
+        &state,
+        "c.is_public",
+        None,
+        query,
+        viewer.map(|viewer| viewer.id),
+    )
+    .await
 }
 
 /// Особые коллекции (помечены admin) по порядку — все сразу, их немного.
@@ -39,14 +47,19 @@ pub async fn list_public(
     get, operation_id = "list_featured_collections", path = "/collections/featured", tag = "collections",
     responses((status = 200, description = "Особые коллекции", body = Vec<Collection>))
 )]
-pub async fn list_featured(State(state): State<AppState>) -> AppResult<Json<Vec<Collection>>> {
+pub async fn list_featured(
+    State(state): State<AppState>,
+    viewer: Option<AuthUser>,
+) -> AppResult<Json<Vec<Collection>>> {
     let rows: Vec<CollectionRow> = sqlx::query_as(&format!(
         "SELECT {COLLECTION_COLUMNS} FROM collections c WHERE c.featured_position IS NOT NULL
          ORDER BY c.featured_position, c.created_at, c.id"
     ))
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(refs::collections(&state, rows).await?))
+    Ok(Json(
+        refs::collections(&state, rows, viewer.map(|viewer| viewer.id)).await?,
+    ))
 }
 
 /// Особая коллекция по читаемому адресу (`/collections/{slug}` на сайте). Бывший адрес —
@@ -62,8 +75,10 @@ pub async fn list_featured(State(state): State<AppState>) -> AppResult<Json<Vec<
 )]
 pub async fn get_by_slug(
     State(state): State<AppState>,
+    viewer: Option<AuthUser>,
     Path(slug): Path<String>,
 ) -> AppResult<Json<CollectionBySlug>> {
+    let viewer = viewer.map(|viewer| viewer.id);
     let row: Option<CollectionRow> = sqlx::query_as(&format!(
         "SELECT {COLLECTION_COLUMNS} FROM collections c WHERE c.slug = $1"
     ))
@@ -72,7 +87,7 @@ pub async fn get_by_slug(
     .await?;
     if let Some(row) = row {
         return Ok(Json(CollectionBySlug::Collection(Box::new(
-            detail(&state, row).await?,
+            detail(&state, row, viewer).await?,
         ))));
     }
     let old: Option<(Option<String>, Uuid, bool)> = sqlx::query_as(
@@ -124,7 +139,14 @@ pub async fn list_for_user(
         limit: query.limit,
         offset: query.offset,
     };
-    let Json(mut page) = page(&state, filter, Some(owner.id), page_query).await?;
+    let Json(mut page) = page(
+        &state,
+        filter,
+        Some(owner.id),
+        page_query,
+        viewer.map(|v| v.id),
+    )
+    .await?;
     if let Some(entity) = contains {
         let ids: Vec<Uuid> = page.items.iter().map(|c| c.id).collect();
         let with: HashSet<Uuid> = sqlx::query_scalar(
@@ -155,13 +177,21 @@ pub async fn list_for_user(
 )]
 pub async fn list_for_entity(
     State(state): State<AppState>,
+    viewer: Option<AuthUser>,
     Path(slug): Path<String>,
     Query(query): Query<PageQuery>,
 ) -> AppResult<Json<Page<Collection>>> {
     let entity = refs::entity(&state, &slug).await?;
     let filter = "c.is_public AND EXISTS (SELECT 1 FROM collection_items i
                   WHERE i.collection_id = c.id AND i.entity_id = $1)";
-    page(&state, filter, Some(entity.id), query).await
+    page(
+        &state,
+        filter,
+        Some(entity.id),
+        query,
+        viewer.map(|viewer| viewer.id),
+    )
+    .await
 }
 
 /// Страница коллекций под фильтром `filter` (`$1` — `arg`, если есть).
@@ -170,6 +200,7 @@ async fn page(
     filter: &str,
     arg: Option<Uuid>,
     query: PageQuery,
+    viewer: Option<Uuid>,
 ) -> AppResult<Json<Page<Collection>>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
     // $1 привязывается всегда (без аргумента — NULL), чтобы номера $2/$3 не зависели от фильтра.
@@ -189,7 +220,7 @@ async fn page(
     .fetch_all(&state.db)
     .await?;
     Ok(Json(Page {
-        items: refs::collections(state, rows).await?,
+        items: refs::collections(state, rows, viewer).await?,
         total,
         limit,
         offset,
@@ -216,7 +247,9 @@ pub async fn get(
     if !row.is_public && viewer.is_none_or(|viewer| viewer.id != row.user_id) {
         return Err(AppError::NotFound);
     }
-    Ok(Json(detail(&state, row).await?))
+    Ok(Json(
+        detail(&state, row, viewer.map(|viewer| viewer.id)).await?,
+    ))
 }
 
 /// Создать коллекцию.
@@ -253,7 +286,10 @@ pub async fn create(
 
     tracing::info!(user_id = %user.id, collection_id = %id, "collection created");
     let row = load(&state.db, id).await?.ok_or(AppError::NotFound)?;
-    Ok((StatusCode::CREATED, Json(detail(&state, row).await?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(detail(&state, row, Some(user.id)).await?),
+    ))
 }
 
 /// Изменить название, описание или видимость своей коллекции.
@@ -305,7 +341,7 @@ pub async fn update(
     .map_err(featured_must_be_public)?;
 
     let row = load(&state.db, id).await?.ok_or(AppError::NotFound)?;
-    Ok(Json(detail(&state, row).await?))
+    Ok(Json(detail(&state, row, Some(user.id)).await?))
 }
 
 /// Удалить свою коллекцию.
@@ -569,7 +605,7 @@ pub async fn reorder(
     tx.commit().await?;
 
     let row = load(&state.db, id).await?.ok_or(AppError::NotFound)?;
-    Ok(Json(detail(&state, row).await?))
+    Ok(Json(detail(&state, row, Some(user.id)).await?))
 }
 
 /// id в новом порядке. Список должен содержать каждое произведение коллекции ровно один раз.
@@ -652,7 +688,11 @@ async fn touch(db: impl PgExecutor<'_>, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-async fn detail(state: &AppState, row: CollectionRow) -> AppResult<CollectionDetail> {
+async fn detail(
+    state: &AppState,
+    row: CollectionRow,
+    viewer: Option<Uuid>,
+) -> AppResult<CollectionDetail> {
     let items: Vec<CollectionItemRow> = sqlx::query_as(&format!(
         "SELECT {ITEM_COLUMNS} FROM collection_items WHERE collection_id = $1
          ORDER BY position, added_at, entity_id"
@@ -660,9 +700,9 @@ async fn detail(state: &AppState, row: CollectionRow) -> AppResult<CollectionDet
     .bind(row.id)
     .fetch_all(&state.db)
     .await?;
-    let related = crate::collection_links::related(state, row.id).await?;
+    let related = crate::collection_links::related(state, row.id, viewer).await?;
     Ok(CollectionDetail {
-        collection: refs::collection(state, row).await?,
+        collection: refs::collection(state, row, viewer).await?,
         items: refs::items(state, items).await?,
         related,
     })

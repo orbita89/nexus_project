@@ -180,6 +180,38 @@
 
 Одна реакция на зрителя: другая заменяет прежнюю. **Индексы:** PK; `user_id`.
 
+### `collection_likes` ✅ — лайки и дизлайки подборок
+
+Миграция `20261121100000_social_collection_person_likes.sql`. Один голос на зрителя, как у
+рецензий (`review_votes`): `1` — нравится, `-1` — не нравится.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `collection_id` | `uuid` | PK, FK → `collections`, CASCADE | |
+| `user_id` | `uuid` | PK, FK → `users`, CASCADE | |
+| `value` | `smallint` | NOT NULL, `1` или `-1` | |
+| `created_at` | `timestamptz` | NOT NULL | Смена голоса — заново |
+
+Счётчики не колонками, а подзапросами в `COLLECTION_COLUMNS` — как `comments_count`: колонка с
+триггером трогала бы `collections.updated_at`, по которому идут сортировки и ревалидация статики
+фронтенда. **Индексы:** PK; (`user_id`, `created_at DESC`) — «Что нравится» в профиле.
+
+Реакции (`collection_reactions`) пока остаются рядом: фронтенд показывает их и переключится на
+лайки отдельным релизом. Данные не переносятся — «скучно» не равно «не нравится».
+
+### `person_likes` ✅ — лайки людей каталога
+
+Та же миграция. Только лайк, дизлайка нет — как у профилей.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `person_id` | `uuid` | PK, FK → `people`, CASCADE | |
+| `user_id` | `uuid` | PK, FK → `users`, CASCADE | |
+| `created_at` | `timestamptz` | NOT NULL | |
+
+В рейтинг пользователя это не идёт: люди — каталог, а не пользователи. **Индексы:** PK;
+(`person_id`, `created_at DESC`) — счётчик и «кто лайкнул»; (`user_id`, `created_at DESC`).
+
 ### `collections` ✅ — коллекции
 
 Пользовательские подборки: «Лучшая фантастика», «Экранизации Кинга: книга vs фильм». В одной
@@ -696,11 +728,17 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | Метод | Путь | Доступ | Что делает |
 |---|---|---|---|
 | GET | `/users` | все | Поиск пользователей для автодополнения «@»: `?q=` (1–50, по username и имени), `?limit=` 1–50 (8) → `[UserRef]`, только активные. 400 — пустой/длинный `q`, `limit` вне 1–50 |
+| GET | `/collections/{id}/likes` | гость / вошедший | `{"likes": 12, "dislikes": 3, "mine": 1 \| -1 \| null}`. 404 — нет подборки или чужая приватная |
+| PUT | `/collections/{id}/like` | user | `{"value": 1 \| -1}` → 204; другой голос заменяет прежний. 400 `validation` `field: value`; 404 — нет подборки или чужая приватная |
+| DELETE | `/collections/{id}/like` | user | Снять голос → 204 (даже если его не было) |
+| PUT / DELETE | `/people/{slug}/like` | user | Лайкнуть человека / снять → 204 (повторно — 204). 404 — человека нет или он скрыт |
+| GET | `/people/{slug}/likes` | все | Кто лайкнул: `Page<{user, since}>`, новые сверху |
+| GET | `/users/{username}/likes/given` | гость / вошедший | «Что нравится»: что пользователь лайкнул, новые сверху. `?target=collection\|person\|entity` (не передан — всё вперемешку), `?limit=1..100&offset=` → `Page<{target, value, created_at}>`; `target` — объединение по `kind`: `{"kind": "collection", "collection_id", "title"}` или `{"kind": "person", "person"}`. Лайков у произведений нет: `target=entity` отдаёт пустую страницу. 403 `stats_private`; 404 — нет пользователя |
 | PUT | `/users/{username}/like` | user | Лайкнуть профиль → 204 (повторно — тоже 204). 400 `like_self` — себе; 404 — нет пользователя |
 | DELETE | `/users/{username}/like` | user | Снять лайк → 204 (даже если его не было) |
 | GET | `/users/{username}/likes` | все | Кто лайкнул: `Page<{user, since}>` (`?limit=1..100&offset=`), новые сверху. 404 — нет пользователя |
 | GET | `/users/{username}/comments` | гость / вошедший | «Мои комментарии»: всё, что пользователь написал — к произведениям, людям и студиям (`comments`), к рецензиям и в обсуждениях коллекций — одной лентой, новые сверху. `Page<UserComment>` (`?limit=1..100&offset=`); `UserComment`: `id`, `body`, `created_at`, `updated_at` и `target` с `kind` — `entity`/`person`/`studio` (рядом `entity`/`person`/`studio`), `review` (`review_id` и `entity`, о котором рецензия) или `collection` (`collection_id`, `title`). Цель удалена — строки в ленте нет. 403 `stats_private`; 404 — нет пользователя |
-| GET | `/users/{username}/stats` | гость / вошедший | Аналитика профиля: `ratings` (`average`, `count`, `distribution` 1–10), `reviews_with_text`, `marks` (`later`, `done`), `reactions` (все четыре ключа), `comments` (`reviews`, `collections`, без удалённых) и `by_kind` (`rated`, `done` по типам контента — из `EntityDirectory::kind_counts`, ключей без единой сущности нет). 403 `stats_private` — владелец не открыл аналитику; 404 — нет пользователя |
+| GET | `/users/{username}/stats` | гость / вошедший | Аналитика профиля: `ratings` (`average`, `count`, `distribution` 1–10), `reviews_with_text`, `marks` (`later`, `done`), `reactions` (все четыре ключа), `comments` (`reviews`, `collections`, без удалённых), `likes_given` (`collections`, `people`, `entities` — последнее всегда `0`) и `by_kind` (`rated`, `done` по типам контента — из `EntityDirectory::kind_counts`, ключей без единой сущности нет). 403 `stats_private` — владелец не открыл аналитику; 404 — нет пользователя |
 | GET | `/users/{username}/ratings` | гость / вошедший | Что пользователь оценил: `Page<{entity, rating, has_text, created_at}>`, `?sort=new` (по умолчанию) `\|rating_desc\|rating_asc`, `?limit=1..100&offset=`. 400 — неизвестный `sort`; 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}/marks` | гость / вошедший | Отметки пользователя: `?kind=later\|done` (не передан — все), `limit`, `offset` → `Page<{entity, kind, created_at}>`. Своё без оглядки на приватность — `/users/me/marks`. 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых), `likes_count` и `liked` (лайкнул ли вошедший; гостю и в своём профиле `false`), `reputation` (`score`, `parts`, `computed_at`; пересчёт раз в сутки, поэтому свежий лайк виден в `likes_count` сразу, а в `score` — после ближайшего прохода), `relation`, `blocked` (я заблокировал его; гостю и в своём профиле `false`), `blocked_by` (он заблокировал меня; `null` — гость или свой профиль), а также `bio`, `stats_public` (открыл ли пользователь свою аналитику всем) и `registered_at` — из `auth` через `UserDirectory::details` |
@@ -750,6 +788,11 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 Списки подписок открыты всем.
 
 ### Коллекции
+
+`Collection` и `CollectionDetail` отдают `likes_count`, `dislikes_count` и `mine` (свой голос:
+`1`, `-1` или `null`) во всех списках — лента, `featured`, by-slug, коллекции пользователя и
+сущности: кнопка рисуется без второго запроса. Голос вошедшего подбирается одним запросом на
+страницу (`refs::collections`).
 
 | Метод | Путь | Доступ | Что делает |
 |---|---|---|---|

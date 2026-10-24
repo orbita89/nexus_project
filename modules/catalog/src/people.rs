@@ -10,6 +10,7 @@ use axum::Json;
 use shared::error::ErrorBody;
 use shared::extract::{Path, Query};
 use shared::{AppError, AppResult, AppState, AuthUser};
+use uuid::Uuid;
 
 /// Публичный человек: есть работа в активной сущности или работ нет вовсе (заведён в админке).
 /// Счётчики — `person_credit_counts`, их держат триггеры.
@@ -83,13 +84,19 @@ pub async fn get(
     .bind(admin)
     .fetch_optional(&state.db)
     .await?;
-    Ok(Json(
-        detail(&state.db, person.ok_or(AppError::NotFound)?, admin).await?,
-    ))
+    let person = person.ok_or(AppError::NotFound)?;
+    let viewer_id = viewer.as_ref().map(|viewer| viewer.id);
+    Ok(Json(detail(&state, person, admin, viewer_id).await?))
 }
 
 /// Карточка из БД: фильмография — только видимые сущности (админу — все).
-async fn detail(db: &sqlx::PgPool, person: Person, with_inactive: bool) -> AppResult<PersonDetail> {
+async fn detail(
+    state: &AppState,
+    person: Person,
+    with_inactive: bool,
+    viewer: Option<Uuid>,
+) -> AppResult<PersonDetail> {
+    let db = &state.db;
     let rows: Vec<PersonCreditRow> = sqlx::query_as(&format!(
         "SELECT c.id, c.role, c.character_name, {ENTITY_SUMMARY_COLUMNS}
          FROM entity_credits c JOIN entities e ON e.id = c.entity_id
@@ -100,8 +107,27 @@ async fn detail(db: &sqlx::PgPool, person: Person, with_inactive: bool) -> AppRe
     .bind(with_inactive)
     .fetch_all(db)
     .await?;
+    // Лайки живут в social: читаем справочником, а не JOIN'ом к его таблице.
+    let ids = [person.id];
+    let likes_count = state
+        .person_likes
+        .counts(&ids)
+        .await?
+        .get(&person.id)
+        .copied()
+        .unwrap_or(0);
+    let liked = match viewer {
+        None => false,
+        Some(viewer) => state
+            .person_likes
+            .mine(viewer, &ids)
+            .await?
+            .contains(&person.id),
+    };
     Ok(PersonDetail {
         person,
         credits: rows.into_iter().map(Into::into).collect(),
+        likes_count,
+        liked,
     })
 }

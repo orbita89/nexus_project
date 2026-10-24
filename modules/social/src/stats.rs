@@ -8,8 +8,9 @@
 //! берётся у каталога одним вызовом `EntityDirectory::kind_counts`, а не JOIN'ом.
 
 use crate::models::{
-    ByKind, CommentCounts, MarkCounts, MarkCountsRow, MarkRow, MarkedEntity, MarksQuery,
-    ProfileRatings, ProfileStats, RatedEntity, RatedRow, RatingsSort, Reactions, UserRatingsQuery,
+    ByKind, CommentCounts, LikesGiven, MarkCounts, MarkCountsRow, MarkRow, MarkedEntity,
+    MarksQuery, ProfileRatings, ProfileStats, RatedEntity, RatedRow, RatingsSort, Reactions,
+    UserRatingsQuery,
 };
 use crate::refs;
 use axum::extract::State;
@@ -113,7 +114,22 @@ pub async fn get(
     .fetch_all(&state.db)
     .await?;
 
+    // Что пользователь лайкнул сам: раздел «Что нравится». Лайков у произведений нет.
+    let likes_given: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM collection_likes WHERE user_id = $1),
+            (SELECT count(*) FROM person_likes WHERE user_id = $1)",
+    )
+    .bind(user.id)
+    .fetch_one(&state.db)
+    .await?;
+
     Ok(Json(ProfileStats {
+        likes_given: LikesGiven {
+            collections: likes_given.0,
+            people: likes_given.1,
+            entities: 0,
+        },
         ratings: summary(&ratings),
         reviews_with_text,
         marks: mark_counts(&marks),

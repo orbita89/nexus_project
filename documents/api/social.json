@@ -4029,6 +4029,185 @@
         ]
       }
     },
+    "/api/v1/social/collections/{id}/like": {
+      "put": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Поставить подборке «нравится» или «не нравится»; другой голос заменяет прежний.",
+        "operationId": "like_collection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id подборки",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CollectionLike"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Голос учтён"
+          },
+          "400": {
+            "description": "`value` не `1` и не `-1`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет подборки или она чужая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Снять свой голос с подборки → 204 (даже если его не было).",
+        "operationId": "unlike_collection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id подборки",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Голоса нет"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет подборки или она чужая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/collections/{id}/likes": {
+      "get": {
+        "tags": [
+          "collections"
+        ],
+        "summary": "Голоса за подборку: сколько «нравится», сколько «не нравится» и свой голос.",
+        "operationId": "get_collection_likes",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id подборки",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сводка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionLikes"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет подборки или она чужая приватная",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/collections/{id}/reaction": {
       "put": {
         "tags": [
@@ -5991,6 +6170,179 @@
             "bearer": []
           }
         ]
+      }
+    },
+    "/api/v1/social/people/{slug}/like": {
+      "put": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Лайкнуть человека каталога. Дизлайка здесь нет — как и у профилей.",
+        "operationId": "like_person",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug человека",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "denis-villeneuve"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Лайкнут"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Человека нет или он скрыт",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Снять свой лайк с человека → 204 (даже если его не было).",
+        "operationId": "unlike_person",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug человека",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "denis-villeneuve"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Лайка нет"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Человека нет или он скрыт",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/people/{slug}/likes": {
+      "get": {
+        "tags": [
+          "people"
+        ],
+        "summary": "Кто лайкнул человека, новые сверху.",
+        "operationId": "list_person_likes",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug человека",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "denis-villeneuve"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница лайкнувших",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Like"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Человека нет или он скрыт",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/social/posts/{id}": {
@@ -8311,6 +8663,121 @@
         }
       }
     },
+    "/api/v1/social/users/{username}/likes/given": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Что пользователь лайкнул: раздел «Что нравится» в аналитике профиля.",
+        "description": "Закрытость — как у остальной аналитики (`stats::visible`): владелец и admin всегда,\nостальные при `stats_public`.",
+        "operationId": "list_given_likes",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "user"
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Только лайки этого вида; не передан — все вперемешку.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Вид цели в `?target=` у `/users/{username}/likes/given`.",
+              "enum": [
+                "collection",
+                "person",
+                "entity"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница лайков",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_GivenLike"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Токен передан, но недействителен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Аналитика закрыта владельцем (`stats_private`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Пользователь не найден или заблокирован",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/users/{username}/marks": {
       "get": {
         "tags": [
@@ -9234,6 +9701,8 @@
           "header_mode",
           "comments_count",
           "comments_locked",
+          "likes_count",
+          "dislikes_count",
           "items_count",
           "preview",
           "created_at",
@@ -9281,6 +9750,12 @@
               "null"
             ]
           },
+          "dislikes_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Дизлайков.",
+            "example": 3
+          },
           "effects": {
             "type": "boolean",
             "description": "Декоративные эффекты темы (капли крови, снег…)."
@@ -9315,6 +9790,21 @@
             "format": "int64",
             "description": "Сколько произведений.",
             "example": 7
+          },
+          "likes_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Лайков у подборки.",
+            "example": 12
+          },
+          "mine": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Свой голос: `1`, `-1` или `null` (гость или не голосовал). Под кнопку отдельного\nзапроса не нужно.",
+            "example": 1
           },
           "owner": {
             "$ref": "#/components/schemas/UserRef"
@@ -9533,6 +10023,51 @@
             "type": "integer",
             "format": "int32",
             "description": "Порядок: по возрастанию, при равенстве — по времени добавления."
+          }
+        }
+      },
+      "CollectionLike": {
+        "type": "object",
+        "description": "Тело `PUT /collections/{id}/like`.",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`1` — нравится, `-1` — не нравится.",
+            "example": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "CollectionLikes": {
+        "type": "object",
+        "description": "Сводка голосов за подборку.",
+        "required": [
+          "likes",
+          "dislikes"
+        ],
+        "properties": {
+          "dislikes": {
+            "type": "integer",
+            "format": "int64",
+            "example": 3
+          },
+          "likes": {
+            "type": "integer",
+            "format": "int64",
+            "example": 12
+          },
+          "mine": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Свой голос: `1`, `-1` или `null` (гость или не голосовал).",
+            "example": 1
           }
         }
       },
@@ -10217,6 +10752,31 @@
           }
         }
       },
+      "GivenLike": {
+        "type": "object",
+        "description": "Что пользователь лайкнул — лента «Что нравится» в аналитике профиля.",
+        "required": [
+          "target",
+          "value",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "target": {
+            "$ref": "#/components/schemas/LikeTarget",
+            "description": "Куда поставлен лайк."
+          },
+          "value": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`1` — нравится, `-1` — не нравится (дизлайк есть только у подборок).",
+            "example": 1
+          }
+        }
+      },
       "Interest": {
         "type": "object",
         "description": "Сущность в интересах пользователя.",
@@ -10250,6 +10810,79 @@
           },
           "user": {
             "$ref": "#/components/schemas/UserRef"
+          }
+        }
+      },
+      "LikeTarget": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "collection_id",
+              "title",
+              "kind"
+            ],
+            "properties": {
+              "collection_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "collection"
+                ]
+              },
+              "title": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "person",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "person"
+                ]
+              },
+              "person": {
+                "$ref": "#/components/schemas/PersonRef"
+              }
+            }
+          }
+        ],
+        "description": "Цель лайка. `kind` — `collection` или `person`; остальные поля зависят от него."
+      },
+      "LikesGiven": {
+        "type": "object",
+        "description": "Сколько лайков пользователь поставил сам.",
+        "required": [
+          "collections",
+          "people",
+          "entities"
+        ],
+        "properties": {
+          "collections": {
+            "type": "integer",
+            "format": "int64",
+            "example": 12
+          },
+          "entities": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Лайков у произведений нет — всегда `0`.",
+            "example": 0
+          },
+          "people": {
+            "type": "integer",
+            "format": "int64",
+            "example": 3
           }
         }
       },
@@ -10344,6 +10977,8 @@
                 "header_mode",
                 "comments_count",
                 "comments_locked",
+                "likes_count",
+                "dislikes_count",
                 "items_count",
                 "preview",
                 "created_at",
@@ -10391,6 +11026,12 @@
                     "null"
                   ]
                 },
+                "dislikes_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Дизлайков.",
+                  "example": 3
+                },
                 "effects": {
                   "type": "boolean",
                   "description": "Декоративные эффекты темы (капли крови, снег…)."
@@ -10425,6 +11066,21 @@
                   "format": "int64",
                   "description": "Сколько произведений.",
                   "example": 7
+                },
+                "likes_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Лайков у подборки.",
+                  "example": 12
+                },
+                "mine": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "Свой голос: `1`, `-1` или `null` (гость или не голосовал). Под кнопку отдельного\nзапроса не нужно.",
+                  "example": 1
                 },
                 "owner": {
                   "$ref": "#/components/schemas/UserRef"
@@ -10729,6 +11385,62 @@
                 },
                 "user": {
                   "$ref": "#/components/schemas/UserRef"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_GivenLike": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Что пользователь лайкнул — лента «Что нравится» в аналитике профиля.",
+              "required": [
+                "target",
+                "value",
+                "created_at"
+              ],
+              "properties": {
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "target": {
+                  "$ref": "#/components/schemas/LikeTarget",
+                  "description": "Куда поставлен лайк."
+                },
+                "value": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "`1` — нравится, `-1` — не нравится (дизлайк есть только у подборок).",
+                  "example": 1
                 }
               }
             }
@@ -11844,6 +12556,7 @@
           "marks",
           "reactions",
           "comments",
+          "likes_given",
           "by_kind"
         ],
         "properties": {
@@ -11854,6 +12567,10 @@
           "comments": {
             "$ref": "#/components/schemas/CommentCounts",
             "description": "Комментарии: к рецензиям и в обсуждениях коллекций, без удалённых."
+          },
+          "likes_given": {
+            "$ref": "#/components/schemas/LikesGiven",
+            "description": "Сколько лайков пользователь поставил сам — раздел «Что нравится»."
           },
           "marks": {
             "$ref": "#/components/schemas/MarkCounts",

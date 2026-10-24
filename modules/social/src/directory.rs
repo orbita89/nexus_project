@@ -3,10 +3,10 @@
 //! `catalog` — не переносит в архив сущности с пользовательскими данными и не удаляет людей,
 //! нужных пользователям.
 
-use shared::directory::{async_trait, InterestDirectory};
+use shared::directory::{async_trait, InterestDirectory, PersonLikes};
 use shared::AppResult;
 use sqlx::PgPool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 pub struct PgInterestDirectory {
@@ -88,5 +88,49 @@ impl InterestDirectory for PgInterestDirectory {
         .fetch_all(&self.db)
         .await?;
         Ok(used.into_iter().collect())
+    }
+}
+
+/// Лайки людей каталога для `catalog` (`shared::directory::PersonLikes`): таблица `person_likes`
+/// наша, страница человека — его.
+pub struct PgPersonLikes {
+    db: PgPool,
+}
+
+impl PgPersonLikes {
+    pub fn new(db: PgPool) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl PersonLikes for PgPersonLikes {
+    async fn counts(&self, person_ids: &[Uuid]) -> AppResult<HashMap<Uuid, i64>> {
+        if person_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            "SELECT person_id, count(*) FROM person_likes WHERE person_id = ANY($1)
+             GROUP BY person_id",
+        )
+        .bind(person_ids)
+        .fetch_all(&self.db)
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    async fn mine(&self, user_id: Uuid, person_ids: &[Uuid]) -> AppResult<HashSet<Uuid>> {
+        if person_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        Ok(sqlx::query_scalar(
+            "SELECT person_id FROM person_likes WHERE user_id = $1 AND person_id = ANY($2)",
+        )
+        .bind(user_id)
+        .bind(person_ids)
+        .fetch_all(&self.db)
+        .await?
+        .into_iter()
+        .collect())
     }
 }

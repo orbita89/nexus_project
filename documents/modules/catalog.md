@@ -146,6 +146,10 @@ TMDB с русским названием (121 371) и 500 самых попул
 `GROUP BY kind`, которым `social` строит разрез аналитики профиля («оценено 30 фильмов и 12 книг»)
 не выбирая ради одного поля все `EntityRef`.
 
+Лайки людей идут в обратную сторону: таблица `person_likes` принадлежит `social`, а показывает
+их `catalog` на странице человека (`likes_count`, `liked` в `PersonDetail`) — через справочник
+`PersonLikes` (`counts(ids)`, `mine(user, ids)`), без JOIN к чужой таблице.
+
 Студии для других модулей — `StudioDirectory` (`PgStudioDirectory`, `state.studios`: `by_slug`,
 `by_ids` → `StudioRef` `{id, slug, name, logo_url}`); по нему `social` проверяет цель комментария
 `studio:<slug>`.

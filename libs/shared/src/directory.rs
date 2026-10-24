@@ -255,6 +255,16 @@ pub trait StudioDirectory: Send + Sync {
     async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, StudioRef>>;
 }
 
+/// Лайки людей каталога. Реализует `social` (таблица его), читает `catalog`: кнопка
+/// «Нравится» на странице человека рисуется из самой страницы, без второго запроса.
+#[async_trait]
+pub trait PersonLikes: Send + Sync {
+    /// Сколько лайков у каждого из переданных людей; людей без лайков в ответе нет.
+    async fn counts(&self, person_ids: &[Uuid]) -> AppResult<HashMap<Uuid, i64>>;
+    /// Кого из переданных лайкнул этот пользователь.
+    async fn mine(&self, user_id: Uuid, person_ids: &[Uuid]) -> AppResult<HashSet<Uuid>>;
+}
+
 /// Все справочники разом: аргумент [`AppState::new`](crate::AppState::new).
 #[derive(Clone)]
 pub struct Directories {
@@ -266,4 +276,5 @@ pub struct Directories {
     pub people: Arc<dyn PersonDirectory>,
     pub tags: Arc<dyn TagDirectory>,
     pub studios: Arc<dyn StudioDirectory>,
+    pub person_likes: Arc<dyn PersonLikes>,
 }

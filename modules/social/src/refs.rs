@@ -139,7 +139,13 @@ pub async fn comments(
 /// Сколько произведений коллекции показывать обложками в списке.
 const PREVIEW_ITEMS: i64 = 4;
 
-pub async fn collections(state: &AppState, rows: Vec<CollectionRow>) -> AppResult<Vec<Collection>> {
+/// Коллекции для ответа. `viewer` — вошедший: его голос («нравится» / «не нравится») ложится в
+/// `mine` одним запросом на страницу, чтобы кнопка рисовалась без второго обращения.
+pub async fn collections(
+    state: &AppState,
+    rows: Vec<CollectionRow>,
+    viewer: Option<Uuid>,
+) -> AppResult<Vec<Collection>> {
     let users = users(state, rows.iter().map(|r| r.user_id).collect()).await?;
     // Первые пункты всех коллекций страницы — одним запросом.
     let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
@@ -156,6 +162,19 @@ pub async fn collections(state: &AppState, rows: Vec<CollectionRow>) -> AppResul
     .fetch_all(&state.db)
     .await?;
     let entities = entities(state, firsts.iter().map(|&(_, e)| e).collect()).await?;
+    let my_likes: HashMap<Uuid, i16> = match viewer {
+        None => HashMap::new(),
+        Some(viewer) => sqlx::query_as(
+            "SELECT collection_id, value FROM collection_likes
+             WHERE user_id = $1 AND collection_id = ANY($2)",
+        )
+        .bind(viewer)
+        .bind(&ids)
+        .fetch_all(&state.db)
+        .await?
+        .into_iter()
+        .collect(),
+    };
     let mut previews: HashMap<Uuid, Vec<EntityRef>> = HashMap::new();
     for (collection, entity) in firsts {
         if let Some(entity) = entities.get(&entity) {
@@ -187,6 +206,9 @@ pub async fn collections(state: &AppState, rows: Vec<CollectionRow>) -> AppResul
                 header_mode: row.header_mode,
                 comments_count: row.comments_count,
                 comments_locked: row.comments_locked,
+                likes_count: row.likes_count,
+                dislikes_count: row.dislikes_count,
+                mine: my_likes.get(&row.id).copied(),
                 items_count: row.items_count,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
@@ -195,8 +217,12 @@ pub async fn collections(state: &AppState, rows: Vec<CollectionRow>) -> AppResul
         .collect())
 }
 
-pub async fn collection(state: &AppState, row: CollectionRow) -> AppResult<Collection> {
-    collections(state, vec![row])
+pub async fn collection(
+    state: &AppState,
+    row: CollectionRow,
+    viewer: Option<Uuid>,
+) -> AppResult<Collection> {
+    collections(state, vec![row], viewer)
         .await?
         .pop()
         .ok_or(AppError::NotFound)

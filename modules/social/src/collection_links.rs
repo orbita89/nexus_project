@@ -22,7 +22,11 @@ use uuid::Uuid;
 pub const MAX_LINKS: usize = 12;
 
 /// Публичные связанные коллекции по порядку.
-pub(crate) async fn related(state: &AppState, id: Uuid) -> AppResult<Vec<Collection>> {
+pub(crate) async fn related(
+    state: &AppState,
+    id: Uuid,
+    viewer: Option<Uuid>,
+) -> AppResult<Vec<Collection>> {
     let rows: Vec<CollectionRow> = sqlx::query_as(&format!(
         "SELECT {COLLECTION_COLUMNS} FROM collection_links l
          JOIN collections c ON c.id = l.related_id
@@ -32,7 +36,7 @@ pub(crate) async fn related(state: &AppState, id: Uuid) -> AppResult<Vec<Collect
     .bind(id)
     .fetch_all(&state.db)
     .await?;
-    refs::collections(state, rows).await
+    refs::collections(state, rows, viewer).await
 }
 
 fn invalid(field: &str, message: impl Into<String>) -> AppError {
@@ -108,7 +112,7 @@ pub async fn list(
     if !row.is_public && viewer.is_none_or(|viewer| viewer.id != row.user_id) {
         return Err(AppError::NotFound);
     }
-    let body = Json(related(&state, id).await?);
+    let body = Json(related(&state, id, viewer.map(|viewer| viewer.id)).await?);
     Ok(if row.is_public {
         ([(header::CACHE_CONTROL, "public, s-maxage=600")], body).into_response()
     } else {
@@ -166,7 +170,7 @@ pub async fn set(
     .await?;
     tx.commit().await?;
     tracing::info!(admin_id = %admin.id, collection_id = %id, count = req.ids.len(), "related collections set by admin");
-    Ok(Json(related(&state, id).await?))
+    Ok(Json(related(&state, id, Some(admin.id)).await?))
 }
 
 /// Добавить одну связь: в конец или на `position` со сдвигом остальных. Уже есть — не меняется.
@@ -244,7 +248,7 @@ pub async fn add(
         tracing::info!(admin_id = %admin.id, collection_id = %id, %related_id, "related collection added by admin");
     }
     tx.commit().await?;
-    Ok(Json(related(&state, id).await?))
+    Ok(Json(related(&state, id, Some(admin.id)).await?))
 }
 
 /// Убрать связь → 204 (даже если её не было).

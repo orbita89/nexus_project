@@ -353,6 +353,16 @@ pub struct Collection {
     pub comments_count: i64,
     /// Обсуждение закрыто: читать можно, писать — только admin.
     pub comments_locked: bool,
+    /// Лайков у подборки.
+    #[schema(example = 12)]
+    pub likes_count: i64,
+    /// Дизлайков.
+    #[schema(example = 3)]
+    pub dislikes_count: i64,
+    /// Свой голос: `1`, `-1` или `null` (гость или не голосовал). Под кнопку отдельного
+    /// запроса не нужно.
+    #[schema(example = 1)]
+    pub mine: Option<i16>,
     /// Сколько произведений.
     #[schema(example = 7)]
     pub items_count: i64,
@@ -385,6 +395,8 @@ pub struct CollectionRow {
     pub header_mode: String,
     pub comments_count: i64,
     pub comments_locked: bool,
+    pub likes_count: i64,
+    pub dislikes_count: i64,
     pub items_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -398,6 +410,10 @@ pub const COLLECTION_COLUMNS: &str =
     (SELECT count(*) FROM collection_comments cc
      WHERE cc.collection_id = c.id AND cc.deleted_at IS NULL) AS comments_count,
     c.comments_locked,
+    (SELECT count(*) FROM collection_likes cl
+     WHERE cl.collection_id = c.id AND cl.value = 1) AS likes_count,
+    (SELECT count(*) FROM collection_likes cl
+     WHERE cl.collection_id = c.id AND cl.value = -1) AS dislikes_count,
     (SELECT count(*) FROM collection_items i WHERE i.collection_id = c.id) AS items_count,
     c.created_at, c.updated_at";
 
@@ -1026,6 +1042,90 @@ pub struct TargetCommentsQuery {
     pub offset: Option<i64>,
 }
 
+/// Сводка голосов за подборку.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CollectionLikes {
+    #[schema(example = 12)]
+    pub likes: i64,
+    #[schema(example = 3)]
+    pub dislikes: i64,
+    /// Свой голос: `1`, `-1` или `null` (гость или не голосовал).
+    #[schema(example = 1)]
+    pub mine: Option<i16>,
+}
+
+/// Тело `PUT /collections/{id}/like`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionLike {
+    /// `1` — нравится, `-1` — не нравится.
+    #[schema(example = 1)]
+    pub value: i16,
+}
+
+/// Что пользователь лайкнул — лента «Что нравится» в аналитике профиля.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GivenLike {
+    /// Куда поставлен лайк.
+    pub target: LikeTarget,
+    /// `1` — нравится, `-1` — не нравится (дизлайк есть только у подборок).
+    #[schema(example = 1)]
+    pub value: i16,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Цель лайка. `kind` — `collection` или `person`; остальные поля зависят от него.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum LikeTarget {
+    Collection { collection_id: Uuid, title: String },
+    Person { person: PersonRef },
+}
+
+/// Вид цели в `?target=` у `/users/{username}/likes/given`.
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LikeTargetKind {
+    Collection,
+    Person,
+    /// Лайков у произведений нет (у них оценки, отметки и реакции) — фильтр принимается
+    /// ради единообразия и всегда отдаёт пустую страницу.
+    Entity,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct GivenLikesQuery {
+    /// Только лайки этого вида; не передан — все вперемешку.
+    #[param(inline)]
+    pub target: Option<LikeTargetKind>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
+/// Строка ленты «что лайкнул»: вид цели, её id и голос.
+#[derive(Debug, sqlx::FromRow)]
+pub struct GivenLikeRow {
+    pub source: String,
+    pub target_id: Uuid,
+    pub value: i16,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Сколько лайков пользователь поставил сам.
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct LikesGiven {
+    #[schema(example = 12)]
+    pub collections: i64,
+    #[schema(example = 3)]
+    pub people: i64,
+    /// Лайков у произведений нет — всегда `0`.
+    #[schema(example = 0)]
+    pub entities: i64,
+}
+
 // ---------------------------------------------------------------- мои комментарии
 
 /// Комментарий пользователя в ленте «мои комментарии» вместе с тем, где он оставлен.
@@ -1094,6 +1194,8 @@ pub struct ProfileStats {
     pub reactions: Reactions,
     /// Комментарии: к рецензиям и в обсуждениях коллекций, без удалённых.
     pub comments: CommentCounts,
+    /// Сколько лайков пользователь поставил сам — раздел «Что нравится».
+    pub likes_given: LikesGiven,
     /// Сколько оценённого и просмотренного каждого типа (`movie`, `series`, `book`, `game`):
     /// типы берутся у каталога через справочник, ключей без единой сущности нет.
     pub by_kind: ByKind,

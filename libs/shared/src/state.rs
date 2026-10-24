@@ -4,7 +4,7 @@ use crate::auth::Jwt;
 use crate::cache::{Cache, CacheSettings};
 use crate::directory::{
     Chat, Directories, EntityDirectory, EntityRatings, InterestDirectory, PersonDirectory,
-    StudioDirectory, TagDirectory, UserDirectory,
+    PersonLikes, StudioDirectory, TagDirectory, UserDirectory,
 };
 use crate::events::EventBus;
 use crate::isr::Isr;
@@ -43,6 +43,8 @@ pub struct AppState {
     pub tags: Arc<dyn TagDirectory>,
     /// Студии каталога для других модулей (реализует `catalog`).
     pub studios: Arc<dyn StudioDirectory>,
+    /// Лайки людей каталога (реализует `social`, читает `catalog`).
+    pub person_likes: Arc<dyn PersonLikes>,
     /// Шина событий: модули публикуют, `realtime` рассылает клиентам.
     pub events: EventBus,
 }
@@ -69,6 +71,7 @@ impl AppState {
             people: directories.people,
             tags: directories.tags,
             studios: directories.studios,
+            person_likes: directories.person_likes,
             events: EventBus::default(),
         }
     }
