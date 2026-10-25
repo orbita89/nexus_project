@@ -282,6 +282,110 @@ async fn list_entities_rejects_bad_filters(pool: PgPool) {
     assert!(response.json()["error"].as_str().unwrap().contains("kind"));
 }
 
+/// Вкладка «Награды»: справочник премий, годы премии и фильмы премии с фильтрами.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn awards_tab(pool: PgPool) {
+    let ctx = Ctx::new(pool.clone()).await;
+
+    let oscar = |category: &str, year: i32, won: bool| {
+        json!({
+            "award": "Оскар",
+            "category": category,
+            "title": format!("премия «Оскар» {category}"),
+            "year": year,
+            "won": won,
+        })
+    };
+    sqlx::query("UPDATE entities SET metadata = metadata || $2::jsonb WHERE slug = $1")
+        .bind("dune-2021")
+        .bind(
+            json!({ "awards": [
+            oscar("за лучший звук", 2022, true),
+            oscar("за лучший фильм", 2022, false),
+            json!({ "award": "BAFTA", "category": "за музыку",
+                    "title": "премия BAFTA за музыку", "year": 2022, "won": true }),
+        ] })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE entities SET metadata = metadata || $2::jsonb WHERE slug = $1")
+        .bind("dune-novel")
+        .bind(json!({ "awards": [oscar("за лучший фильм", 2024, true)] }).to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Справочник заполняет sync: до него премий нет.
+    assert_eq!(ctx.get_ok("/awards").await["total"], 0);
+    let (status, synced) = ctx
+        .admin_send(Method::POST, "/admin/awards/sync", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{synced}");
+    assert_eq!(synced["created"], 2, "«Оскар» и BAFTA");
+
+    // Список премий: сначала те, у кого больше фильмов.
+    let awards = ctx.get_ok("/awards").await;
+    assert_eq!(awards["total"], 2);
+    assert_eq!(awards["items"][0]["name"], "Оскар");
+    assert_eq!(awards["items"][0]["slug"], "oskar");
+    assert_eq!(awards["items"][0]["entities_count"], 2);
+    assert_eq!(awards["items"][1]["name"], "BAFTA");
+
+    // Страница премии: годы, новые сверху, с разбивкой на победы и номинации.
+    let oscar_page = ctx.get_ok("/awards/oskar").await;
+    assert_eq!(oscar_page["name"], "Оскар");
+    let years = oscar_page["years"].as_array().unwrap();
+    assert_eq!(years.len(), 2);
+    assert_eq!(years[0]["year"], 2024);
+    assert_eq!(years[0]["won_count"], 1);
+    assert_eq!(years[0]["nominated_count"], 0);
+    assert_eq!(years[1]["year"], 2022);
+    assert_eq!(years[1]["won_count"], 1);
+    assert_eq!(years[1]["nominated_count"], 1);
+
+    // Фильмы премии: с каждым — только записи этой премии.
+    let all = ctx.get_ok("/awards/oskar/entities").await;
+    assert_eq!(all["total"], 2);
+    let dune = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["slug"] == "dune-2021")
+        .unwrap();
+    assert_eq!(
+        dune["awards"].as_array().unwrap().len(),
+        2,
+        "BAFTA сюда не попадает"
+    );
+
+    // Фильтры: год и «только победы».
+    let in_2022 = ctx.get_ok("/awards/oskar/entities?year=2022").await;
+    assert_eq!(in_2022["total"], 1);
+    assert_eq!(in_2022["items"][0]["slug"], "dune-2021");
+    let won_2022 = ctx
+        .get_ok("/awards/oskar/entities?year=2022&won=true")
+        .await;
+    assert_eq!(won_2022["total"], 1);
+    assert_eq!(won_2022["items"][0]["awards"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        won_2022["items"][0]["awards"][0]["category"],
+        "за лучший звук"
+    );
+    let won_2024 = ctx
+        .get_ok("/awards/oskar/entities?year=2024&won=false")
+        .await;
+    assert_eq!(won_2024["total"], 0, "в 2024-м номинаций без побед нет");
+
+    // Неизвестная премия — 404 и на странице, и в списке фильмов.
+    assert_eq!(ctx.get("/awards/nobel").await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        ctx.get("/awards/nobel/entities").await.status,
+        StatusCode::NOT_FOUND
+    );
+}
+
 /// Награды и номинации приходят отдельным полем карточки: полученные сверху, внутри — новые
 /// по году. Фронтенду не нужно разбирать `metadata`.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]

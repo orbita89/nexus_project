@@ -184,6 +184,52 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/awards/sync": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Пересобрать справочник премий: новые названия из `metadata.awards[].award` и счётчики.",
+        "operationId": "admin_sync_awards",
+        "responses": {
+          "200": {
+            "description": "Справочник обновлён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/banners": {
       "get": {
         "tags": [
@@ -2646,6 +2692,195 @@
         }
       }
     },
+    "/api/v1/catalog/awards": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Список премий: сначала те, у кого больше фильмов.",
+        "operationId": "list_awards",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница премий",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AwardRef"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/awards/{slug}": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Премия и её годы: по ним на вкладке выбирают год.",
+        "operationId": "get_award",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oskar"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Премия с годами",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AwardDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой премии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/awards/{slug}/entities": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Фильмы премии: `?year=` и `?won=` сужают до «что получило “Оскар” в 2024-м».",
+        "operationId": "list_award_entities",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oskar"
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "description": "Только этот год церемонии.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2024
+          },
+          {
+            "name": "won",
+            "in": "query",
+            "description": "`true` — только полученные награды, `false` — только номинации; не передан — всё.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница фильмов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AwardEntity"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой премии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/catalog/banners": {
       "get": {
         "tags": [
@@ -3715,9 +3950,25 @@
           "title"
         ],
         "properties": {
+          "award": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Премия: по ней работает вкладка «Награды» (`GET /awards/{slug}`). 1–200 символов;\n`null` у записей, заведённых до появления вкладки, и у ручных без премии.",
+            "example": "Оскар"
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Номинация внутри премии: «за лучшую операторскую работу». До 200 символов.",
+            "example": "за лучшую операторскую работу"
+          },
           "title": {
             "type": "string",
-            "description": "1–200 символов.",
+            "description": "Как показывать одной строкой. 1–200 символов.",
             "example": "«Оскар» за лучшую операторскую работу"
           },
           "won": {
@@ -3737,6 +3988,109 @@
           }
         },
         "additionalProperties": false
+      },
+      "AwardDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AwardRef"
+          },
+          {
+            "type": "object",
+            "required": [
+              "years"
+            ],
+            "properties": {
+              "years": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AwardYear"
+                }
+              }
+            }
+          }
+        ],
+        "description": "Страница премии: она сама и её годы, новые сверху."
+      },
+      "AwardEntity": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EntitySummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "awards"
+            ],
+            "properties": {
+              "awards": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Award"
+                },
+                "description": "Все записи этой премии у фильма за выбранный год (или за все годы)."
+              }
+            }
+          }
+        ],
+        "description": "Фильм в списке премии: карточка плюс за что именно он здесь."
+      },
+      "AwardRef": {
+        "type": "object",
+        "description": "Премия в списке вкладки и в шапке её страницы.",
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "entities_count"
+        ],
+        "properties": {
+          "entities_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько фильмов каталога её упоминают (и награды, и номинации).",
+            "example": 1240
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "example": "Оскар"
+          },
+          "slug": {
+            "type": "string",
+            "example": "oskar"
+          }
+        }
+      },
+      "AwardYear": {
+        "type": "object",
+        "description": "Год премии: сколько в нём наград и номинаций — список годов на странице премии.",
+        "required": [
+          "year",
+          "won_count",
+          "nominated_count"
+        ],
+        "properties": {
+          "nominated_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько номинировались.",
+            "example": 97
+          },
+          "won_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько фильмов что-то получили в этом году.",
+            "example": 18
+          },
+          "year": {
+            "type": "integer",
+            "format": "int32",
+            "example": 2024
+          }
+        }
       },
       "Banner": {
         "type": "object",
@@ -5317,6 +5671,121 @@
           }
         }
       },
+      "Page_AwardEntity": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/EntitySummary"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "awards"
+                  ],
+                  "properties": {
+                    "awards": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Award"
+                      },
+                      "description": "Все записи этой премии у фильма за выбранный год (или за все годы)."
+                    }
+                  }
+                }
+              ],
+              "description": "Фильм в списке премии: карточка плюс за что именно он здесь."
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_AwardRef": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Премия в списке вкладки и в шапке её страницы.",
+              "required": [
+                "id",
+                "slug",
+                "name",
+                "entities_count"
+              ],
+              "properties": {
+                "entities_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Сколько фильмов каталога её упоминают (и награды, и номинации).",
+                  "example": 1240
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "name": {
+                  "type": "string",
+                  "example": "Оскар"
+                },
+                "slug": {
+                  "type": "string",
+                  "example": "oskar"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "Page_Banner": {
         "type": "object",
         "description": "Страница списка.",
@@ -6618,6 +7087,27 @@
           "slug": {
             "type": "string",
             "example": "warner-bros-pictures"
+          }
+        }
+      },
+      "SyncResult": {
+        "type": "object",
+        "description": "Сколько премий завелось и сколько их всего.",
+        "required": [
+          "created",
+          "total"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "example": 42,
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "example": 130
           }
         }
       },

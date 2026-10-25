@@ -586,6 +586,11 @@ pub async fn reindex_locked(
         }
         Err(error) => tracing::warn!(%error, "studios sync failed"),
     }
+    // Там же — справочник премий для вкладки «Награды»: новые названия в `metadata.awards`.
+    match crate::awards::sync(&state.db).await {
+        Ok(created) => tracing::info!(created, "awards synced"),
+        Err(error) => tracing::warn!(%error, "awards sync failed"),
+    }
     let indexed = match fill(state, &version, report).await {
         Ok(indexed) => indexed,
         Err(error) => {

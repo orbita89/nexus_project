@@ -87,7 +87,7 @@ TMDB с русским названием (121 371) и 500 самых попул
 | | `developer`, `publisher` | строки до 200 символов |
 | | `trailers` | как у `movie` |
 | `movie`, `series` | `studios` | студии производства: до 20 строк по 1–120 символов (у игр — `developer`/`publisher`, у книг — `publisher`) |
-| все типы | `awards` | награды и номинации, до 50: `[{"title": "«Оскар»: лучший звук", "year": 2022, "won": true}]`. `title` 1–200 символов, `year` 1880–2100 или `null`, `won` — получена (`false` — номинация, по умолчанию) |
+| все типы | `awards` | награды и номинации, до 50: `[{"award": "Оскар", "category": "за лучший звук", "title": "премия «Оскар» за лучший звук", "year": 2022, "won": true}]`. Все строки 1–200 символов, `year` 1880–2100 или `null`, `won` — получена (`false` — номинация, по умолчанию). `award` — премия для вкладки «Награды» (таблица `awards`), `category` — номинация внутри премии; у записей, заведённых до вкладки, их нет |
 | | `trivia` | факты: до 30 строк по 1–1000 символов |
 
 `awards` приходит и отдельным полем карточки (`GET /entities/{slug}`), рядом со `studios`, `tags`,
@@ -162,6 +162,30 @@ https://query.wikidata.org/sparql`; для всего каталога — не�
 **Публичный человек** — с работой в активной сущности или вовсе без работ (заведён в админке):
 `/people` и `/people/{slug}` показывают только таких (админу карточка открыта всегда),
 фильмография — только активные сущности.
+
+### `awards` ✅ — премии для вкладки «Награды»
+
+Миграция `20261122100000_catalog_awards.sql`. Справочник премий, как `studios`: сами награды
+фильма лежат в его строке (`entities.metadata.awards`), отдельной таблицы связей нет (Flat
+First).
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK, `uuidv7()` | |
+| `slug` | `text` | NOT NULL, UNIQUE | Адрес вкладки: `/awards/{slug}`; транслит названия, при совпадении — с хвостом из md5 |
+| `name` | `text` | NOT NULL, UNIQUE | Название премии: «Оскар», BAFTA, «Золотой глобус». Совпадает с `metadata.awards[].award` |
+| `entities_count` | `bigint` | NOT NULL, ≥ 0 | Сколько фильмов её упоминают — порядок в списке |
+| `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
+
+**Индексы:** UNIQUE по `slug` и `name`; (`entities_count DESC`, `name`) — список премий.
+
+Строки заводит `catalog::awards::sync`: новые названия из `metadata.awards[].award` плюс
+пересчёт счётчиков. Зовётся при перестройке поиска, после правок в админке (`publish`) и
+вручную — `POST /admin/awards/sync` (им же пользуется импорт из Wikidata).
+
+Фильмы премии ищутся контейнментом по GIN-индексу `metadata`, как фильмы студии:
+`metadata @> '{"awards": [{"award": "Оскар", "year": 2024, "won": true}]}'` — год и «получена /
+номинация» добавляются в тот же объект, поэтому фильтры не требуют ни одного лишнего индекса.
 
 ### `studios` ✅ — студии
 
@@ -1051,6 +1075,10 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | Метод | Путь | Что делает |
 |---|---|---|
 | GET | `/entities` | Список видимых (без поиска по названию: `q` → 400 `use_search`, искать — `GET /search`). Фильтры: `kind`, `tag` (slug), `year`, `studio` (slug студии: `metadata.studios` содержит её название; неизвестный — пусто). `sort`: `recommended` (по умолчанию, балл), `trending`, `top_rated`, `new` (только вышедшие), `soon`, `popular` (наши оценки), `rating`, `title` ([«Сортировка и активные»](#сортировка-и-активные-)). В элементах — `release_status`, `imdb_rating`, `imdb_votes` |
+| GET | `/awards` | все | Премии для вкладки: `Page<AwardRef>` (`id`, `slug`, `name`, `entities_count`), сначала те, у кого больше фильмов; премии без фильмов не показываются. `?limit=1..100&offset=` |
+| GET | `/awards/{slug}` | все | Премия и её годы: `AwardRef` + `years: [{year, won_count, nominated_count}]`, новые сверху. 404 — нет премии |
+| GET | `/awards/{slug}/entities` | все | Фильмы премии: `Page<AwardEntity>` — карточка (`EntitySummary`) плюс `awards` с записями **этой** премии. `?year=2024`, `?won=true\|false`, `?limit=&offset=`; по умолчанию все годы и награды вместе с номинациями. 404 — нет премии |
+| POST | `/admin/awards/sync` | admin | Пересобрать справочник премий из `metadata.awards[].award` и пересчитать счётчики → `{created, total}` |
 | GET | `/studios/{slug}` | Страница студии ([«Студии»](#студии-)): `slug`, `name`, `logo_url`, `origin_country`, `headquarters`, `homepage`, `description`, `parent` (`{slug, name, logo_url}` или `null`), `entities_count`. Данные компании — из TMDB при первом открытии. Фильмы — `GET /entities?studio={slug}`. 404 — нет студии |
 | GET | `/entities/{slug}` | Карточка: все поля (с `active`), `studios` (`[{slug, name, logo_url}]` по порядку `metadata.studios`), теги, участники в порядке титров (`position`), `related` (активные). Из PostgreSQL. Скрытая — 404; с токеном админа — 200 (и скрытые связанные); неверный токен — 401 |
 | GET | `/entities/{slug}/similar` | Похожие активные (Meilisearch: тот же тип, хотя бы один общий тег, по баллу «Рекомендуемые», затем новее): `?limit=` 1–24 (по умолчанию 12) → `Page<EntitySummary>` ([«Похожие»](#похожие-)); у скрытой — 404; 503 — Meilisearch недоступен |

@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod archive;
+pub mod awards;
 pub mod banners;
 pub mod books;
 pub mod directory;
@@ -35,6 +36,10 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(people::list))
         .routes(routes!(people::get))
         .routes(routes!(studios::get))
+        .routes(routes!(awards::list))
+        .routes(routes!(awards::get))
+        .routes(routes!(awards::entities))
+        .routes(routes!(awards::sync_handler))
         .routes(routes!(tags::list))
         .routes(routes!(tags::get))
         .routes(routes!(search::search))

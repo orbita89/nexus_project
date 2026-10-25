@@ -366,6 +366,31 @@ pub const PERSON_COLUMNS: &str =
     "p.id, p.slug, p.full_name, p.original_name, p.birth_date, p.photo_url, p.bio, p.created_at, \
      p.updated_at";
 
+/// Страница списка премий.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListAwardsQuery {
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
+/// Фильтры списка фильмов премии.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListAwardEntitiesQuery {
+    /// Только этот год церемонии.
+    #[param(example = 2024)]
+    pub year: Option<i32>,
+    /// `true` — только полученные награды, `false` — только номинации; не передан — всё.
+    pub won: Option<bool>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
 /// Человек и его фильмография (новые работы сверху).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PersonDetail {

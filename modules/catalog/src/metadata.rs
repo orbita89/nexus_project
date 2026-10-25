@@ -188,7 +188,16 @@ pub struct GameMetadata {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Award {
-    /// 1–200 символов.
+    /// Премия: по ней работает вкладка «Награды» (`GET /awards/{slug}`). 1–200 символов;
+    /// `null` у записей, заведённых до появления вкладки, и у ручных без премии.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "Оскар")]
+    pub award: Option<String>,
+    /// Номинация внутри премии: «за лучшую операторскую работу». До 200 символов.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "за лучшую операторскую работу")]
+    pub category: Option<String>,
+    /// Как показывать одной строкой. 1–200 символов.
     #[schema(example = "«Оскар» за лучшую операторскую работу")]
     pub title: String,
     /// 1880–2100; `null` — год неизвестен.
@@ -477,7 +486,16 @@ fn awards(values: Option<Vec<Award>>) -> AppResult<Option<Vec<Award>>> {
         }
         Ok(Award {
             title: item("awards.title", award.title, MAX_AWARD_TITLE)?,
-            ..award
+            award: match award.award {
+                Some(name) => Some(item("awards.award", name, MAX_AWARD_TITLE)?),
+                None => None,
+            },
+            category: match award.category {
+                Some(name) => Some(item("awards.category", name, MAX_AWARD_TITLE)?),
+                None => None,
+            },
+            year: award.year,
+            won: award.won,
         })
     })
 }
