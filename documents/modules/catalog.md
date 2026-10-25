@@ -92,6 +92,14 @@ TMDB с русским названием (121 371) и 500 самых попул
 Источник данных — `scripts/catalog-import/awards_wikidata.py` (Wikidata P166 и P1411, сопоставление
 по id TMDB); у TMDB наград нет. Ручные записи редактора скрипт сохраняет.
 
+Награды и номинации наполняет `scripts/catalog-import/awards_wikidata.py` (Wikidata P166 и P1411
+через QLever, сопоставление по id TMDB; `requirements.txt` и venv — рядом со скриптом). Год —
+квалификатор P585 утверждения, иначе дата церемонии (P805). Ручные записи редактора скрипт
+сохраняет: их в Wikidata нет. Проверка на одном фильме — `--slug`, тогда запрос сужается до его
+id TMDB. Когда QLever отвечает 502, для одного фильма годится `--endpoint
+https://query.wikidata.org/sparql`; для всего каталога — нет, у WDQS таймаут 60 с.
+Покрытие Wikidata неполное: у «Оппенгеймера» приходит 6 наград из семи «Оскаров».
+
 **Новый тип** (комиксы, искусство): миграция `ALTER TYPE entity_kind ADD VALUE '...'`, вариант в
 `EntityKind` (`models.rs`), структура и ветка `validate` в `metadata.rs`.
 

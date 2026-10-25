@@ -22,9 +22,20 @@
 Ограничения бэкенда (`catalog::metadata`): не больше 50 записей на фильм, заголовок до 200
 символов, год 1880–2100 — здесь они соблюдаются, иначе админка потом не сохранит карточку.
 
-Запуск:
+Зависимости — `requirements.txt` рядом (aiohttp, asyncpg); venv: `scripts/catalog-import/.venv`
+(в `.gitignore`), создаётся `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`.
+
+Запуск (проверка на одном фильме — запрос сужается до его id TMDB, это секунды):
   DATABASE_URL=postgres://nexus_user:nexus_password@localhost:5432/nexus_db \\
-  python3 awards_wikidata.py --limit 200000 [--dry-run] [--refresh] [--slug oppenheimer-2023]
+  .venv/bin/python awards_wikidata.py --slug oppenheimer-2023 --dry-run --verbose
+
+Весь каталог (два больших запроса, сотни мегабайт CSV в --cache-dir):
+  DATABASE_URL=... .venv/bin/python awards_wikidata.py
+
+Эндпоинт: по умолчанию QLever — он один переваривает запрос по всем фильмам. Когда QLever лежит
+(отвечает 502, с ним это бывает), для одного фильма годится официальный WDQS:
+  --endpoint https://query.wikidata.org/sparql
+Для всего каталога WDQS не подойдёт: там таймаут 60 с.
 
 После загрузки: scripts/reindex-search.sh не нужен — награды в индекс поиска не идут, карточка
 читает их из PostgreSQL.
@@ -63,10 +74,16 @@ MIN_YEAR, MAX_YEAR = 1880, 2100
 log = logging.getLogger("awards")
 
 
-def query(prop: str) -> str:
-    """P166 — награда получена, P1411 — номинация. Год: квалификатор утверждения или церемония."""
+def query(prop: str, tmdb_id: str | None = None) -> str:
+    """P166 — награда получена, P1411 — номинация. Год: квалификатор утверждения или церемония.
+
+    `tmdb_id` — проверка на одном фильме (`--slug`): иначе запрос тянет награды всех фильмов
+    Wikidata, а это сотни мегабайт ради одной карточки.
+    """
+    film = f'?f wdt:P4947 "{tmdb_id}" . BIND("{tmdb_id}" AS ?tmdb)' if tmdb_id \
+        else "?f wdt:P4947 ?tmdb ."
     return f"""SELECT ?tmdb ?awardRu ?awardEn ?catRu ?catEn ?year WHERE {{
-  ?f wdt:P4947 ?tmdb .
+  {film}
   ?f p:{prop} ?st .
   ?st ps:{prop} ?award .
   OPTIONAL {{ ?award rdfs:label ?awardRu FILTER(LANG(?awardRu) = "ru") }}
@@ -230,19 +247,31 @@ async def main() -> int:
         log.error("нужен DATABASE_URL")
         return 2
 
+    conn = await asyncpg.connect(database_url)
+    # Проверка на одном фильме: его id TMDB уходит прямо в запрос.
+    tmdb_id = None
+    if args.slug:
+        tmdb_id = await conn.fetchval(
+            "SELECT external_ids->>'tmdb' FROM entities WHERE slug = $1", args.slug)
+        if not tmdb_id:
+            log.error("%s: нет такого фильма или у него нет id TMDB", args.slug)
+            await conn.close()
+            return 2
+
     cache = Path(args.cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
-    paths = {"received": cache / "awards_received.csv", "nominated": cache / "awards_nominated.csv"}
+    suffix = f"_{tmdb_id}" if tmdb_id else ""
+    paths = {"received": cache / f"awards_received{suffix}.csv",
+             "nominated": cache / f"awards_nominated{suffix}.csv"}
 
     timeout = aiohttp.ClientTimeout(total=1800)
     async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": USER_AGENT}) as s:
-        await download(s, args.endpoint, paths["received"], query("P166"), args.refresh)
-        await download(s, args.endpoint, paths["nominated"], query("P1411"), args.refresh)
+        await download(s, args.endpoint, paths["received"], query("P166", tmdb_id), args.refresh)
+        await download(s, args.endpoint, paths["nominated"], query("P1411", tmdb_id), args.refresh)
 
     awards = collect(paths)
     log.info("наград и номинаций: %d фильмов", len(awards))
 
-    conn = await asyncpg.connect(database_url)
     try:
         written, unchanged = await load(conn, awards, args)
     finally:
