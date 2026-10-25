@@ -75,6 +75,9 @@ GENERIC_FAMILIES = {
     "категория кинопремии", "film award category", "степень награды", "class of award",
     "кинопремия", "film award", "награда", "award", "премия", "категория награды",
     "award category", "телевизионная премия", "television award", "премия в области искусства",
+    # P31 иногда ведёт на отношение, а не на премию: «подчинение» у заявок на «Оскар».
+    "подчинение", "subordination", "номинация", "nomination", "submission", "заявка",
+    "кандидатура", "candidacy", "церемония награждения", "award ceremony",
 }
 
 log = logging.getLogger("awards")
@@ -131,8 +134,13 @@ async def fetch(session: aiohttp.ClientSession, endpoint: str, sparql: str, path
 
 
 def strip_award_prefix(name: str) -> str:
-    """«премия BAFTA» → «BAFTA»: слово «премия» в начале — шум в списке премий."""
-    return re.sub(r"^(премия|награда)\s+", "", name, flags=re.IGNORECASE).strip()
+    """«премия BAFTA» → «BAFTA»: слово «премия» в начале — шум в списке премий.
+
+    Срезаем только перед одним словом: у «премия Европейской киноакадемии» остаток стоит в
+    родительном падеже («Европейской киноакадемии»), и без «премии» он читается как обрывок.
+    """
+    rest = re.sub(r"^(премия|награда)\s+", "", name, flags=re.IGNORECASE).strip()
+    return rest if rest and len(rest.split()) == 1 else name.strip()
 
 
 def is_category(name: str) -> bool:

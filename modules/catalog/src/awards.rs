@@ -316,5 +316,10 @@ pub async fn sync(db: &PgPool) -> sqlx::Result<u64> {
     )
     .execute(db)
     .await?;
+    // Премии, которых больше нет ни у одного фильма (название поправили, фильм ушёл в архив):
+    // справочник выводится из `metadata`, поэтому пустые строки в нём только мешают.
+    sqlx::query("DELETE FROM awards WHERE entities_count = 0")
+        .execute(db)
+        .await?;
     Ok(created)
 }
