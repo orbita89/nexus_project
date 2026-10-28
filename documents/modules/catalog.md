@@ -251,6 +251,11 @@ CHECK: заполнено хотя бы одно из `entity_id`, `person_id`, 
 годам. Любая правка номинаций шлёт `publish::run` для затронутых работ и людей (и до, и после
 записи: номинацию могли снять с одной работы и повесить на другую).
 
+Наполнение: `scripts/catalog-import/awards_build.py` переносит плоские `metadata.awards`
+(их завёл `awards_wikidata.py` из Wikidata) в эти таблицы — премия по названию, церемония по
+году, категория по `category`, номинация по работе и `won`. Номинаций людей, `season_year`,
+номеров и дат церемоний в источнике нет: они заводятся в админке поверх залитого.
+
 Фасеты Meilisearch (`catalog::awards::facets_of`): `award_slugs`, `award_years` — фильтруемые,
 `award_wins`, `award_nominations` — фильтруемые и сортируемые. Через них работают
 `GET /search?award=&award_year=&awarded=` и `sort=awarded`: любые выборки каталога идут только
