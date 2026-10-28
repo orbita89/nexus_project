@@ -3133,3 +3133,76 @@ async fn search_award_facets(pool: PgPool) {
         StatusCode::BAD_REQUEST
     );
 }
+
+/// Страницы раздела «Награды» пересобираются вместе с карточками: правка номинаций меняет и
+/// церемонию, и страницу премии, и список раздела (на плитке — годы и число церемоний).
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn award_pages_are_revalidated(pool: PgPool) {
+    let mut ctx = Ctx::without_search(pool);
+    let isr = FakeIsr::start(StatusCode::OK).await;
+    isr.attach(&mut ctx);
+
+    let (status, body) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/awards",
+            Some(json!({ "slug": "oscar", "title": "Оскар", "kinds": ["movie"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(
+        isr.paths().contains(&"/awards".to_string()),
+        "новая премия — список раздела: {:?}",
+        isr.paths()
+    );
+
+    ctx.admin_send(
+        Method::POST,
+        "/admin/awards/oscar/editions",
+        Some(json!({ "year": 2022 })),
+    )
+    .await;
+    let (status, body) = ctx
+        .admin_send(
+            Method::PUT,
+            "/admin/awards/oscar/2022/nominations",
+            Some(json!({ "categories": [
+                { "slug": "best-actor", "title": "Лучшая мужская роль", "nominations": [
+                    { "entity_slug": "dune-2021", "person_slug": "timothee-chalamet",
+                      "won": true },
+                ] },
+            ] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let paths = isr.paths();
+    for expected in [
+        "/awards",
+        "/awards/oscar",
+        "/awards/oscar/2022",
+        "/films/dune-2021",
+        "/people/timothee-chalamet",
+    ] {
+        assert!(
+            paths.contains(&expected.to_string()),
+            "{expected}: {paths:?}"
+        );
+    }
+
+    // Снятая номинация тоже пересобирает церемонию: адреса берутся и до записи.
+    let before = isr.paths().len();
+    ctx.admin_send(
+        Method::PUT,
+        "/admin/awards/oscar/2022/nominations",
+        Some(json!({ "categories": [] })),
+    )
+    .await;
+    let after: Vec<String> = isr.paths().split_off(before);
+    for expected in ["/awards/oscar/2022", "/films/dune-2021"] {
+        assert!(
+            after.contains(&expected.to_string()),
+            "{expected}: {after:?}"
+        );
+    }
+}

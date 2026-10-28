@@ -26,6 +26,12 @@ use uuid::Uuid;
 pub struct Touched {
     pub(crate) entities: Vec<Uuid>,
     pub(crate) people: Vec<Uuid>,
+    /// Премии, чьи страницы задеты напрямую (правка самой премии, её церемоний и категорий):
+    /// у премии без номинаций работ и людей нет, а страница меняется.
+    pub(crate) awards: Vec<Uuid>,
+    /// Церемонии, чьи страницы задеты: их адрес нужен и тогда, когда номинаций у церемонии не
+    /// осталось (их только что сняли).
+    pub(crate) editions: Vec<Uuid>,
     /// Адреса на момент сбора.
     before: Vec<String>,
 }
@@ -58,8 +64,26 @@ impl Touched {
         let mut touched = Self {
             entities: merge(entities, merge(&entities_of, related)),
             people: merge(people, people_of),
+            awards: Vec::new(),
+            editions: Vec::new(),
             before: Vec::new(),
         };
+        touched.before = touched.paths(db).await?;
+        Ok(touched)
+    }
+
+    /// Та же сборка, но со страницами премий `awards` и церемоний `editions` (админка наград).
+    /// Адреса «до» берутся уже с ними, поэтому удалённая церемония тоже пересобирается.
+    pub async fn collect_awards(
+        db: &sqlx::PgPool,
+        entities: &[Uuid],
+        people: &[Uuid],
+        awards: &[Uuid],
+        editions: &[Uuid],
+    ) -> Result<Self, sqlx::Error> {
+        let mut touched = Self::collect(db, entities, people).await?;
+        touched.awards = merge(awards, Vec::new());
+        touched.editions = merge(editions, Vec::new());
         touched.before = touched.paths(db).await?;
         Ok(touched)
     }
@@ -90,7 +114,10 @@ impl Touched {
     }
 
     fn is_empty(&self) -> bool {
-        self.entities.is_empty() && self.people.is_empty()
+        self.entities.is_empty()
+            && self.people.is_empty()
+            && self.awards.is_empty()
+            && self.editions.is_empty()
     }
 
     /// Страницы фронтенда по slug'ам, которые сейчас в БД.
@@ -115,11 +142,56 @@ impl Touched {
         .bind(&self.entities)
         .fetch_all(db)
         .await?;
+        // Страницы наград: церемонии, где участвуют затронутые работы и люди, и страницы самих
+        // премий из `awards`. Список раздела тоже пересобирается — на плитке премии стоят годы
+        // и число церемоний.
+        let editions: Vec<(String, i32)> = sqlx::query_as(
+            "SELECT DISTINCT a.slug, ed.year FROM award_nominations n
+               JOIN award_editions ed ON ed.id = n.edition_id
+               JOIN awards a ON a.id = ed.award_id
+              WHERE n.entity_id = ANY($1) OR n.person_id = ANY($2) OR a.id = ANY($3)
+             UNION
+            SELECT a.slug, ed.year FROM award_editions ed
+               JOIN awards a ON a.id = ed.award_id
+              WHERE ed.id = ANY($4)",
+        )
+        .bind(&self.entities)
+        .bind(&self.people)
+        .bind(&self.awards)
+        .bind(&self.editions)
+        .fetch_all(db)
+        .await?;
+        let award_slugs: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT a.slug FROM awards a
+              WHERE a.id = ANY($3)
+                 OR EXISTS (SELECT 1 FROM award_editions ed
+                              JOIN award_nominations n ON n.edition_id = ed.id
+                             WHERE ed.award_id = a.id
+                               AND (n.entity_id = ANY($1) OR n.person_id = ANY($2)))
+                 OR EXISTS (SELECT 1 FROM award_editions ed
+                             WHERE ed.award_id = a.id AND ed.id = ANY($4))",
+        )
+        .bind(&self.entities)
+        .bind(&self.people)
+        .bind(&self.awards)
+        .bind(&self.editions)
+        .fetch_all(db)
+        .await?;
+        let section =
+            (!award_slugs.is_empty() || !self.awards.is_empty()).then(|| AWARDS_PATH.to_owned());
+
         Ok(entities
             .iter()
             .map(|(kind, slug)| entity_path(*kind, slug))
             .chain(people.iter().map(|slug| person_path(slug)))
             .chain(studios.iter().map(|slug| studio_path(slug)))
+            .chain(award_slugs.iter().map(|slug| award_path(slug)))
+            .chain(
+                editions
+                    .iter()
+                    .map(|(slug, year)| award_edition_path(slug, *year)),
+            )
+            .chain(section)
             .collect())
     }
 }
@@ -137,6 +209,19 @@ pub fn person_path(slug: &str) -> String {
 /// Страница студии на фронтенде.
 pub fn studio_path(slug: &str) -> String {
     format!("/studios/{slug}")
+}
+
+/// Список премий на фронтенде.
+pub const AWARDS_PATH: &str = "/awards";
+
+/// Страница премии на фронтенде.
+pub fn award_path(slug: &str) -> String {
+    format!("/awards/{slug}")
+}
+
+/// Страница церемонии на фронтенде.
+pub fn award_edition_path(slug: &str, year: i32) -> String {
+    format!("/awards/{slug}/{year}")
 }
 
 fn merge(a: &[Uuid], b: Vec<Uuid>) -> Vec<Uuid> {
@@ -284,6 +369,8 @@ mod tests {
             "/games/witcher-3"
         );
         assert_eq!(person_path("denis-villeneuve"), "/people/denis-villeneuve");
+        assert_eq!(award_path("oscar"), "/awards/oscar");
+        assert_eq!(award_edition_path("oscar", 2024), "/awards/oscar/2024");
     }
 
     #[test]

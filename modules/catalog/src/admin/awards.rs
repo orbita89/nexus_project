@@ -224,6 +224,7 @@ pub async fn create(
     .await
     .map_err(validate::conflict("slug is already taken"))?;
 
+    publish_award(&state, award.id).await?;
     tracing::info!(admin_id = %admin.id, award_id = %award.id, slug = %award.slug, "award created");
     Ok((StatusCode::CREATED, Json(award)))
 }
@@ -406,6 +407,7 @@ pub async fn create_edition(
     .await
     .map_err(validate::conflict("edition of this year already exists"))?;
 
+    publish_award(&state, award.id).await?;
     tracing::info!(admin_id = %admin.id, award = %slug, year = req.year, "award edition created");
     let edition = crate::awards::edition_detail(&state.db, &slug, req.year).await?;
     Ok((StatusCode::CREATED, Json(edition)))
@@ -434,6 +436,7 @@ pub async fn update_edition(
     Path((slug, year_of)): Path<(String, i32)>,
     JsonBody(req): JsonBody<UpdateEdition>,
 ) -> AppResult<Json<AwardEditionDetail>> {
+    let award = crate::awards::by_slug(&state.db, &slug).await?;
     let id = edition_id(&state.db, &slug, year_of).await?;
     let (set_season, season_year) = super::nullable_param(req.season_year);
     if let Some(season) = season_year {
@@ -469,6 +472,9 @@ pub async fn update_edition(
     .execute(&state.db)
     .await?;
 
+    // Номер, дата и обложка церемонии стоят на странице премии и в плитке года.
+    let touched = edition_touched(&state, award.id, id).await?;
+    publish::run(&state, touched, &Reporter::silent()).await;
     tracing::info!(admin_id = %admin.id, award = %slug, year = year_of, "award edition updated");
     Ok(Json(
         crate::awards::edition_detail(&state.db, &slug, year_of).await?,
@@ -495,8 +501,9 @@ pub async fn delete_edition(
     AdminUser(admin): AdminUser,
     Path((slug, year_of)): Path<(String, i32)>,
 ) -> AppResult<StatusCode> {
+    let award = crate::awards::by_slug(&state.db, &slug).await?;
     let id = edition_id(&state.db, &slug, year_of).await?;
-    let touched = edition_touched(&state, id).await?;
+    let touched = edition_touched(&state, award.id, id).await?;
 
     let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM award_nominations WHERE edition_id = $1")
@@ -697,7 +704,7 @@ pub async fn put_nominations(
         )));
     }
     // До записи: номинации могли снять с работы — её карточку тоже пересобрать.
-    let before = edition_touched(&state, edition).await?;
+    let before = edition_touched(&state, award.id, edition).await?;
 
     let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM award_nominations WHERE edition_id = $1")
@@ -713,7 +720,7 @@ pub async fn put_nominations(
     }
     tx.commit().await?;
 
-    let mut touched = edition_touched(&state, edition).await?;
+    let mut touched = edition_touched(&state, award.id, edition).await?;
     touched = merge_touched(&state, before, touched).await?;
     publish::run(&state, touched, &Reporter::silent()).await;
     tracing::info!(
@@ -765,7 +772,7 @@ pub async fn create_nomination(
     insert_nomination(&mut tx, edition, category, req.position as usize, &req).await?;
     tx.commit().await?;
 
-    let touched = edition_touched(&state, edition).await?;
+    let touched = edition_touched(&state, award.id, edition).await?;
     publish::run(&state, touched, &Reporter::silent()).await;
     tracing::info!(admin_id = %admin.id, award = %slug, year = year_of, "nomination created");
     Ok((
@@ -799,21 +806,25 @@ pub async fn delete_nomination(
     AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let row: Option<(Option<Uuid>, Option<Uuid>)> =
-        sqlx::query_as("SELECT entity_id, person_id FROM award_nominations WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
-    let (entity_id, person_id) = row.ok_or(AppError::NotFound)?;
+    let row: Option<(Option<Uuid>, Option<Uuid>, Uuid)> = sqlx::query_as(
+        "SELECT n.entity_id, n.person_id, ed.award_id FROM award_nominations n
+           JOIN award_editions ed ON ed.id = n.edition_id WHERE n.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (entity_id, person_id, award_id) = row.ok_or(AppError::NotFound)?;
     sqlx::query("DELETE FROM award_nominations WHERE id = $1")
         .bind(id)
         .execute(&state.db)
         .await?;
 
-    let touched = Touched::collect(
+    let touched = Touched::collect_awards(
         &state.db,
         &entity_id.into_iter().collect::<Vec<_>>(),
         &person_id.into_iter().collect::<Vec<_>>(),
+        &[award_id],
+        &[],
     )
     .await?;
     publish::run(&state, touched, &Reporter::silent()).await;
@@ -979,7 +990,7 @@ async fn resolve(
 }
 
 /// Работы и люди церемонии: их карточки показывают блок «Награды».
-async fn edition_touched(state: &AppState, edition: Uuid) -> AppResult<Touched> {
+async fn edition_touched(state: &AppState, award: Uuid, edition: Uuid) -> AppResult<Touched> {
     let entities: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT entity_id FROM award_nominations
           WHERE edition_id = $1 AND entity_id IS NOT NULL",
@@ -994,7 +1005,7 @@ async fn edition_touched(state: &AppState, edition: Uuid) -> AppResult<Touched> 
     .bind(edition)
     .fetch_all(&state.db)
     .await?;
-    Ok(Touched::collect(&state.db, &entities, &people).await?)
+    Ok(Touched::collect_awards(&state.db, &entities, &people, &[award], &[edition]).await?)
 }
 
 /// Всё, чего касается премия целиком.
@@ -1015,7 +1026,7 @@ async fn award_touched(state: &AppState, award: Uuid) -> AppResult<Touched> {
     .bind(award)
     .fetch_all(&state.db)
     .await?;
-    Ok(Touched::collect(&state.db, &entities, &people).await?)
+    Ok(Touched::collect_awards(&state.db, &entities, &people, &[award], &[]).await?)
 }
 
 /// Правка премии задевает все её карточки: название и логотип стоят в блоке «Награды».
@@ -1033,5 +1044,7 @@ fn touched_is_empty(touched: &Touched) -> bool {
 async fn merge_touched(state: &AppState, before: Touched, after: Touched) -> AppResult<Touched> {
     let entities: Vec<Uuid> = before.entities.into_iter().chain(after.entities).collect();
     let people: Vec<Uuid> = before.people.into_iter().chain(after.people).collect();
-    Ok(Touched::collect(&state.db, &entities, &people).await?)
+    let awards: Vec<Uuid> = before.awards.into_iter().chain(after.awards).collect();
+    let editions: Vec<Uuid> = before.editions.into_iter().chain(after.editions).collect();
+    Ok(Touched::collect_awards(&state.db, &entities, &people, &awards, &editions).await?)
 }

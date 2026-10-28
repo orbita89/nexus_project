@@ -232,6 +232,11 @@ CHECK: заполнено хотя бы одно из `entity_id`, `person_id`, 
 частичные по `entity_id` и `person_id` — блок «Награды» карточек и фасеты индекса; по
 `category_id` — проверка перед удалением категории.
 
+Страницы раздела — статика фронтенда наравне с карточками: `publish::Touched` знает про премии
+и церемонии (`collect_awards`), поэтому любая правка в админке наград пересобирает
+`/awards/{slug}/{year}`, `/awards/{slug}` и список `/awards` (на плитке премии — годы и число
+церемоний). Удалённая церемония и снятые номинации берутся из снимка адресов «до» записи.
+
 Карточка работы (`GET /entities/{slug}`) и профиль человека (`GET /people/{slug}`) отдают
 `awards: EntityAward[]` (`award {slug, title, logo_url}`, `year`, `category {slug, title}`,
 `entity` — работа, за которую номинирован человек, `role`, `won`): полученные сверху, затем по
@@ -1599,7 +1604,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `books/mod.rs` | `nexus books import`: отбор русских строк, `Book`, `work_key`, авторы, запись пачками (`entities` с `metadata.libgen`, `people`, `entity_credits`) |
 | `books/dump.rs` | Потоковый разбор дампа MySQL: `Statements`, `create_table`, `insert` |
 | `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
-| `publish.rs` | Публикация правки: `Touched`, поиск, ISR, поток `.../stream` |
+| `publish.rs` | Публикация правки: `Touched` (+`collect_awards` — страницы премий и церемоний), поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |
 | `admin/` | Админские эндпоинты (`relations.rs` — связанные произведения, `banners.rs` — баннеры, `awards.rs` — премии, церемонии, категории и номинации, включая `PUT .../nominations` для импорта) |
 | `media/` | `nexus media` (`media/pick.rs` — фильтр Rutube) |
