@@ -167,10 +167,6 @@ pub async fn run(state: &AppState, touched: Touched, report: &Reporter) -> bool 
         if let Err(error) = crate::studios::sync(&state.db, Some(&touched.entities), &[]).await {
             tracing::warn!(%error, "studios sync after write failed");
         }
-        // Премии из `metadata.awards` — чтобы правка в админке сразу попала во вкладку.
-        if let Err(error) = crate::awards::sync(&state.db).await {
-            tracing::warn!(%error, "awards sync after write failed");
-        }
     }
 
     let started = report.start(Step::Search);

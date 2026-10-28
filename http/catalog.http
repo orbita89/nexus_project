@@ -517,3 +517,79 @@ Authorization: Bearer {{admin_token}}
 > {%
     client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
 %}
+
+### Раздел «Награды»: завести премию
+POST {{host}}/api/v1/catalog/admin/awards
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "slug": "httpcheck-award", "title": "Премия из catalog.http", "kinds": ["movie"], "founded": 1929 }
+
+> {%
+    client.test("201", () => {
+        client.assert(response.status === 201, `got ${response.status}`);
+        client.assert(response.body.kinds[0] === "movie");
+    });
+%}
+
+### Церемония премии
+POST {{host}}/api/v1/catalog/admin/awards/httpcheck-award/editions
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "year": 2024, "season_year": 2023, "number": 96, "place": "Dolby Theatre" }
+
+> {%
+    client.test("201", () => client.assert(response.status === 201, `got ${response.status}`));
+%}
+
+### Номинации церемонии целиком (путь импорта)
+PUT {{host}}/api/v1/catalog/admin/awards/httpcheck-award/2024/nominations
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "categories": [{ "slug": "best-picture", "title": "Лучший фильм",
+                   "nominations": [{ "name": "Фильм из catalog.http", "won": true }] }] }
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.categories[0].nominations[0].won === true);
+    });
+%}
+
+### Список премий: вкладка «Фильмы»
+GET {{host}}/api/v1/catalog/awards?kind=movie
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.items.some((a) => a.slug === "httpcheck-award"));
+    });
+%}
+
+### Церемония гостю
+GET {{host}}/api/v1/catalog/awards/httpcheck-award/2024
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.season_year === 2023);
+    });
+%}
+
+### Удалить премию с номинациями: без force — 409
+DELETE {{host}}/api/v1/catalog/admin/awards/httpcheck-award
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("409", () => client.assert(response.status === 409, `got ${response.status}`));
+%}
+
+###
+DELETE {{host}}/api/v1/catalog/admin/awards/httpcheck-award?force=true
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}

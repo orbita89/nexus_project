@@ -38,8 +38,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(studios::get))
         .routes(routes!(awards::list))
         .routes(routes!(awards::get))
-        .routes(routes!(awards::entities))
-        .routes(routes!(awards::sync_handler))
+        .routes(routes!(awards::edition))
         .routes(routes!(tags::list))
         .routes(routes!(tags::get))
         .routes(routes!(search::search))
@@ -73,4 +72,21 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(banners::list))
         .routes(routes!(admin::banners::list, admin::banners::create))
         .routes(routes!(admin::banners::update, admin::banners::delete))
+        .routes(routes!(admin::awards::create))
+        .routes(routes!(admin::awards::update, admin::awards::delete))
+        .routes(routes!(admin::awards::create_edition))
+        .routes(routes!(
+            admin::awards::update_edition,
+            admin::awards::delete_edition
+        ))
+        .routes(routes!(admin::awards::create_category))
+        .routes(routes!(
+            admin::awards::update_category,
+            admin::awards::delete_category
+        ))
+        .routes(routes!(
+            admin::awards::put_nominations,
+            admin::awards::create_nomination
+        ))
+        .routes(routes!(admin::awards::delete_nomination))
 }

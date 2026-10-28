@@ -87,11 +87,11 @@ TMDB с русским названием (121 371) и 500 самых попул
 | | `developer`, `publisher` | строки до 200 символов |
 | | `trailers` | как у `movie` |
 | `movie`, `series` | `studios` | студии производства: до 20 строк по 1–120 символов (у игр — `developer`/`publisher`, у книг — `publisher`) |
-| все типы | `awards` | награды и номинации, до 50: `[{"award": "Оскар", "category": "за лучший звук", "title": "премия «Оскар» за лучший звук", "year": 2022, "won": true}]`. Все строки 1–200 символов, `year` 1880–2100 или `null`, `won` — получена (`false` — номинация, по умолчанию). `award` — премия для вкладки «Награды» (таблица `awards`), `category` — номинация внутри премии; у записей, заведённых до вкладки, их нет |
+| все типы | `awards` | награды и номинации, до 50: `[{"award": "Оскар", "category": "за лучший звук", "title": "премия «Оскар» за лучший звук", "year": 2022, "won": true}]`. Все строки 1–200 символов, `year` 1880–2100 или `null`, `won` — получена (`false` — номинация, по умолчанию). `award` — название премии, `category` — номинация внутри неё. Это текст карточки, а не раздел «Награды»: тот живёт в таблицах `award_*` |
 | | `trivia` | факты: до 30 строк по 1–1000 символов |
 
-`awards` приходит и отдельным полем карточки (`GET /entities/{slug}`), рядом со `studios`, `tags`,
-`credits`: полученные награды сверху, внутри — новые по году; кривые записи пропускаются.
+`metadata.awards` — только строчки блока «Производство и факты»: раздел «Награды» и поле
+`awards` карточки берутся из таблиц `award_*` (см. ниже), а не отсюда.
 Источник данных — `scripts/catalog-import/awards_wikidata.py` (Wikidata P166 и P1411, сопоставление
 по id TMDB); у TMDB наград нет. Ручные записи редактора скрипт сохраняет.
 
@@ -163,31 +163,85 @@ https://query.wikidata.org/sparql`; для всего каталога — не�
 `/people` и `/people/{slug}` показывают только таких (админу карточка открыта всегда),
 фильмография — только активные сущности.
 
-### `awards` ✅ — премии для вкладки «Награды»
+### `awards`, `award_editions`, `award_categories`, `award_nominations` ✅ — раздел «Награды»
 
-Миграция `20261122100000_catalog_awards.sql`. Справочник премий, как `studios`: сами награды
-фильма лежат в его строке (`entities.metadata.awards`), отдельной таблицы связей нет (Flat
-First).
+Миграция `20261123100000_catalog_awards_model.sql`. Награда — связь «церемония ↔ категория ↔
+работа ↔ человек», поэтому у неё свои таблицы, а не поле каталога: исключение из Flat First.
+Прежний справочник названий (`awards` c `name`/`entities_count`, миграция
+`20261122100000_catalog_awards.sql`) снесён вместе с `catalog::awards::sync` — его строки
+выводились из `metadata.awards` и удалялись, как только счётчик падал до нуля, поэтому
+курируемую премию в нём не удержать. Плоские строчки `entities.metadata.awards` остались как
+есть: они наполняют блок «Производство и факты» на карточке, пока контент не переехал.
+
+`awards` — премия:
 
 | Колонка | Тип | Ограничения | Описание |
 |---|---|---|---|
 | `id` | `uuid` | PK, `uuidv7()` | |
-| `slug` | `text` | NOT NULL, UNIQUE | Адрес вкладки: `/awards/{slug}`; транслит названия, при совпадении — с хвостом из md5 |
-| `name` | `text` | NOT NULL, UNIQUE | Название премии: «Оскар», BAFTA, «Золотой глобус». Совпадает с `metadata.awards[].award` |
-| `entities_count` | `bigint` | NOT NULL, ≥ 0 | Сколько фильмов её упоминают — порядок в списке |
+| `slug` | `text` | NOT NULL, UNIQUE | Адрес раздела: `/awards/{slug}` |
+| `title` | `text` | NOT NULL | «Оскар» |
+| `full_title` | `text` | | «Премия Американской киноакадемии» |
+| `kinds` | `text[]` | NOT NULL, ⊆ `movie\|series\|book\|game` | Типы работ премии — вкладки раздела; у «Золотого глобуса» два |
+| `country`, `description`, `logo_url`, `site_url` | `text` | | |
+| `founded` | `int` | 1800–2100 | Год учреждения |
+| `position` | `int` | NOT NULL, default 0 | Ручной порядок: крупные премии выше |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
 
-**Индексы:** UNIQUE по `slug` и `name`; (`entities_count DESC`, `name`) — список премий.
+`award_editions` — церемония (премия + год):
 
-Строки заводит `catalog::awards::sync`: новые названия из `metadata.awards[].award` плюс
-пересчёт счётчиков. Зовётся при перестройке поиска, после правок в админке (`publish`) и
-вручную — `POST /admin/awards/sync` (им же пользуется импорт из Wikidata).
-`sync` ещё и удаляет премии, у которых не осталось ни одного фильма: справочник выводится из
-`metadata`, поэтому пустая строка в нём — мусор (переименовали премию, фильм ушёл в архив).
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK, `uuidv7()` | |
+| `award_id` | `uuid` | FK `awards` CASCADE | |
+| `year` | `int` | NOT NULL, 1880–2100, UNIQUE с `award_id` | Год церемонии |
+| `season_year` | `int` | 1880–2100 | Год работ, если другой: «Оскар 2024 — за 2023-й» |
+| `number` | `int` | > 0 | «96-я церемония» |
+| `held_on` | `date` | | Дата проведения |
+| `place`, `cover_url` | `text` | | |
 
-Фильмы премии ищутся контейнментом по GIN-индексу `metadata`, как фильмы студии:
-`metadata @> '{"awards": [{"award": "Оскар", "year": 2024, "won": true}]}'` — год и «получена /
-номинация» добавляются в тот же объект, поэтому фильтры не требуют ни одного лишнего индекса.
+`award_categories` — категория премии (не церемонии: что было в конкретном году, видно по
+номинациям; переименование в отдельном году — `title_override` номинации):
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK, `uuidv7()` | |
+| `award_id` | `uuid` | FK `awards` CASCADE | |
+| `slug` | `text` | NOT NULL, UNIQUE с `award_id` | `best-picture` |
+| `title` | `text` | NOT NULL | «Лучший фильм» |
+| `position` | `int` | NOT NULL, default 0 | Порядок на странице церемонии |
+
+`award_nominations` — номинация:
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK, `uuidv7()` | |
+| `edition_id` | `uuid` | FK `award_editions` CASCADE | |
+| `category_id` | `uuid` | FK `award_categories` RESTRICT | Категорию с номинациями молча не удалить |
+| `entity_id` | `uuid` | FK `entities` CASCADE, NULL | Работа |
+| `person_id` | `uuid` | FK `people` CASCADE, NULL | Человек; актёрская номинация — и работа, и человек сразу |
+| `name` | `text` | | Если ни работы, ни человека в каталоге нет |
+| `role` | `text` | | «режиссёр», «за роль Оппенгеймера» |
+| `title_override` | `text` | | Название категории в этот год, если отличалось |
+| `won` | `boolean` | NOT NULL, default false | Победителей в категории может быть несколько, поэтому флаг у номинации |
+| `position` | `int` | NOT NULL, default 0 | Порядок внутри категории |
+
+CHECK: заполнено хотя бы одно из `entity_id`, `person_id`, `name`.
+
+**Индексы:** (`position DESC`, `title`) и GIN по `kinds` — список и вкладки; (`award_id`,
+`year DESC`) — годы премии; (`edition_id`, `category_id`, `position`) — страница церемонии;
+частичные по `entity_id` и `person_id` — блок «Награды» карточек и фасеты индекса; по
+`category_id` — проверка перед удалением категории.
+
+Карточка работы (`GET /entities/{slug}`) и профиль человека (`GET /people/{slug}`) отдают
+`awards: EntityAward[]` (`award {slug, title, logo_url}`, `year`, `category {slug, title}`,
+`entity` — работа, за которую номинирован человек, `role`, `won`): полученные сверху, затем по
+годам. Любая правка номинаций шлёт `publish::run` для затронутых работ и людей (и до, и после
+записи: номинацию могли снять с одной работы и повесить на другую).
+
+Фасеты Meilisearch (`catalog::awards::facets_of`): `award_slugs`, `award_years` — фильтруемые,
+`award_wins`, `award_nominations` — фильтруемые и сортируемые. Через них работают
+`GET /search?award=&award_year=&awarded=` и `sort=awarded`: любые выборки каталога идут только
+индексом.
 
 ### `studios` ✅ — студии
 
@@ -1077,10 +1131,21 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | Метод | Путь | Что делает |
 |---|---|---|
 | GET | `/entities` | Список видимых (без поиска по названию: `q` → 400 `use_search`, искать — `GET /search`). Фильтры: `kind`, `tag` (slug), `year`, `studio` (slug студии: `metadata.studios` содержит её название; неизвестный — пусто). `sort`: `recommended` (по умолчанию, балл), `trending`, `top_rated`, `new` (только вышедшие), `soon`, `popular` (наши оценки), `rating`, `title` ([«Сортировка и активные»](#сортировка-и-активные-)). В элементах — `release_status`, `imdb_rating`, `imdb_votes` |
-| GET | `/awards` | все | Премии для вкладки: `Page<AwardRef>` (`id`, `slug`, `name`, `entities_count`), сначала те, у кого больше фильмов; премии без фильмов не показываются. `?limit=1..100&offset=` |
-| GET | `/awards/{slug}` | все | Премия и её годы: `AwardRef` + `years: [{year, won_count, nominated_count}]`, новые сверху. 404 — нет премии |
-| GET | `/awards/{slug}/entities` | все | Фильмы премии: `Page<AwardEntity>` — карточка (`EntitySummary`) плюс `awards` с записями **этой** премии. `?year=2024`, `?won=true\|false`, `?limit=&offset=`; по умолчанию все годы и награды вместе с номинациями. 404 — нет премии |
-| POST | `/admin/awards/sync` | admin | Пересобрать справочник премий из `metadata.awards[].award` и пересчитать счётчики → `{created, total}` |
+| GET | `/awards` | все | Премии раздела: `Page<AwardListItem>` (премия + `editions_count`, `first_year`, `latest_year`), ручной порядок, затем алфавит. `?kind=movie\|series\|book\|game` — вкладки, `?q=` — поиск по названию, `?limit=1..100&offset=` |
+| GET | `/awards/{slug}` | все | Премия и её церемонии: `AwardDetail` = премия + `editions: [{year, season_year, number, held_on, cover_url, nominations_count, top: EntitySummary[]}]` (до 5 победителей главной категории), годы по убыванию. 404 — нет премии |
+| GET | `/awards/{slug}/{year}` | все | Церемония: `AwardEditionDetail` = `award {slug,title,logo_url}`, год, `season_year`, `number`, `held_on`, `place`, `cover_url` и `categories: [{slug, title, position, nominations}]`; в номинации `entity: EntitySummary\|null` (постер), `person: PersonSummary\|null` (фото), `name`, `role`, `title_override`, `won`, победители первыми. 404 — нет премии или года |
+| POST | `/admin/awards` | admin | Завести премию → 201 `Award`. 400 — поля, 409 — slug занят |
+| PATCH | `/admin/awards/{slug}` | admin | Поправить премию (`null` стирает необязательное поле) → `Award`. 404, 409 |
+| DELETE | `/admin/awards/{slug}` | admin | Снести премию с церемониями и номинациями → 204. С номинациями — только `?force=true`, иначе 409 |
+| POST | `/admin/awards/{slug}/editions` | admin | Завести церемонию (`year`, `season_year`, `number`, `held_on`, `place`, `cover_url`) → 201 `AwardEditionDetail`. 409 — год уже есть |
+| PATCH | `/admin/awards/{slug}/editions/{year}` | admin | Поправить церемонию → `AwardEditionDetail`. 404 |
+| DELETE | `/admin/awards/{slug}/editions/{year}` | admin | Снести церемонию с номинациями → 204 |
+| POST | `/admin/awards/{slug}/categories` | admin | Завести категорию (`slug`, `title`, `position`) → 201. 409 — slug занят |
+| PATCH | `/admin/awards/{slug}/categories/{category_slug}` | admin | Переименовать категорию или сменить порядок. 404, 409 |
+| DELETE | `/admin/awards/{slug}/categories/{category_slug}` | admin | Удалить категорию → 204. С номинациями — 409 |
+| PUT | `/admin/awards/{slug}/{year}/nominations` | admin | Заменить церемонию целиком (путь импорта): `{categories: [{slug, title?, position?, nominations: [{entity_slug\|entity_id, person_slug\|person_id, name, role, title_override, won, position}]}]}` → `AwardEditionDetail`. Категория заводится на месте, если передан `title`; неизвестный slug работы или человека — 400; больше 2000 номинаций — 400 |
+| POST | `/admin/awards/{slug}/{year}/nominations?category=` | admin | Добавить одну номинацию → 201 `AwardEditionDetail`. 404 — нет церемонии или категории |
+| DELETE | `/admin/awards/nominations/{id}` | admin | Удалить номинацию → 204 |
 | GET | `/studios/{slug}` | Страница студии ([«Студии»](#студии-)): `slug`, `name`, `logo_url`, `origin_country`, `headquarters`, `homepage`, `description`, `parent` (`{slug, name, logo_url}` или `null`), `entities_count`. Данные компании — из TMDB при первом открытии. Фильмы — `GET /entities?studio={slug}`. 404 — нет студии |
 | GET | `/entities/{slug}` | Карточка: все поля (с `active`), `studios` (`[{slug, name, logo_url}]` по порядку `metadata.studios`), теги, участники в порядке титров (`position`), `related` (активные). Из PostgreSQL. Скрытая — 404; с токеном админа — 200 (и скрытые связанные); неверный токен — 401 |
 | GET | `/entities/{slug}/similar` | Похожие активные (Meilisearch: тот же тип, хотя бы один общий тег, по баллу «Рекомендуемые», затем новее): `?limit=` 1–24 (по умолчанию 12) → `Page<EntitySummary>` ([«Похожие»](#похожие-)); у скрытой — 404; 503 — Meilisearch недоступен |
@@ -1518,6 +1583,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
 | `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), `GET /search` (фильтры — `filters_of`), `GET /search/studios` |
 | `studios.rs` | Студии: `sync` (из `metadata.studios` и переданных `Company`), `refs` (ссылки в карточке), `GET /studios/{slug}` (данные компании из TMDB при первом открытии), `metadata_filter` для `GET /entities?studio=` |
+| `awards.rs` | Раздел «Награды»: `Award`/`AwardDetail`/`AwardEditionDetail`/`Nomination`/`EntityAward`, `GET /awards`, `/awards/{slug}`, `/awards/{slug}/{year}` (`edition_detail` — и для ответов админки), `entity_awards` / `person_awards` для карточек, `facets_of` для документа индекса |
 | `banners.rs` | Баннеры: `Banner`, `BannerKind`/`BannerSlide`/`BannerButton`/`BannerTarget`, `PAGES`, `THEMES`, `Draft::validate` (проверки с `field`), `sanitize_html` (ammonia), `sanitize_custom_html` + `sanitize_css` (kind=custom), сопоставление путей (`glob`, `/admin/*`, `ALL_PATHS` для цели `all`), `GET /banners` |
 | `people_search.rs` | Индекс `people` (`PersonDoc`, `settings`, `fill`, `update_index`), известность `refresh_fame` → `person_stats`, `GET /search/people` |
 | `tmdb.rs` | Операции админки: «Обновить рейтинги» (дампы TMDB и IMDb), «Пересобрать активные» |
@@ -1530,7 +1596,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
 | `publish.rs` | Публикация правки: `Touched`, поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |
-| `admin/` | Админские эндпоинты (`relations.rs` — связанные произведения, `banners.rs` — баннеры) |
+| `admin/` | Админские эндпоинты (`relations.rs` — связанные произведения, `banners.rs` — баннеры, `awards.rs` — премии, церемонии, категории и номинации, включая `PUT .../nominations` для импорта) |
 | `media/` | `nexus media` (`media/pick.rs` — фильтр Rutube) |
 
 Тесты — `app/tests/catalog.rs` (данные — `app/tests/fixtures/catalog.sql`), архив —

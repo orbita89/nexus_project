@@ -124,9 +124,14 @@ async fn detail(
             .await?
             .contains(&person.id),
     };
+    let awards = crate::awards::person_awards(db, &ids)
+        .await?
+        .remove(&person.id)
+        .unwrap_or_default();
     Ok(PersonDetail {
         person,
         credits: rows.into_iter().map(Into::into).collect(),
+        awards,
         likes_count,
         liked,
     })

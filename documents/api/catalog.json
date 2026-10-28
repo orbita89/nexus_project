@@ -184,20 +184,40 @@
         ]
       }
     },
-    "/api/v1/catalog/admin/awards/sync": {
+    "/api/v1/catalog/admin/awards": {
       "post": {
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Пересобрать справочник премий: новые названия из `metadata.awards[].award` и счётчики.",
-        "operationId": "admin_sync_awards",
+        "summary": "Завести премию.",
+        "operationId": "create_award",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAward"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
-          "200": {
-            "description": "Справочник обновлён",
+          "201": {
+            "description": "Создана",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SyncResult"
+                  "$ref": "#/components/schemas/Award"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -214,6 +234,1011 @@
           },
           "403": {
             "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/awards/nominations/{id}": {
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Удалить одну номинацию.",
+        "operationId": "delete_award_nomination",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id номинации",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой номинации",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/awards/{slug}": {
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Удалить премию вместе с церемониями, категориями и номинациями.",
+        "operationId": "delete_award",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "description": "Без него премия с номинациями не удаляется (409).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой премии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Есть номинации, нужен ?force=true",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Поправить премию.",
+        "operationId": "update_award",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAward"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Award"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой премии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/awards/{slug}/categories": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Завести категорию премии.",
+        "operationId": "create_award_category",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCategory"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateCategory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой премии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug категории занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/awards/{slug}/categories/{category_slug}": {
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Удалить категорию. С номинациями — 409: сначала разобрать их.",
+        "operationId": "delete_award_category",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          },
+          {
+            "name": "category_slug",
+            "in": "path",
+            "description": "slug категории",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "best-picture"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой категории",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "В категории есть номинации",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Переименовать категорию или сменить порядок.",
+        "operationId": "update_award_category",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          },
+          {
+            "name": "category_slug",
+            "in": "path",
+            "description": "slug категории",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "best-picture"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCategory"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateCategory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой категории",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "slug категории занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/awards/{slug}/editions": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Завести церемонию.",
+        "operationId": "create_award_edition",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEdition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AwardEditionDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой премии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Церемония этого года уже есть",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/awards/{slug}/editions/{year}": {
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Удалить церемонию вместе с её номинациями.",
+        "operationId": "delete_award_edition",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          },
+          {
+            "name": "year",
+            "in": "path",
+            "description": "год церемонии",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2024
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой церемонии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Поправить церемонию.",
+        "operationId": "update_award_edition",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          },
+          {
+            "name": "year",
+            "in": "path",
+            "description": "год церемонии",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2024
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEdition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AwardEditionDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой церемонии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/awards/{slug}/{year}/nominations": {
+      "put": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Заменить номинации церемонии целиком — основной путь импорта.",
+        "operationId": "put_award_nominations",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          },
+          {
+            "name": "year",
+            "in": "path",
+            "description": "год церемонии",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2024
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutNominations"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Церемония заменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AwardEditionDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля или неизвестный slug",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой церемонии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Добавить одну номинацию — точечная правка поверх импорта.",
+        "operationId": "create_award_nomination",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          },
+          {
+            "name": "year",
+            "in": "path",
+            "description": "год церемонии",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2024
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "description": "slug категории",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "best-picture"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NominationInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AwardEditionDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой церемонии или категории",
             "content": {
               "application/json": {
                 "schema": {
@@ -2697,9 +3722,27 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Список премий: сначала те, у кого больше фильмов.",
+        "summary": "Список премий: ручной порядок, затем алфавит. `?kind=` — вкладки раздела.",
         "operationId": "list_awards",
         "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Вкладка раздела: только премии этого типа работ.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Поиск по названию (полному тоже).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "limit",
             "in": "query",
@@ -2727,7 +3770,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page_AwardRef"
+                  "$ref": "#/components/schemas/Page_AwardListItem"
                 }
               }
             }
@@ -2750,7 +3793,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Премия и её годы: по ним на вкладке выбирают год.",
+        "summary": "Премия и её церемонии: по ним выбирают год.",
         "operationId": "get_award",
         "parameters": [
           {
@@ -2761,12 +3804,12 @@
             "schema": {
               "type": "string"
             },
-            "example": "oskar"
+            "example": "oscar"
           }
         ],
         "responses": {
           "200": {
-            "description": "Премия с годами",
+            "description": "Премия с церемониями",
             "content": {
               "application/json": {
                 "schema": {
@@ -2788,13 +3831,13 @@
         }
       }
     },
-    "/api/v1/catalog/awards/{slug}/entities": {
+    "/api/v1/catalog/awards/{slug}/{year}": {
       "get": {
         "tags": [
           "catalog"
         ],
-        "summary": "Фильмы премии: `?year=` и `?won=` сужают до «что получило “Оскар” в 2024-м».",
-        "operationId": "list_award_entities",
+        "summary": "Церемония: категории по порядку, в каждой победители первыми.",
+        "operationId": "get_award_edition",
         "parameters": [
           {
             "name": "slug",
@@ -2804,72 +3847,33 @@
             "schema": {
               "type": "string"
             },
-            "example": "oskar"
+            "example": "oscar"
           },
           {
             "name": "year",
-            "in": "query",
-            "description": "Только этот год церемонии.",
-            "required": false,
+            "in": "path",
+            "description": "год церемонии",
+            "required": true,
             "schema": {
               "type": "integer",
               "format": "int32"
             },
             "example": 2024
-          },
-          {
-            "name": "won",
-            "in": "query",
-            "description": "`true` — только полученные награды, `false` — только номинации; не передан — всё.",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "1–100, по умолчанию 20.",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "offset",
-            "in": "query",
-            "description": "С 0.",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Страница фильмов",
+            "description": "Церемония",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page_AwardEntity"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Неверный параметр",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/AwardEditionDetail"
                 }
               }
             }
           },
           "404": {
-            "description": "Нет такой премии",
+            "description": "Нет такой премии или года",
             "content": {
               "application/json": {
                 "schema": {
@@ -3298,7 +4302,7 @@
           "catalog"
         ],
         "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры. Весь\nпоиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).",
-        "description": "Фильтры (через AND): `kind`, `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
+        "description": "Фильтры (через AND): `kind`, `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`\n(год церемонии) и `awarded` (только с наградой).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;\n`awarded` — больше наград сверху.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
         "operationId": "search",
         "parameters": [
           {
@@ -3409,6 +4413,36 @@
               "type": "string"
             },
             "example": "director"
+          },
+          {
+            "name": "award",
+            "in": "query",
+            "description": "Slug премии (`GET /awards/{slug}`): работы с её наградой или номинацией.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          },
+          {
+            "name": "award_year",
+            "in": "query",
+            "description": "Год церемонии: вместе с `award` — «лауреаты и номинанты „Оскара“ 2024».",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2024
+          },
+          {
+            "name": "awarded",
+            "in": "query",
+            "description": "`true` — только полученные награды (у работы есть хотя бы одна победа).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           },
           {
             "name": "limit",
@@ -3945,150 +4979,329 @@
       },
       "Award": {
         "type": "object",
-        "description": "Награда или номинация.",
+        "description": "Премия целиком (строка `awards`).",
         "required": [
-          "title"
+          "id",
+          "slug",
+          "title",
+          "kinds",
+          "position"
         ],
         "properties": {
-          "award": {
+          "country": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Премия: по ней работает вкладка «Награды» (`GET /awards/{slug}`). 1–200 символов;\n`null` у записей, заведённых до появления вкладки, и у ручных без премии.",
-            "example": "Оскар"
+            "example": "США"
           },
-          "category": {
+          "description": {
             "type": [
               "string",
               "null"
-            ],
-            "description": "Номинация внутри премии: «за лучшую операторскую работу». До 200 символов.",
-            "example": "за лучшую операторскую работу"
+            ]
           },
-          "title": {
-            "type": "string",
-            "description": "Как показывать одной строкой. 1–200 символов.",
-            "example": "«Оскар» за лучшую операторскую работу"
-          },
-          "won": {
-            "type": "boolean",
-            "description": "`true` — получена, `false` — номинация. По умолчанию `false`."
-          },
-          "year": {
+          "founded": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int32",
-            "description": "1880–2100; `null` — год неизвестен.",
-            "example": 2022,
-            "maximum": 2100,
-            "minimum": 1880
-          }
-        },
-        "additionalProperties": false
-      },
-      "AwardDetail": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/AwardRef"
+            "example": 1929
           },
-          {
-            "type": "object",
-            "required": [
-              "years"
+          "full_title": {
+            "type": [
+              "string",
+              "null"
             ],
-            "properties": {
-              "years": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/AwardYear"
-                }
-              }
-            }
-          }
-        ],
-        "description": "Страница премии: она сама и её годы, новые сверху."
-      },
-      "AwardEntity": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/EntitySummary"
-          },
-          {
-            "type": "object",
-            "required": [
-              "awards"
-            ],
-            "properties": {
-              "awards": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/Award"
-                },
-                "description": "Все записи этой премии у фильма за выбранный год (или за все годы)."
-              }
-            }
-          }
-        ],
-        "description": "Фильм в списке премии: карточка плюс за что именно он здесь."
-      },
-      "AwardRef": {
-        "type": "object",
-        "description": "Премия в списке вкладки и в шапке её страницы.",
-        "required": [
-          "id",
-          "slug",
-          "name",
-          "entities_count"
-        ],
-        "properties": {
-          "entities_count": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Сколько фильмов каталога её упоминают (и награды, и номинации).",
-            "example": 1240
+            "example": "Премия Американской киноакадемии"
           },
           "id": {
             "type": "string",
             "format": "uuid"
           },
-          "name": {
-            "type": "string",
-            "example": "Оскар"
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Типы работ премии: по ним вкладки раздела. У «Золотого глобуса» — `movie` и `series`.",
+            "example": [
+              "movie"
+            ]
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Ручной порядок в списке: крупные премии выше."
+          },
+          "site_url": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "slug": {
             "type": "string",
-            "example": "oskar"
+            "example": "oscar"
+          },
+          "title": {
+            "type": "string",
+            "example": "Оскар"
           }
         }
       },
-      "AwardYear": {
+      "AwardCategory": {
         "type": "object",
-        "description": "Год премии: сколько в нём наград и номинаций — список годов на странице премии.",
+        "description": "Категория церемонии: номинации уже отсортированы, победители первыми.",
         "required": [
-          "year",
-          "won_count",
-          "nominated_count"
+          "slug",
+          "title",
+          "position",
+          "nominations"
         ],
         "properties": {
-          "nominated_count": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Сколько номинировались.",
-            "example": 97
+          "nominations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Nomination"
+            }
           },
-          "won_count": {
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "slug": {
+            "type": "string",
+            "example": "best-picture"
+          },
+          "title": {
+            "type": "string",
+            "example": "Лучший фильм"
+          }
+        }
+      },
+      "AwardCategoryRef": {
+        "type": "object",
+        "description": "Категория в ссылке с карточки.",
+        "required": [
+          "slug",
+          "title"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "example": "best-picture"
+          },
+          "title": {
+            "type": "string",
+            "example": "Лучший фильм"
+          }
+        }
+      },
+      "AwardDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Award"
+          },
+          {
+            "type": "object",
+            "required": [
+              "editions"
+            ],
+            "properties": {
+              "editions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AwardEditionBrief"
+                }
+              }
+            }
+          }
+        ],
+        "description": "Страница премии: она сама и её церемонии, новые сверху."
+      },
+      "AwardEditionBrief": {
+        "type": "object",
+        "description": "Церемония в сетке годов на странице премии.",
+        "required": [
+          "year",
+          "nominations_count",
+          "top"
+        ],
+        "properties": {
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "held_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "nominations_count": {
             "type": "integer",
             "format": "int64",
-            "description": "Сколько фильмов что-то получили в этом году.",
-            "example": 18
+            "example": 121
+          },
+          "number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 96
+          },
+          "season_year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Год работ, если он отличается от года церемонии: «Оскар 2024 — за 2023-й».",
+            "example": 2023
+          },
+          "top": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntitySummary"
+            },
+            "description": "3–5 победителей главной (первой по порядку) категории — превью на плитке года."
           },
           "year": {
             "type": "integer",
             "format": "int32",
             "example": 2024
+          }
+        }
+      },
+      "AwardEditionDetail": {
+        "type": "object",
+        "description": "Церемония целиком: категории и номинации.",
+        "required": [
+          "award",
+          "year",
+          "categories"
+        ],
+        "properties": {
+          "award": {
+            "$ref": "#/components/schemas/AwardRef"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AwardCategory"
+            }
+          },
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "held_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "place": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Dolby Theatre, Лос-Анджелес"
+          },
+          "season_year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "year": {
+            "type": "integer",
+            "format": "int32",
+            "example": 2024
+          }
+        }
+      },
+      "AwardListItem": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Award"
+          },
+          {
+            "type": "object",
+            "required": [
+              "editions_count"
+            ],
+            "properties": {
+              "editions_count": {
+                "type": "integer",
+                "format": "int64",
+                "example": 96
+              },
+              "first_year": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "example": 1929
+              },
+              "latest_year": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "example": 2024
+              }
+            }
+          }
+        ],
+        "description": "Премия в списке раздела: на плитке пишут «1929–2024» и число церемоний."
+      },
+      "AwardRef": {
+        "type": "object",
+        "description": "Премия в ссылке с карточки работы или человека.",
+        "required": [
+          "slug",
+          "title"
+        ],
+        "properties": {
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "oscar"
+          },
+          "title": {
+            "type": "string",
+            "example": "Оскар"
           }
         }
       },
@@ -4431,6 +5644,108 @@
           "ghost"
         ]
       },
+      "CategoryNominations": {
+        "type": "object",
+        "description": "Категория церемонии целиком — тело `PUT .../nominations`.",
+        "required": [
+          "slug",
+          "nominations"
+        ],
+        "properties": {
+          "nominations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NominationInput"
+            }
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "slug": {
+            "type": "string",
+            "example": "best-picture"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Название: с ним категория, которой у премии ещё нет, заводится на месте (путь импорта)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateAward": {
+        "type": "object",
+        "description": "Новая премия.",
+        "required": [
+          "slug",
+          "title"
+        ],
+        "properties": {
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "founded": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "full_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntityKind"
+            },
+            "description": "Типы работ премии: вкладки раздела. Пустой список — премия не попадёт ни на одну вкладку."
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "site_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "oscar"
+          },
+          "title": {
+            "type": "string",
+            "example": "Оскар"
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateBanner": {
         "type": "object",
         "required": [
@@ -4564,6 +5879,77 @@
             "type": "string"
           }
         }
+      },
+      "CreateCategory": {
+        "type": "object",
+        "description": "Новая категория премии.",
+        "required": [
+          "slug",
+          "title"
+        ],
+        "properties": {
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "slug": {
+            "type": "string",
+            "example": "best-picture"
+          },
+          "title": {
+            "type": "string",
+            "example": "Лучший фильм"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateEdition": {
+        "type": "object",
+        "description": "Церемония: год задаётся в пути при правке и в теле при создании.",
+        "required": [
+          "year"
+        ],
+        "properties": {
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "held_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "place": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "season_year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "year": {
+            "type": "integer",
+            "format": "int32",
+            "example": 2024
+          }
+        },
+        "additionalProperties": false
       },
       "CreateEntity": {
         "type": "object",
@@ -4960,6 +6346,49 @@
           }
         }
       },
+      "EntityAward": {
+        "type": "object",
+        "description": "Награда на карточке работы или в профиле человека — ссылкой на церемонию.",
+        "required": [
+          "award",
+          "year",
+          "category",
+          "won"
+        ],
+        "properties": {
+          "award": {
+            "$ref": "#/components/schemas/AwardRef"
+          },
+          "category": {
+            "$ref": "#/components/schemas/AwardCategoryRef"
+          },
+          "entity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EntitySummary",
+                "description": "Работа, за которую номинирован человек (в профиле человека): «Оппенгеймер»."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "won": {
+            "type": "boolean"
+          },
+          "year": {
+            "type": "integer",
+            "format": "int32",
+            "example": 2024
+          }
+        }
+      },
       "EntityCredit": {
         "type": "object",
         "description": "Участие человека в сущности (строка `entity_credits` + человек).",
@@ -5013,9 +6442,9 @@
               "awards": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/components/schemas/Award"
+                  "$ref": "#/components/schemas/EntityAward"
                 },
-                "description": "Награды и номинации из `metadata.awards`, полученные сверху, затем по годам (новые\nпервыми). Отдельным полем — чтобы карточке не приходилось разбирать `metadata`."
+                "description": "Награды и номинации работы (`award_nominations`): полученные сверху, затем по годам\n(новые первыми), со ссылкой на церемонию. Плоские строчки `metadata.awards` остаются в\n`metadata` — они наполняют блок «Производство и факты», пока контент не переехал."
               },
               "credits": {
                 "type": "array",
@@ -5519,6 +6948,128 @@
         },
         "additionalProperties": false
       },
+      "Nomination": {
+        "type": "object",
+        "description": "Номинация: работа и человек сразу (актёрская категория), либо просто имя.",
+        "required": [
+          "id",
+          "won"
+        ],
+        "properties": {
+          "entity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EntitySummary",
+                "description": "Работа, если она есть в каталоге и видима: фронту нужен постер."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Кого/что номинировали, если ни работы, ни человека в каталоге нет.",
+            "example": "Pixar"
+          },
+          "person": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PersonSummary",
+                "description": "Человек, если он есть в каталоге: фронту нужно фото."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "режиссёр"
+          },
+          "title_override": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Название категории в этот год, если оно отличалось от нынешнего."
+          },
+          "won": {
+            "type": "boolean"
+          }
+        }
+      },
+      "NominationInput": {
+        "type": "object",
+        "description": "Номинация в теле запроса: работа и человек — по slug (ссылки импорта) или по id.",
+        "properties": {
+          "entity_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "entity_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "oppenheimer-2023"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Кого/что номинировали, если в каталоге этого нет."
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "person_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "режиссёр"
+          },
+          "title_override": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "won": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
       "Page_AdminEntitySummary": {
         "type": "object",
         "description": "Страница списка.",
@@ -5671,7 +7222,7 @@
           }
         }
       },
-      "Page_AwardEntity": {
+      "Page_AwardListItem": {
         "type": "object",
         "description": "Страница списка.",
         "required": [
@@ -5686,86 +7237,39 @@
             "items": {
               "allOf": [
                 {
-                  "$ref": "#/components/schemas/EntitySummary"
+                  "$ref": "#/components/schemas/Award"
                 },
                 {
                   "type": "object",
                   "required": [
-                    "awards"
+                    "editions_count"
                   ],
                   "properties": {
-                    "awards": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/Award"
-                      },
-                      "description": "Все записи этой премии у фильма за выбранный год (или за все годы)."
+                    "editions_count": {
+                      "type": "integer",
+                      "format": "int64",
+                      "example": 96
+                    },
+                    "first_year": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "int32",
+                      "example": 1929
+                    },
+                    "latest_year": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "int32",
+                      "example": 2024
                     }
                   }
                 }
               ],
-              "description": "Фильм в списке премии: карточка плюс за что именно он здесь."
-            }
-          },
-          "limit": {
-            "type": "integer",
-            "format": "int64",
-            "example": 20
-          },
-          "offset": {
-            "type": "integer",
-            "format": "int64",
-            "example": 0
-          },
-          "total": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
-            "example": 137
-          }
-        }
-      },
-      "Page_AwardRef": {
-        "type": "object",
-        "description": "Страница списка.",
-        "required": [
-          "items",
-          "total",
-          "limit",
-          "offset"
-        ],
-        "properties": {
-          "items": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "description": "Премия в списке вкладки и в шапке её страницы.",
-              "required": [
-                "id",
-                "slug",
-                "name",
-                "entities_count"
-              ],
-              "properties": {
-                "entities_count": {
-                  "type": "integer",
-                  "format": "int64",
-                  "description": "Сколько фильмов каталога её упоминают (и награды, и номинации).",
-                  "example": 1240
-                },
-                "id": {
-                  "type": "string",
-                  "format": "uuid"
-                },
-                "name": {
-                  "type": "string",
-                  "example": "Оскар"
-                },
-                "slug": {
-                  "type": "string",
-                  "example": "oskar"
-                }
-              }
+              "description": "Премия в списке раздела: на плитке пишут «1929–2024» и число церемоний."
             }
           },
           "limit": {
@@ -6300,10 +7804,18 @@
             "type": "object",
             "required": [
               "credits",
+              "awards",
               "likes_count",
               "liked"
             ],
             "properties": {
+              "awards": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EntityAward"
+                },
+                "description": "Награды и номинации человека: с работой, за которую он номинирован."
+              },
               "credits": {
                 "type": "array",
                 "items": {
@@ -6483,6 +7995,22 @@
             "minimum": 0
           }
         }
+      },
+      "PutNominations": {
+        "type": "object",
+        "description": "Церемония целиком: прежние номинации заменяются этими.",
+        "required": [
+          "categories"
+        ],
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CategoryNominations"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "PutRelation": {
         "type": "object",
@@ -6737,7 +8265,8 @@
           "soon",
           "title",
           "popular",
-          "rating"
+          "rating",
+          "awarded"
         ]
       },
       "SeriesMetadata": {
@@ -7090,27 +8619,6 @@
           }
         }
       },
-      "SyncResult": {
-        "type": "object",
-        "description": "Сколько премий завелось и сколько их всего.",
-        "required": [
-          "created",
-          "total"
-        ],
-        "properties": {
-          "created": {
-            "type": "integer",
-            "format": "int64",
-            "example": 42,
-            "minimum": 0
-          },
-          "total": {
-            "type": "integer",
-            "format": "int64",
-            "example": 130
-          }
-        }
-      },
       "Tag": {
         "type": "object",
         "required": [
@@ -7202,6 +8710,78 @@
             "$ref": "#/components/schemas/TrailerProvider"
           }
         }
+      },
+      "UpdateAward": {
+        "type": "object",
+        "description": "Правка премии: переданные поля, `null` — стереть.",
+        "properties": {
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "founded": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "full_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kinds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "site_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "UpdateBanner": {
         "type": "object",
@@ -7337,6 +8917,72 @@
             ]
           }
         }
+      },
+      "UpdateCategory": {
+        "type": "object",
+        "description": "Правка категории.",
+        "properties": {
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateEdition": {
+        "type": "object",
+        "description": "Правка церемонии.",
+        "properties": {
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "held_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "place": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "season_year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
       },
       "UpdateEntity": {
         "type": "object",

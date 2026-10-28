@@ -111,6 +111,10 @@ struct SearchDoc {
     /// Slug'и страниц студий из `studios` (по названиям `metadata.studios`): фильтр
     /// `studio_slug`. Студии без строки в `studios` здесь нет.
     studio_slugs: Vec<String>,
+    /// Награды (`award_nominations`): фильтр «есть „Оскар“» (`award_slugs`), фасет «лауреаты
+    /// 2024» (`award_years`) и сортировка по числу наград (`award_wins`).
+    #[serde(flatten)]
+    awards: crate::awards::AwardFacets,
 }
 
 impl SearchDoc {
@@ -119,6 +123,7 @@ impl SearchDoc {
         tags: Vec<String>,
         ratings: Option<RatingStats>,
         studio_slugs: &HashMap<String, String>,
+        awards: crate::awards::AwardFacets,
     ) -> Self {
         let ratings = ratings.unwrap_or(RatingStats {
             average: None,
@@ -159,6 +164,7 @@ impl SearchDoc {
             nexus_ratings_count: ratings.count,
             nexus_rating_avg: ratings.average,
             studio_slugs,
+            awards,
         }
     }
 }
@@ -174,10 +180,11 @@ fn entity_settings() -> Value {
         "searchableAttributes": ["title", "original_title", "studios"],
         "filterableAttributes": [
             "kind", "tags", "year", "slug", "studios", "release_ts", "studio_slugs",
+            "award_slugs", "award_years", "award_wins", "award_nominations",
         ],
         "sortableAttributes": [
             "rank_score", "popularity", "quality", "release_ts", "title",
-            "nexus_ratings_count", "nexus_rating_avg",
+            "nexus_ratings_count", "nexus_rating_avg", "award_wins", "award_nominations",
         ],
         // Подсказки студий без запроса — самые частые.
         "faceting": { "sortFacetValuesBy": { "studios": "count" } },
@@ -260,12 +267,14 @@ async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchD
             .await?
             .into_iter()
             .collect();
+    let mut awards = crate::awards::facets_of(db, &ids).await?;
     Ok(entities
         .into_iter()
         .map(|entity| {
             let tags = tags.remove(&entity.id).unwrap_or_default();
             let ratings = ratings.remove(&entity.id);
-            SearchDoc::new(entity, tags, ratings, &studio_slugs)
+            let awards = awards.remove(&entity.id).unwrap_or_default();
+            SearchDoc::new(entity, tags, ratings, &studio_slugs, awards)
         })
         .collect())
 }
@@ -585,11 +594,6 @@ pub async fn reindex_locked(
             tracing::info!(created, elapsed = ?studios_started.elapsed(), "studios synced")
         }
         Err(error) => tracing::warn!(%error, "studios sync failed"),
-    }
-    // Там же — справочник премий для вкладки «Награды»: новые названия в `metadata.awards`.
-    match crate::awards::sync(&state.db).await {
-        Ok(created) => tracing::info!(created, "awards synced"),
-        Err(error) => tracing::warn!(%error, "awards sync failed"),
     }
     let indexed = match fill(state, &version, report).await {
         Ok(indexed) => indexed,
@@ -1018,11 +1022,13 @@ pub(crate) fn unavailable() -> AppError {
 ///
 /// Фильтры (через AND): `kind`, `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон
 /// включительно), `studio` (точное название, без учёта регистра), `person` (slug участника) и
-/// `role` (его роль в этой сущности; без `person` — 400).
+/// `role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`
+/// (год церемонии) и `awarded` (только с наградой).
 ///
 /// Сортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу
 /// «Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только
-/// вышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию.
+/// вышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;
+/// `awarded` — больше наград сверху.
 ///
 /// Индекс обновляется после изменений в админке с задержкой в доли секунды.
 #[utoipa::path(
@@ -1069,6 +1075,7 @@ pub async fn search(
         Some(SearchSort::Title) => Some("title:asc"),
         Some(SearchSort::Popular) => Some("nexus_ratings_count:desc"),
         Some(SearchSort::Rating) => Some("nexus_rating_avg:desc"),
+        Some(SearchSort::Awarded) => Some("award_wins:desc"),
         None => None,
     };
     let mut body = json!({
@@ -1220,6 +1227,22 @@ fn filters_of(query: &SearchQuery) -> AppResult<Vec<String>> {
         // Проверенный slug безопасно подставлять в строку фильтра.
         validate::slug("studio_slug", studio)?;
         filters.push(format!("studio_slugs = \"{studio}\""));
+    }
+    if let Some(award) = &query.award {
+        // Проверенный slug безопасно подставлять в строку фильтра.
+        validate::slug("award", award)?;
+        filters.push(format!("award_slugs = \"{award}\""));
+    }
+    if let Some(year) = query.award_year {
+        check_year(year)?;
+        filters.push(format!("award_years = {year}"));
+    }
+    if let Some(awarded) = query.awarded {
+        filters.push(if awarded {
+            "award_wins > 0".to_owned()
+        } else {
+            "award_wins = 0".to_owned()
+        });
     }
     match (&query.person, &query.role) {
         (None, Some(_)) => {

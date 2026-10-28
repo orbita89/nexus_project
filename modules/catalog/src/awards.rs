@@ -1,121 +1,230 @@
-//! Вкладка «Награды»: список премий, годы премии и фильмы премии.
+//! Раздел «Награды»: премии, церемонии по годам, номинации по категориям.
 //!
-//! Награды фильма лежат в его же строке (`entities.metadata.awards`: `{award, category, title,
-//! year, won}`) — правило Flat First, таблицы связей нет. Таблица `awards` — только справочник
-//! премий: slug для URL, название и сколько фильмов её упоминают.
+//! Модель реляционная (`awards`, `award_editions`, `award_categories`, `award_nominations`):
+//! награда — это связь «церемония ↔ категория ↔ работа ↔ человек», из плоских строчек
+//! `entities.metadata.awards` её не собрать. Строчки в метаданных остаются как были: их показывает
+//! блок «Производство и факты», пока контент не переехал на эту модель.
 //!
-//! Фильмы премии ищутся контейнментом по GIN-индексу `metadata`, как фильмы студии:
-//! `metadata @> '{"awards": [{"award": "Оскар"}]}'`. Год и «получена / номинация» — тем же
-//! контейнментом с добавленными ключами, поэтому фильтры не стоят ни одного лишнего индекса.
-//!
-//! Строки создаёт [`sync`]: при перестройке поиска, после правок в админке и вручную
-//! (`POST /admin/awards/sync` — им пользуется импорт из Wikidata).
+//! Чтение — без авторизации (`GET /awards`, `/awards/{slug}`, `/awards/{slug}/{year}`), правки —
+//! в [`crate::admin::awards`]. Карточка работы и профиль человека получают свои награды отсюда же
+//! ([`entity_awards`], [`person_awards`]), фасеты поиска — [`facets_of`].
 
-use crate::archive::enrich::slugify;
-use crate::models::{EntitySummary, Page, VISIBLE};
-use crate::models::{ListAwardEntitiesQuery, ListAwardsQuery, ENTITY_SUMMARY_COLUMNS};
+use crate::models::{
+    page_bounds, EntityKind, EntitySummary, Page, PersonSummary, ENTITY_SUMMARY_COLUMNS, VISIBLE,
+};
 use axum::extract::State;
 use axum::Json;
-use serde::Serialize;
-use serde_json::json;
+use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
 use shared::error::ErrorBody;
 use shared::extract::{Path, Query};
-use shared::{AdminUser, AppError, AppResult, AppState};
-use sqlx::PgPool;
-use utoipa::ToSchema;
+use shared::{AppError, AppResult, AppState};
+use sqlx::PgExecutor;
+use std::collections::HashMap;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-/// Вставка новых премий пачками.
-const BATCH: usize = 1_000;
+/// Сколько победителей главной категории показывать в превью церемонии.
+const TOP_WINNERS: usize = 5;
 
-/// Премия в списке вкладки и в шапке её страницы.
-#[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
-pub struct AwardRef {
+pub const AWARD_COLUMNS: &str = "a.id, a.slug, a.title, a.full_title, a.kinds, a.country, \
+     a.founded, a.description, a.logo_url, a.site_url, a.position";
+
+/// Премия целиком (строка `awards`).
+#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+pub struct Award {
     pub id: Uuid,
-    #[schema(example = "oskar")]
+    #[schema(example = "oscar")]
     pub slug: String,
     #[schema(example = "Оскар")]
-    pub name: String,
-    /// Сколько фильмов каталога её упоминают (и награды, и номинации).
-    #[schema(example = 1240)]
-    pub entities_count: i64,
+    pub title: String,
+    #[schema(example = "Премия Американской киноакадемии")]
+    pub full_title: Option<String>,
+    /// Типы работ премии: по ним вкладки раздела. У «Золотого глобуса» — `movie` и `series`.
+    #[schema(example = json!(["movie"]))]
+    pub kinds: Vec<String>,
+    #[schema(example = "США")]
+    pub country: Option<String>,
+    #[schema(example = 1929)]
+    pub founded: Option<i32>,
+    pub description: Option<String>,
+    pub logo_url: Option<String>,
+    pub site_url: Option<String>,
+    /// Ручной порядок в списке: крупные премии выше.
+    pub position: i32,
 }
 
-/// Год премии: сколько в нём наград и номинаций — список годов на странице премии.
+/// Премия в списке раздела: на плитке пишут «1929–2024» и число церемоний.
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
-pub struct AwardYear {
+pub struct AwardListItem {
+    #[serde(flatten)]
+    #[sqlx(flatten)]
+    pub award: Award,
+    #[schema(example = 96)]
+    pub editions_count: i64,
+    #[schema(example = 1929)]
+    pub first_year: Option<i32>,
     #[schema(example = 2024)]
-    pub year: i32,
-    /// Сколько фильмов что-то получили в этом году.
-    #[schema(example = 18)]
-    pub won_count: i64,
-    /// Сколько номинировались.
-    #[schema(example = 97)]
-    pub nominated_count: i64,
+    pub latest_year: Option<i32>,
 }
 
-/// Страница премии: она сама и её годы, новые сверху.
+/// Премия в ссылке с карточки работы или человека.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
+pub struct AwardRef {
+    #[schema(example = "oscar")]
+    pub slug: String,
+    #[schema(example = "Оскар")]
+    pub title: String,
+    pub logo_url: Option<String>,
+}
+
+/// Страница премии: она сама и её церемонии, новые сверху.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AwardDetail {
     #[serde(flatten)]
-    pub award: AwardRef,
-    pub years: Vec<AwardYear>,
+    pub award: Award,
+    pub editions: Vec<AwardEditionBrief>,
 }
 
-/// Фильм в списке премии: карточка плюс за что именно он здесь.
+/// Церемония в сетке годов на странице премии.
 #[derive(Debug, Serialize, ToSchema)]
-pub struct AwardEntity {
-    #[serde(flatten)]
-    pub entity: EntitySummary,
-    /// Все записи этой премии у фильма за выбранный год (или за все годы).
-    pub awards: Vec<crate::metadata::Award>,
+pub struct AwardEditionBrief {
+    #[schema(example = 2024)]
+    pub year: i32,
+    /// Год работ, если он отличается от года церемонии: «Оскар 2024 — за 2023-й».
+    #[schema(example = 2023)]
+    pub season_year: Option<i32>,
+    #[schema(example = 96)]
+    pub number: Option<i32>,
+    pub held_on: Option<NaiveDate>,
+    pub cover_url: Option<String>,
+    #[schema(example = 121)]
+    pub nominations_count: i64,
+    /// 3–5 победителей главной (первой по порядку) категории — превью на плитке года.
+    pub top: Vec<EntitySummary>,
 }
 
-/// Строка списка премии: карточка плюс сырые награды фильма — из них отбираются записи премии.
-#[derive(sqlx::FromRow)]
-struct AwardEntityRow {
-    metadata: serde_json::Value,
-    #[sqlx(flatten)]
-    entity: EntitySummary,
+/// Церемония целиком: категории и номинации.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AwardEditionDetail {
+    pub award: AwardRef,
+    #[schema(example = 2024)]
+    pub year: i32,
+    pub season_year: Option<i32>,
+    pub number: Option<i32>,
+    pub held_on: Option<NaiveDate>,
+    #[schema(example = "Dolby Theatre, Лос-Анджелес")]
+    pub place: Option<String>,
+    pub cover_url: Option<String>,
+    pub categories: Vec<AwardCategory>,
 }
 
-/// Условие «у фильма есть запись этой премии»: контейнмент по GIN-индексу `metadata`.
-fn filter(name: &str, query: &ListAwardEntitiesQuery) -> serde_json::Value {
-    let mut entry = json!({ "award": name });
-    if let Some(year) = query.year {
-        entry["year"] = json!(year);
-    }
-    if let Some(won) = query.won {
-        entry["won"] = json!(won);
-    }
-    json!({ "awards": [entry] })
+/// Категория церемонии: номинации уже отсортированы, победители первыми.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AwardCategory {
+    #[schema(example = "best-picture")]
+    pub slug: String,
+    #[schema(example = "Лучший фильм")]
+    pub title: String,
+    pub position: i32,
+    pub nominations: Vec<Nomination>,
 }
 
-/// Список премий: сначала те, у кого больше фильмов.
+/// Номинация: работа и человек сразу (актёрская категория), либо просто имя.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Nomination {
+    pub id: Uuid,
+    /// Работа, если она есть в каталоге и видима: фронту нужен постер.
+    pub entity: Option<EntitySummary>,
+    /// Человек, если он есть в каталоге: фронту нужно фото.
+    pub person: Option<PersonSummary>,
+    /// Кого/что номинировали, если ни работы, ни человека в каталоге нет.
+    #[schema(example = "Pixar")]
+    pub name: Option<String>,
+    #[schema(example = "режиссёр")]
+    pub role: Option<String>,
+    /// Название категории в этот год, если оно отличалось от нынешнего.
+    pub title_override: Option<String>,
+    pub won: bool,
+}
+
+/// Награда на карточке работы или в профиле человека — ссылкой на церемонию.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EntityAward {
+    pub award: AwardRef,
+    #[schema(example = 2024)]
+    pub year: i32,
+    pub category: AwardCategoryRef,
+    /// Работа, за которую номинирован человек (в профиле человека): «Оппенгеймер».
+    pub entity: Option<EntitySummary>,
+    pub role: Option<String>,
+    pub won: bool,
+}
+
+/// Категория в ссылке с карточки.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AwardCategoryRef {
+    #[schema(example = "best-picture")]
+    pub slug: String,
+    #[schema(example = "Лучший фильм")]
+    pub title: String,
+}
+
+/// Фильтры списка премий.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListAwardsQuery {
+    /// Вкладка раздела: только премии этого типа работ.
+    pub kind: Option<EntityKind>,
+    /// Поиск по названию (полному тоже).
+    pub q: Option<String>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
+/// Список премий: ручной порядок, затем алфавит. `?kind=` — вкладки раздела.
 #[utoipa::path(
     get, operation_id = "list_awards", path = "/awards", tag = "catalog",
     params(ListAwardsQuery),
     responses(
-        (status = 200, description = "Страница премий", body = Page<AwardRef>),
+        (status = 200, description = "Страница премий", body = Page<AwardListItem>),
         (status = 400, description = "Неверный параметр", body = ErrorBody),
     )
 )]
 pub async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListAwardsQuery>,
-) -> AppResult<Json<Page<AwardRef>>> {
-    let (limit, offset) = crate::models::page_bounds(query.limit, query.offset);
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM awards WHERE entities_count > 0")
+) -> AppResult<Json<Page<AwardListItem>>> {
+    let (limit, offset) = page_bounds(query.limit, query.offset);
+    let kind = query.kind.map(|kind| kind.as_str().to_owned());
+    let pattern = query.q.as_deref().and_then(crate::entities::like_pattern);
+    const WHERE: &str = "($1::text IS NULL OR a.kinds @> ARRAY[$1]::text[])
+         AND ($2::text IS NULL OR a.title ILIKE $2 OR a.full_title ILIKE $2)";
+
+    let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM awards a WHERE {WHERE}"))
+        .bind(&kind)
+        .bind(&pattern)
         .fetch_one(&state.db)
         .await?;
-    let items: Vec<AwardRef> = sqlx::query_as(
-        "SELECT id, slug, name, entities_count FROM awards WHERE entities_count > 0
-         ORDER BY entities_count DESC, name LIMIT $1 OFFSET $2",
-    )
+    let items: Vec<AwardListItem> = sqlx::query_as(&format!(
+        "SELECT {AWARD_COLUMNS},
+                coalesce(e.count, 0) AS editions_count, e.first_year, e.latest_year
+           FROM awards a
+           LEFT JOIN LATERAL (SELECT count(*) AS count, min(year) AS first_year,
+                                     max(year) AS latest_year
+                                FROM award_editions ed WHERE ed.award_id = a.id) e ON true
+          WHERE {WHERE}
+          ORDER BY a.position DESC, a.title, a.id LIMIT $3 OFFSET $4"
+    ))
+    .bind(&kind)
+    .bind(&pattern)
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
+
     Ok(Json(Page {
         items,
         total,
@@ -124,12 +233,12 @@ pub async fn list(
     }))
 }
 
-/// Премия и её годы: по ним на вкладке выбирают год.
+/// Премия и её церемонии: по ним выбирают год.
 #[utoipa::path(
     get, operation_id = "get_award", path = "/awards/{slug}", tag = "catalog",
-    params(("slug" = String, Path, description = "slug премии", example = "oskar")),
+    params(("slug" = String, Path, description = "slug премии", example = "oscar")),
     responses(
-        (status = 200, description = "Премия с годами", body = AwardDetail),
+        (status = 200, description = "Премия с церемониями", body = AwardDetail),
         (status = 404, description = "Нет такой премии", body = ErrorBody),
     )
 )]
@@ -137,189 +246,395 @@ pub async fn get(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> AppResult<Json<AwardDetail>> {
-    let award: Option<AwardRef> =
-        sqlx::query_as("SELECT id, slug, name, entities_count FROM awards WHERE slug = $1")
-            .bind(&slug)
-            .fetch_optional(&state.db)
-            .await?;
-    let award = award.ok_or(AppError::NotFound)?;
+    let award = by_slug(&state.db, &slug).await?;
 
-    // Годы собираются разворачиванием массива наград: отбор фильмов идёт по GIN-индексу,
-    // разворачивается только то, что уже отобрано.
-    let years: Vec<AwardYear> = sqlx::query_as(&format!(
-        "SELECT (a->>'year')::int AS year,
-                count(DISTINCT e.id) FILTER (WHERE (a->>'won')::boolean) AS won_count,
-                count(DISTINCT e.id) FILTER (WHERE NOT (a->>'won')::boolean) AS nominated_count
-           FROM entities e, jsonb_array_elements(e.metadata -> 'awards') a
-          WHERE e.metadata @> $1::jsonb AND {VISIBLE}
-            AND a->>'award' = $2 AND a->>'year' IS NOT NULL
-          GROUP BY 1 ORDER BY 1 DESC"
-    ))
-    .bind(json!({ "awards": [{ "award": award.name }] }))
-    .bind(&award.name)
-    .fetch_all(&state.db)
-    .await?;
+    #[derive(sqlx::FromRow)]
+    struct EditionRow {
+        id: Uuid,
+        year: i32,
+        season_year: Option<i32>,
+        number: Option<i32>,
+        held_on: Option<NaiveDate>,
+        cover_url: Option<String>,
+        nominations_count: i64,
+    }
 
-    Ok(Json(AwardDetail { award, years }))
-}
-
-/// Фильмы премии: `?year=` и `?won=` сужают до «что получило “Оскар” в 2024-м».
-#[utoipa::path(
-    get, operation_id = "list_award_entities", path = "/awards/{slug}/entities", tag = "catalog",
-    params(
-        ("slug" = String, Path, description = "slug премии", example = "oskar"),
-        ListAwardEntitiesQuery,
-    ),
-    responses(
-        (status = 200, description = "Страница фильмов", body = Page<AwardEntity>),
-        (status = 400, description = "Неверный параметр", body = ErrorBody),
-        (status = 404, description = "Нет такой премии", body = ErrorBody),
+    let rows: Vec<EditionRow> = sqlx::query_as(
+        "SELECT ed.id, ed.year, ed.season_year, ed.number, ed.held_on, ed.cover_url,
+                (SELECT count(*) FROM award_nominations n WHERE n.edition_id = ed.id)
+                    AS nominations_count
+           FROM award_editions ed WHERE ed.award_id = $1 ORDER BY ed.year DESC",
     )
-)]
-pub async fn entities(
-    State(state): State<AppState>,
-    Path(slug): Path<String>,
-    Query(query): Query<ListAwardEntitiesQuery>,
-) -> AppResult<Json<Page<AwardEntity>>> {
-    let name: Option<String> = sqlx::query_scalar("SELECT name FROM awards WHERE slug = $1")
-        .bind(&slug)
-        .fetch_optional(&state.db)
-        .await?;
-    let name = name.ok_or(AppError::NotFound)?;
-    let (limit, offset) = crate::models::page_bounds(query.limit, query.offset);
-    let contains = filter(&name, &query);
-
-    let total: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM entities e WHERE e.metadata @> $1::jsonb AND {VISIBLE}"
-    ))
-    .bind(&contains)
-    .fetch_one(&state.db)
-    .await?;
-    let rows: Vec<AwardEntityRow> = sqlx::query_as(&format!(
-        "SELECT e.metadata, {ENTITY_SUMMARY_COLUMNS} FROM entities e
-          WHERE e.metadata @> $1::jsonb AND {VISIBLE}
-          ORDER BY e.release_date DESC NULLS LAST, e.title, e.id LIMIT $2 OFFSET $3"
-    ))
-    .bind(&contains)
-    .bind(limit)
-    .bind(offset)
+    .bind(award.id)
     .fetch_all(&state.db)
     .await?;
 
-    let items = rows
+    let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    let mut top = top_winners(&state.db, &ids).await?;
+    let editions = rows
         .into_iter()
-        .map(|row| AwardEntity {
-            awards: crate::metadata::awards_of(&row.metadata)
-                .into_iter()
-                .filter(|award| {
-                    award.award.as_deref() == Some(name.as_str())
-                        && query.year.is_none_or(|year| award.year == Some(year))
-                        && query.won.is_none_or(|won| award.won == won)
-                })
-                .collect(),
-            entity: row.entity,
+        .map(|row| AwardEditionBrief {
+            year: row.year,
+            season_year: row.season_year,
+            number: row.number,
+            held_on: row.held_on,
+            cover_url: row.cover_url,
+            nominations_count: row.nominations_count,
+            top: top.remove(&row.id).unwrap_or_default(),
         })
         .collect();
 
-    Ok(Json(Page {
-        items,
-        total,
-        limit,
-        offset,
-    }))
+    Ok(Json(AwardDetail { award, editions }))
 }
 
-/// Пересобрать справочник премий: новые названия из `metadata.awards[].award` и счётчики.
-#[utoipa::path(
-    post, operation_id = "admin_sync_awards", path = "/admin/awards/sync", tag = "catalog-admin",
-    security(("bearer" = [])),
-    responses(
-        (status = 200, description = "Справочник обновлён", body = SyncResult),
-        (status = 401, description = "Нет токена", body = ErrorBody),
-        (status = 403, description = "Нужна роль admin", body = ErrorBody),
-    )
-)]
-pub async fn sync_handler(
-    State(state): State<AppState>,
-    AdminUser(admin): AdminUser,
-) -> AppResult<Json<SyncResult>> {
-    let created = sync(&state.db).await?;
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM awards")
-        .fetch_one(&state.db)
-        .await?;
-    tracing::info!(admin_id = %admin.id, created, total, "awards synced by admin");
-    Ok(Json(SyncResult { created, total }))
-}
-
-/// Сколько премий завелось и сколько их всего.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SyncResult {
-    #[schema(example = 42)]
-    pub created: u64,
-    #[schema(example = 130)]
-    pub total: i64,
-}
-
-/// Заводит премии, которых ещё нет, и пересчитывает счётчики фильмов. Возвращает, сколько
-/// завелось. Зовётся при перестройке поиска, после правок в админке и из `/admin/awards/sync`.
-pub async fn sync(db: &PgPool) -> sqlx::Result<u64> {
-    let names: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT a->>'award' FROM entities e,
-                jsonb_array_elements(e.metadata -> 'awards') a
-          WHERE jsonb_typeof(e.metadata -> 'awards') = 'array' AND a->>'award' IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM awards w WHERE w.name = a->>'award')",
-    )
-    .fetch_all(db)
-    .await?;
-    let names: Vec<String> = names.into_iter().filter(|n| !n.trim().is_empty()).collect();
-
-    let mut created = 0;
-    for chunk in names.chunks(BATCH) {
-        // slug занят другой премией (разные названия сворачиваются в один slug) — с суффиксом.
-        let slugs: Vec<String> = chunk
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                let slug = slugify(name);
-                if slug.is_empty() {
-                    format!("award-{i}")
-                } else {
-                    slug
-                }
-            })
-            .collect();
-        created += sqlx::query(
-            "INSERT INTO awards (slug, name)
-             SELECT CASE WHEN EXISTS (SELECT 1 FROM awards w WHERE w.slug = u.slug)
-                         THEN u.slug || '-' || substr(md5(u.name), 1, 6) ELSE u.slug END,
-                    u.name
-               FROM unnest($1::text[], $2::text[]) AS u(slug, name)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(&slugs)
-        .bind(chunk)
-        .execute(db)
-        .await?
-        .rows_affected();
+/// Победители главной категории церемоний одним запросом: по [`TOP_WINNERS`] на церемонию.
+async fn top_winners(
+    db: impl PgExecutor<'_>,
+    editions: &[Uuid],
+) -> AppResult<HashMap<Uuid, Vec<EntitySummary>>> {
+    #[derive(sqlx::FromRow)]
+    struct TopRow {
+        edition_id: Uuid,
+        #[sqlx(flatten)]
+        entity: EntitySummary,
     }
 
-    // Счётчики: один проход по наградам всех фильмов.
-    sqlx::query(
-        "UPDATE awards w SET entities_count = COALESCE(c.n, 0)
-           FROM (SELECT w2.id, count(DISTINCT e.id) AS n
-                   FROM awards w2
-                   LEFT JOIN entities e
-                     ON e.metadata @> jsonb_build_object('awards',
-                            jsonb_build_array(jsonb_build_object('award', w2.name)))
-                  GROUP BY w2.id) c
-          WHERE c.id = w.id AND w.entities_count <> COALESCE(c.n, 0)",
-    )
-    .execute(db)
+    let rows: Vec<TopRow> = sqlx::query_as(&format!(
+        "SELECT t.edition_id, {ENTITY_SUMMARY_COLUMNS} FROM (
+             SELECT n.edition_id, n.entity_id,
+                    row_number() OVER (PARTITION BY n.edition_id
+                                       ORDER BY c.position, c.title, n.position, n.id) AS rn
+               FROM award_nominations n
+               JOIN award_categories c ON c.id = n.category_id
+              WHERE n.edition_id = ANY($1) AND n.won AND n.entity_id IS NOT NULL
+         ) t JOIN entities e ON e.id = t.entity_id
+          WHERE t.rn <= $2 AND {VISIBLE}
+          ORDER BY t.rn"
+    ))
+    .bind(editions)
+    .bind(TOP_WINNERS as i64)
+    .fetch_all(db)
     .await?;
-    // Премии, которых больше нет ни у одного фильма (название поправили, фильм ушёл в архив):
-    // справочник выводится из `metadata`, поэтому пустые строки в нём только мешают.
-    sqlx::query("DELETE FROM awards WHERE entities_count = 0")
-        .execute(db)
+
+    let mut by_edition: HashMap<Uuid, Vec<EntitySummary>> = HashMap::new();
+    for row in rows {
+        by_edition
+            .entry(row.edition_id)
+            .or_default()
+            .push(row.entity);
+    }
+    Ok(by_edition)
+}
+
+/// Церемония: категории по порядку, в каждой победители первыми.
+#[utoipa::path(
+    get, operation_id = "get_award_edition", path = "/awards/{slug}/{year}", tag = "catalog",
+    params(
+        ("slug" = String, Path, description = "slug премии", example = "oscar"),
+        ("year" = i32, Path, description = "год церемонии", example = 2024),
+    ),
+    responses(
+        (status = 200, description = "Церемония", body = AwardEditionDetail),
+        (status = 404, description = "Нет такой премии или года", body = ErrorBody),
+    )
+)]
+pub async fn edition(
+    State(state): State<AppState>,
+    Path((slug, year)): Path<(String, i32)>,
+) -> AppResult<Json<AwardEditionDetail>> {
+    Ok(Json(edition_detail(&state.db, &slug, year).await?))
+}
+
+/// Церемония из БД: публичное чтение и ответы админки.
+pub(crate) async fn edition_detail(
+    db: impl PgExecutor<'_> + Copy,
+    slug: &str,
+    year: i32,
+) -> AppResult<AwardEditionDetail> {
+    #[derive(sqlx::FromRow)]
+    struct EditionRow {
+        id: Uuid,
+        year: i32,
+        season_year: Option<i32>,
+        number: Option<i32>,
+        held_on: Option<NaiveDate>,
+        place: Option<String>,
+        cover_url: Option<String>,
+        award_slug: String,
+        award_title: String,
+        award_logo_url: Option<String>,
+    }
+
+    let row: Option<EditionRow> = sqlx::query_as(
+        "SELECT ed.id, ed.year, ed.season_year, ed.number, ed.held_on, ed.place, ed.cover_url,
+                a.slug AS award_slug, a.title AS award_title, a.logo_url AS award_logo_url
+           FROM award_editions ed JOIN awards a ON a.id = ed.award_id
+          WHERE a.slug = $1 AND ed.year = $2",
+    )
+    .bind(slug)
+    .bind(year)
+    .fetch_optional(db)
+    .await?;
+    let row = row.ok_or(AppError::NotFound)?;
+
+    Ok(AwardEditionDetail {
+        award: AwardRef {
+            slug: row.award_slug,
+            title: row.award_title,
+            logo_url: row.award_logo_url,
+        },
+        year: row.year,
+        season_year: row.season_year,
+        number: row.number,
+        held_on: row.held_on,
+        place: row.place,
+        cover_url: row.cover_url,
+        categories: categories(db, row.id).await?,
+    })
+}
+
+/// Номинация церемонии: ссылки на работу и человека разворачиваются пачкой.
+#[derive(sqlx::FromRow)]
+struct NominationRow {
+    id: Uuid,
+    entity_id: Option<Uuid>,
+    person_id: Option<Uuid>,
+    name: Option<String>,
+    role: Option<String>,
+    title_override: Option<String>,
+    won: bool,
+    category_slug: String,
+    category_title: String,
+    category_position: i32,
+}
+
+/// Категории церемонии с номинациями: один запрос на номинации, по одному на работы и людей.
+async fn categories(
+    db: impl PgExecutor<'_> + Copy,
+    edition: Uuid,
+) -> AppResult<Vec<AwardCategory>> {
+    let rows: Vec<NominationRow> = sqlx::query_as(
+        "SELECT n.id, n.entity_id, n.person_id, n.name, n.role, n.title_override, n.won,
+                c.slug AS category_slug, c.title AS category_title, c.position AS category_position
+           FROM award_nominations n JOIN award_categories c ON c.id = n.category_id
+          WHERE n.edition_id = $1
+          ORDER BY c.position, c.title, n.won DESC, n.position, n.id",
+    )
+    .bind(edition)
+    .fetch_all(db)
+    .await?;
+
+    let entities = entity_summaries(db, &ids_of(rows.iter().map(|row| row.entity_id))).await?;
+    let people = person_summaries(db, &ids_of(rows.iter().map(|row| row.person_id))).await?;
+
+    let mut categories: Vec<AwardCategory> = Vec::new();
+    for row in rows {
+        let nomination = Nomination {
+            id: row.id,
+            entity: row.entity_id.and_then(|id| entities.get(&id).cloned()),
+            person: row.person_id.and_then(|id| people.get(&id).cloned()),
+            name: row.name,
+            role: row.role,
+            title_override: row.title_override,
+            won: row.won,
+        };
+        match categories.last_mut() {
+            Some(last) if last.slug == row.category_slug => last.nominations.push(nomination),
+            _ => categories.push(AwardCategory {
+                slug: row.category_slug,
+                title: row.category_title,
+                position: row.category_position,
+                nominations: vec![nomination],
+            }),
+        }
+    }
+    Ok(categories)
+}
+
+fn ids_of(ids: impl Iterator<Item = Option<Uuid>>) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> = ids.flatten().collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Карточки работ по id — только видимые: скрытую номинация покажет именем.
+async fn entity_summaries(
+    db: impl PgExecutor<'_>,
+    ids: &[Uuid],
+) -> AppResult<HashMap<Uuid, EntitySummary>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<EntitySummary> = sqlx::query_as(&format!(
+        "SELECT {ENTITY_SUMMARY_COLUMNS} FROM entities e WHERE e.id = ANY($1) AND {VISIBLE}"
+    ))
+    .bind(ids)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(|entity| (entity.id, entity)).collect())
+}
+
+async fn person_summaries(
+    db: impl PgExecutor<'_>,
+    ids: &[Uuid],
+) -> AppResult<HashMap<Uuid, PersonSummary>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<PersonSummary> = sqlx::query_as(
+        "SELECT p.id, p.slug, p.full_name, p.birth_date, p.photo_url FROM people p
+          WHERE p.id = ANY($1)",
+    )
+    .bind(ids)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(|person| (person.id, person)).collect())
+}
+
+/// Премия по slug или 404.
+pub(crate) async fn by_slug(db: impl PgExecutor<'_>, slug: &str) -> AppResult<Award> {
+    let award: Option<Award> = sqlx::query_as(&format!(
+        "SELECT {AWARD_COLUMNS} FROM awards a WHERE a.slug = $1"
+    ))
+    .bind(slug)
+    .fetch_optional(db)
+    .await?;
+    award.ok_or(AppError::NotFound)
+}
+
+// ------------------------------------------------- награды работы и человека
+
+/// Строка награды для карточки: общая для работ и людей.
+#[derive(sqlx::FromRow)]
+struct EntityAwardRow {
+    owner: Uuid,
+    entity_id: Option<Uuid>,
+    year: i32,
+    role: Option<String>,
+    won: bool,
+    award_slug: String,
+    award_title: String,
+    award_logo_url: Option<String>,
+    category_slug: String,
+    category_title: String,
+}
+
+/// Общая часть запроса наград: `{owner}` — чьи они, `n.entity_id` / `n.person_id`.
+const AWARDS_OF: &str = "SELECT {owner} AS owner, n.entity_id, ed.year, n.role, n.won,
+            a.slug AS award_slug, a.title AS award_title, a.logo_url AS award_logo_url,
+            coalesce(n.title_override, c.title) AS category_title, c.slug AS category_slug
+       FROM award_nominations n
+       JOIN award_editions ed ON ed.id = n.edition_id
+       JOIN awards a ON a.id = ed.award_id
+       JOIN award_categories c ON c.id = n.category_id
+      WHERE {owner} = ANY($1)
+      ORDER BY n.won DESC, ed.year DESC, a.position DESC, c.position";
+
+/// Награды работ `ids`: полученные сверху, затем по годам (новые первыми).
+pub(crate) async fn entity_awards(
+    db: impl PgExecutor<'_> + Copy,
+    ids: &[Uuid],
+) -> AppResult<HashMap<Uuid, Vec<EntityAward>>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<EntityAwardRow> = sqlx::query_as(&AWARDS_OF.replace("{owner}", "n.entity_id"))
+        .bind(ids)
+        .fetch_all(db)
         .await?;
-    Ok(created)
+    Ok(group(rows, &HashMap::new()))
+}
+
+/// Награды людей `ids`: с работой, за которую номинирован, — профиль показывает её строкой.
+pub(crate) async fn person_awards(
+    db: impl PgExecutor<'_> + Copy,
+    ids: &[Uuid],
+) -> AppResult<HashMap<Uuid, Vec<EntityAward>>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<EntityAwardRow> = sqlx::query_as(&AWARDS_OF.replace("{owner}", "n.person_id"))
+        .bind(ids)
+        .fetch_all(db)
+        .await?;
+    let entities = entity_summaries(db, &ids_of(rows.iter().map(|row| row.entity_id))).await?;
+    Ok(group(rows, &entities))
+}
+
+fn group(
+    rows: Vec<EntityAwardRow>,
+    entities: &HashMap<Uuid, EntitySummary>,
+) -> HashMap<Uuid, Vec<EntityAward>> {
+    let mut by_owner: HashMap<Uuid, Vec<EntityAward>> = HashMap::new();
+    for row in rows {
+        by_owner.entry(row.owner).or_default().push(EntityAward {
+            award: AwardRef {
+                slug: row.award_slug,
+                title: row.award_title,
+                logo_url: row.award_logo_url,
+            },
+            year: row.year,
+            category: AwardCategoryRef {
+                slug: row.category_slug,
+                title: row.category_title,
+            },
+            entity: row.entity_id.and_then(|id| entities.get(&id).cloned()),
+            role: row.role,
+            won: row.won,
+        });
+    }
+    by_owner
+}
+
+// ----------------------------------------------------------- фасеты поиска
+
+/// Фасеты наград работы для документа Meilisearch: фильтр «есть „Оскар“» и сортировка по числу
+/// наград идут только индексом.
+#[derive(Debug, Default, Clone, Serialize, sqlx::FromRow)]
+pub struct AwardFacets {
+    /// Slug'и премий работы: фильтр `award`.
+    pub award_slugs: Vec<String>,
+    /// Сколько наград получено.
+    pub award_wins: i64,
+    /// Сколько всего номинаций (включая победы).
+    pub award_nominations: i64,
+    /// Годы церемоний: фасет «лауреаты 2024».
+    pub award_years: Vec<i32>,
+}
+
+/// Фасеты наград для пачки работ: один запрос на пачку.
+pub(crate) async fn facets_of(
+    db: impl PgExecutor<'_>,
+    ids: &[Uuid],
+) -> sqlx::Result<HashMap<Uuid, AwardFacets>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    #[derive(sqlx::FromRow)]
+    struct FacetRow {
+        entity_id: Uuid,
+        #[sqlx(flatten)]
+        facets: AwardFacets,
+    }
+
+    let rows: Vec<FacetRow> = sqlx::query_as(
+        "SELECT n.entity_id,
+                array_agg(DISTINCT a.slug) AS award_slugs,
+                array_agg(DISTINCT ed.year) AS award_years,
+                count(*) FILTER (WHERE n.won) AS award_wins,
+                count(*) AS award_nominations
+           FROM award_nominations n
+           JOIN award_editions ed ON ed.id = n.edition_id
+           JOIN awards a ON a.id = ed.award_id
+          WHERE n.entity_id = ANY($1)
+          GROUP BY n.entity_id",
+    )
+    .bind(ids)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.entity_id, row.facets))
+        .collect())
 }

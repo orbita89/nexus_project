@@ -366,6 +366,7 @@ pub(crate) async fn details(
         .flat_map(|e| crate::studios::names_of(&e.metadata))
         .collect();
     let studios = crate::studios::refs(db, &names).await?;
+    let mut awards = crate::awards::entity_awards(db, &ids).await?;
     Ok(entities
         .into_iter()
         .map(|entity| EntityDetail {
@@ -376,7 +377,7 @@ pub(crate) async fn details(
             tags: tags_by.remove(&entity.id).unwrap_or_default(),
             credits: credits_by.remove(&entity.id).unwrap_or_default(),
             related: related_by.remove(&entity.id).unwrap_or_default(),
-            awards: crate::metadata::awards_of(&entity.metadata),
+            awards: awards.remove(&entity.id).unwrap_or_default(),
             entity,
         })
         .collect())

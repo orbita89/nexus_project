@@ -99,7 +99,7 @@ impl EntityKind {
 pub use shared::pagination::{page_bounds, Page, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
 
 /// Сущность в списке.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct EntitySummary {
     pub id: Uuid,
     pub kind: EntityKind,
@@ -195,9 +195,10 @@ pub struct EntityDetail {
     pub tags: Vec<Tag>,
     pub credits: Vec<EntityCredit>,
     pub related: Vec<RelatedWork>,
-    /// Награды и номинации из `metadata.awards`, полученные сверху, затем по годам (новые
-    /// первыми). Отдельным полем — чтобы карточке не приходилось разбирать `metadata`.
-    pub awards: Vec<crate::metadata::Award>,
+    /// Награды и номинации работы (`award_nominations`): полученные сверху, затем по годам
+    /// (новые первыми), со ссылкой на церемонию. Плоские строчки `metadata.awards` остаются в
+    /// `metadata` — они наполняют блок «Производство и факты», пока контент не переехал.
+    pub awards: Vec<crate::awards::EntityAward>,
 }
 
 /// Связанное произведение в общей ленте карусели: сиквелы, ремейки и приквелы идут одним
@@ -333,7 +334,7 @@ impl From<EntityCreditRow> for EntityCredit {
 }
 
 /// Человек в списке.
-#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct PersonSummary {
     pub id: Uuid,
     #[schema(example = "denis-villeneuve")]
@@ -397,6 +398,8 @@ pub struct PersonDetail {
     #[serde(flatten)]
     pub person: Person,
     pub credits: Vec<PersonCredit>,
+    /// Награды и номинации человека: с работой, за которую он номинирован.
+    pub awards: Vec<crate::awards::EntityAward>,
     /// Сколько лайков у человека (данные `social`, читаются справочником `PersonLikes`).
     #[schema(example = 42)]
     pub likes_count: i64,
@@ -454,6 +457,8 @@ pub enum SearchSort {
     Popular,
     /// Средняя оценка Nexus (при равной — больше оценок).
     Rating,
+    /// Больше наград (`award_wins`).
+    Awarded,
 }
 
 /// Сущность в админском списке: как в публичном, плюс флаг активности.
@@ -743,6 +748,14 @@ pub struct SearchQuery {
     /// Без `person` — 400.
     #[param(example = "director")]
     pub role: Option<String>,
+    /// Slug премии (`GET /awards/{slug}`): работы с её наградой или номинацией.
+    #[param(example = "oscar")]
+    pub award: Option<String>,
+    /// Год церемонии: вместе с `award` — «лауреаты и номинанты „Оскара“ 2024».
+    #[param(example = 2024)]
+    pub award_year: Option<i32>,
+    /// `true` — только полученные награды (у работы есть хотя бы одна победа).
+    pub awarded: Option<bool>,
     /// 1–100, по умолчанию 20.
     pub limit: Option<i64>,
     /// С 0.
