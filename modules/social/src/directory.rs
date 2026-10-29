@@ -52,13 +52,26 @@ impl InterestDirectory for PgInterestDirectory {
         Ok(
             // Системные комнаты подписаны у всех: своих строк в chat_room_members у них нет.
             sqlx::query_scalar(
-                "SELECT room_id FROM chat_room_members WHERE user_id = $1
+                "SELECT cm.room_id FROM chat_room_members cm JOIN chat_rooms r ON r.id = cm.room_id
+                  WHERE cm.user_id = $1
+                    AND r.award_id IS NULL AND r.award_edition_id IS NULL
                  UNION SELECT id FROM chat_rooms WHERE system",
             )
             .bind(user_id)
             .fetch_all(&self.db)
             .await?,
         )
+    }
+
+    async fn award_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>> {
+        Ok(sqlx::query_scalar(
+            "SELECT coalesce(r.award_id, r.award_edition_id) FROM chat_room_members cm
+               JOIN chat_rooms r ON r.id = cm.room_id
+              WHERE cm.user_id = $1 AND (r.award_id IS NOT NULL OR r.award_edition_id IS NOT NULL)",
+        )
+        .bind(user_id)
+        .fetch_all(&self.db)
+        .await?)
     }
 
     async fn people_in_use(&self, person_ids: &[Uuid]) -> AppResult<HashSet<Uuid>> {

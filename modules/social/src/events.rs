@@ -177,12 +177,14 @@ pub fn chat_read(user_id: Uuid, room: ChatRoom, message_id: Uuid) -> Event {
     )
 }
 
-/// Вид комнаты (`entity`, `person`, `tag`) и id сущности, человека или тега.
+/// Вид комнаты (`entity`, `person`, `tag`, `award`, `award_edition`) и id её цели.
 pub fn room_parts(room: ChatRoom) -> (&'static str, Uuid) {
     match room {
         ChatRoom::Entity(id) => ("entity", id),
         ChatRoom::Person(id) => ("person", id),
         ChatRoom::Tag(id) => ("tag", id),
+        ChatRoom::Award(id) => ("award", id),
+        ChatRoom::AwardEdition(id) => ("award_edition", id),
         ChatRoom::Room(id) => ("room", id),
         ChatRoom::Dm(id) => ("dm", id),
     }
@@ -194,6 +196,8 @@ fn room_channel(room: ChatRoom) -> Channel {
         ChatRoom::Entity(id) => Channel::Entity(id),
         ChatRoom::Person(id) => Channel::Person(id),
         ChatRoom::Tag(id) => Channel::Tag(id),
+        ChatRoom::Award(id) => Channel::Award(id),
+        ChatRoom::AwardEdition(id) => Channel::AwardEdition(id),
         ChatRoom::Room(id) => Channel::Room(id),
         ChatRoom::Dm(id) => Channel::Dm(id),
     }

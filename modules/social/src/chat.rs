@@ -1,5 +1,6 @@
-//! Чат по интересам: комната на каждую сущность (`entity:<slug>`), человека (`person:<slug>`) и
-//! тег (`tag:<slug>`) каталога, системные комнаты и свои комнаты (`room:<slug>`, см. `rooms`).
+//! Чат по интересам: комната на каждую сущность (`entity:<slug>`), человека (`person:<slug>`),
+//! тег (`tag:<slug>`) и премию каталога — саму (`award:<slug>`) и её церемонию
+//! (`award:<slug>-<год>`), — системные комнаты и свои комнаты (`room:<slug>`, см. `rooms`).
 //!
 //! Отправка и «прочитано» — по WebSocket: `realtime` принимает `chat.send` / `chat.read` и
 //! вызывает [`PgChat`] через `shared::directory::Chat` (`state.chat`). Здесь же REST: мои чаты
@@ -21,7 +22,9 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use shared::directory::{async_trait, Chat, ChatRoom, EntityRef, PersonRef, TagRef, UserRef};
+use shared::directory::{
+    async_trait, AwardRoomRef, Chat, ChatRoom, EntityRef, PersonRef, TagRef, UserRef,
+};
 use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path, Query};
 use shared::{AppError, AppResult, AppState, AuthUser, Role};
@@ -43,8 +46,11 @@ const MAX_HISTORY_LIMIT: i64 = 100;
 const ROOM_COLUMNS: &str = "CASE WHEN r.entity_id IS NOT NULL THEN 'entity'
           WHEN r.person_id IS NOT NULL THEN 'person'
           WHEN r.tag_id IS NOT NULL THEN 'tag'
+          WHEN r.award_id IS NOT NULL THEN 'award'
+          WHEN r.award_edition_id IS NOT NULL THEN 'award_edition'
           WHEN r.dm_user_a IS NOT NULL THEN 'dm' ELSE 'room' END AS kind,
-     coalesce(r.entity_id, r.person_id, r.tag_id, r.id) AS target_id";
+     coalesce(r.entity_id, r.person_id, r.tag_id, r.award_id, r.award_edition_id, r.id)
+         AS target_id";
 
 const MESSAGE_COLUMNS: &str = "m.id, m.author_id, m.reply_to, m.body, m.created_at,
      m.edited_at, m.deleted_at";
@@ -55,6 +61,8 @@ fn column(room: ChatRoom) -> &'static str {
         ChatRoom::Entity(_) => "entity_id",
         ChatRoom::Person(_) => "person_id",
         ChatRoom::Tag(_) => "tag_id",
+        ChatRoom::Award(_) => "award_id",
+        ChatRoom::AwardEdition(_) => "award_edition_id",
         ChatRoom::Room(_) | ChatRoom::Dm(_) => "id",
     }
 }
@@ -64,6 +72,8 @@ fn room_from(kind: &str, id: Uuid) -> ChatRoom {
         "entity" => ChatRoom::Entity(id),
         "person" => ChatRoom::Person(id),
         "tag" => ChatRoom::Tag(id),
+        "award" => ChatRoom::Award(id),
+        "award_edition" => ChatRoom::AwardEdition(id),
         "dm" => ChatRoom::Dm(id),
         _ => ChatRoom::Room(id),
     }
@@ -92,10 +102,10 @@ impl MessageRow {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ChatMessage {
     pub id: Uuid,
-    /// Вид комнаты: `entity`, `person`, `tag`, `room`.
+    /// Вид комнаты: `entity`, `person`, `tag`, `award`, `award_edition`, `room`.
     #[schema(example = "entity")]
     pub kind: String,
-    /// id сущности, человека или тега комнаты; у своей комнаты — id комнаты.
+    /// id сущности, человека, тега, премии или церемонии комнаты; у своей комнаты — id комнаты.
     pub target_id: Uuid,
     pub author: Option<UserRef>,
     pub body: Option<String>,
@@ -191,6 +201,9 @@ pub struct ChatRoomInfo {
     pub entity: Option<EntityRef>,
     pub person: Option<PersonRef>,
     pub tag: Option<TagRef>,
+    /// Премия (`kind = award`) или её церемония (`kind = award_edition`, тогда есть `year`):
+    /// ссылка на `/awards/{slug}` и `/awards/{slug}/{year}`.
+    pub award: Option<AwardRoomRef>,
     pub custom: Option<CustomRoom>,
     /// Личная переписка (`kind = dm`): id и собеседник.
     pub dm: Option<DmRef>,
@@ -203,7 +216,8 @@ pub struct ChatRoomInfo {
 /// Комната глазами текущего пользователя.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ChatRoomMe {
-    /// Комната в «моих чатах»: сущность, человек или тег в интересах, в свою комнату — вступил.
+    /// Комната в «моих чатах»: сущность, человек или тег в интересах, в свою комнату и в
+    /// комнату премии — вступил.
     pub member: bool,
     pub muted: bool,
     /// Непрочитанные чужие сообщения, не больше 100.
@@ -229,7 +243,7 @@ pub(crate) const CUSTOM_COLUMNS: &str = "r.id, r.slug, r.title, r.description,
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ChatSummary {
     /// Имя канала и комнаты для WebSocket: `entity:<slug>`, `person:<slug>`, `tag:<slug>`,
-    /// `room:<slug>`.
+    /// `award:<slug>`, `room:<slug>`.
     #[schema(example = "entity:dune-2021")]
     pub room: String,
     #[schema(example = "entity")]
@@ -237,6 +251,8 @@ pub struct ChatSummary {
     pub entity: Option<EntityRef>,
     pub person: Option<PersonRef>,
     pub tag: Option<TagRef>,
+    /// Премия или её церемония: строка открывается на `/awards/...`.
+    pub award: Option<AwardRoomRef>,
     /// Комната со slug (`kind = room`).
     pub custom: Option<CustomRoom>,
     /// Личная переписка (`kind = dm`): id и собеседник.
@@ -285,6 +301,8 @@ async fn room_by_slug(
         "entity" => ChatRoom::Entity(refs::entity(state, slug).await?.id),
         "person" => ChatRoom::Person(refs::person(state, slug).await?.id),
         "tag" => ChatRoom::Tag(refs::tag(state, slug).await?.id),
+        // `oscar` — премия, `oscar-2024` — её церемония; какой именно, решает каталог.
+        "award" => award_room(&refs::award(state, slug).await?),
         "room" => ChatRoom::Room(custom_room_id(&state.db, slug).await?),
         "dm" => {
             let id: Uuid = slug.parse().map_err(|_| AppError::NotFound)?;
@@ -293,6 +311,34 @@ async fn room_by_slug(
         }
         _ => return Err(AppError::NotFound),
     })
+}
+
+/// Имя канала и комнаты для WebSocket: `entity:<slug>`, `award:<slug>`. У церемонии вид
+/// `award_edition`, но канал общий с премией — `award:<slug>-<год>`.
+pub(crate) fn channel_name(kind: &str, slug: &str) -> String {
+    match kind {
+        "award_edition" => format!("award:{slug}"),
+        kind => format!("{kind}:{slug}"),
+    }
+}
+
+/// Состоит ли пользователь в комнате (строка `chat_room_members`).
+pub(crate) async fn member_of(state: &AppState, user_id: Uuid, room_id: Uuid) -> AppResult<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM chat_room_members WHERE user_id = $1 AND room_id = $2)",
+    )
+    .bind(user_id)
+    .bind(room_id)
+    .fetch_one(&state.db)
+    .await?)
+}
+
+/// Комната премии или её церемонии — по тому, заполнен ли год.
+pub(crate) fn award_room(award: &AwardRoomRef) -> ChatRoom {
+    match award.year {
+        Some(_) => ChatRoom::AwardEdition(award.id),
+        None => ChatRoom::Award(award.id),
+    }
 }
 
 /// id своей комнаты по slug, иначе 404.
@@ -697,9 +743,17 @@ pub async fn list_own(
              FROM user_tag_interests i LEFT JOIN chat_rooms c ON c.tag_id = i.tag_id
              WHERE i.user_id = $1
              UNION ALL
+             -- Премии и церемонии: участие — как у своей комнаты, вид — по колонке-цели.
+             SELECT CASE WHEN ar.award_id IS NOT NULL THEN 'award' ELSE 'award_edition' END,
+                    coalesce(ar.award_id, ar.award_edition_id), cm.created_at, ar.id
+             FROM chat_room_members cm JOIN chat_rooms ar ON ar.id = cm.room_id
+             WHERE cm.user_id = $1
+               AND (ar.award_id IS NOT NULL OR ar.award_edition_id IS NOT NULL)
+             UNION ALL
              SELECT 'room', cm.room_id, cm.created_at, cm.room_id
              FROM chat_room_members cm JOIN chat_rooms cr ON cr.id = cm.room_id
              WHERE cm.user_id = $1 AND NOT cr.system
+               AND cr.award_id IS NULL AND cr.award_edition_id IS NULL
              UNION ALL
              -- В системных комнатах состоят все: своих строк в chat_room_members у них нет.
              SELECT 'room', sr.id, sr.created_at, sr.id FROM chat_rooms sr
@@ -756,6 +810,14 @@ pub async fn list_own(
     let entities = refs::entities(&state, ids_of("entity")).await?;
     let people = refs::people(&state, ids_of("person")).await?;
     let tags = refs::tags(&state, ids_of("tag")).await?;
+    let awards = refs::awards(
+        &state,
+        ids_of("award")
+            .into_iter()
+            .chain(ids_of("award_edition"))
+            .collect(),
+    )
+    .await?;
     let mut custom_rows: Vec<CustomRoom> = sqlx::query_as::<_, CustomRoom>(&format!(
         "SELECT {CUSTOM_COLUMNS} FROM chat_rooms r WHERE r.id = ANY($1)"
     ))
@@ -782,7 +844,7 @@ pub async fn list_own(
         rows.into_iter()
             .filter_map(|row| {
                 let (mut entity, mut person, mut tag, mut own) = (None, None, None, None);
-                let mut peer = None;
+                let (mut peer, mut award) = (None, None);
                 let slug = match row.kind.as_str() {
                     "entity" => {
                         let found = entities.get(&row.target_id)?.clone();
@@ -802,6 +864,12 @@ pub async fn list_own(
                         tag = Some(found);
                         slug
                     }
+                    "award" | "award_edition" => {
+                        let found = awards.get(&row.target_id)?.clone();
+                        let slug = found.slug.clone();
+                        award = Some(found);
+                        slug
+                    }
                     "dm" => {
                         let found = dms.get(&row.target_id)?.clone();
                         let slug = found.id.to_string();
@@ -816,11 +884,12 @@ pub async fn list_own(
                     }
                 };
                 Some(ChatSummary {
-                    room: format!("{}:{slug}", row.kind),
+                    room: channel_name(&row.kind, &slug),
                     kind: row.kind,
                     entity,
                     person,
                     tag,
+                    award,
                     custom: own,
                     dm: peer,
                     last_message: row.last_message_id.and_then(|id| last.remove(&id)),
@@ -838,6 +907,9 @@ fn membership(room: ChatRoom) -> (&'static str, &'static str) {
         ChatRoom::Entity(_) => ("user_interests", "entity_id"),
         ChatRoom::Person(_) => ("user_person_interests", "person_id"),
         ChatRoom::Tag(_) => ("user_tag_interests", "tag_id"),
+        // У премии и церемонии участие — как у своей комнаты, но ключ там id комнаты, а не
+        // премии: такие комнаты проверяются отдельно (см. `member_of`).
+        ChatRoom::Award(_) | ChatRoom::AwardEdition(_) => ("chat_room_members", "room_id"),
         ChatRoom::Room(_) => ("chat_room_members", "room_id"),
         // У переписки «участие» — сама пара: её проверяет dm::member.
         ChatRoom::Dm(_) => ("chat_room_members", "room_id"),
@@ -888,6 +960,7 @@ pub(crate) async fn room_info(
     let kind = kind.to_string();
     let slug = slug.to_string();
     let (mut entity, mut person, mut tag, mut custom, mut dm_ref) = (None, None, None, None, None);
+    let mut award_ref: Option<AwardRoomRef> = None;
     let (room, slug) = match kind.as_str() {
         "entity" => {
             let found = refs::entity(&state, &slug).await?;
@@ -905,6 +978,12 @@ pub(crate) async fn room_info(
             let found = refs::tag(&state, &slug).await?;
             let room = (ChatRoom::Tag(found.id), found.slug.clone());
             tag = Some(found);
+            room
+        }
+        "award" => {
+            let found = refs::award(&state, &slug).await?;
+            let room = (award_room(&found), found.slug.clone());
+            award_ref = Some(found);
             room
         }
         "room" => {
@@ -954,14 +1033,25 @@ pub(crate) async fn room_info(
         None => None,
         Some(viewer_id) => {
             let user = ViewerId { id: viewer_id };
-            let (table, member_column) = membership(room);
-            let member: bool = sqlx::query_scalar(&format!(
-                "SELECT EXISTS (SELECT 1 FROM {table} WHERE user_id = $1 AND {member_column} = $2)"
-            ))
-            .bind(user.id)
-            .bind(room_parts(room).1)
-            .fetch_one(&state.db)
-            .await?;
+            let member: bool = match room {
+                // У премии и церемонии участие — строка `chat_room_members` комнаты: пока
+                // комнаты нет, никто в ней не состоит.
+                ChatRoom::Award(_) | ChatRoom::AwardEdition(_) => match room_id {
+                    None => false,
+                    Some(room_id) => member_of(&state, viewer_id, room_id).await?,
+                },
+                _ => {
+                    let (table, member_column) = membership(room);
+                    sqlx::query_scalar(&format!(
+                        "SELECT EXISTS (SELECT 1 FROM {table}
+                                        WHERE user_id = $1 AND {member_column} = $2)"
+                    ))
+                    .bind(user.id)
+                    .bind(room_parts(room).1)
+                    .fetch_one(&state.db)
+                    .await?
+                }
+            };
             // В системной комнате состоят все: строк в chat_room_members для неё нет.
             // В системной комнате состоят все, в переписке — оба её участника.
             let member =
@@ -1012,12 +1102,18 @@ pub(crate) async fn room_info(
             })
         }
     };
+    // У церемонии вид `award_edition`, а адрес и канал — общие с премией: `award:<slug>`.
+    let kind = match room {
+        ChatRoom::AwardEdition(_) => "award_edition".to_string(),
+        _ => kind,
+    };
     Ok(ChatRoomInfo {
-        room: format!("{kind}:{slug}"),
+        room: channel_name(&kind, &slug),
         kind,
         entity,
         person,
         tag,
+        award: award_ref,
         custom,
         dm: dm_ref,
         last_message,
@@ -1028,6 +1124,111 @@ pub(crate) async fn room_info(
 /// Id зрителя в теле [`room_info`]: раньше там был `AuthUser`, поля читаются как `user.id`.
 struct ViewerId {
     id: Uuid,
+}
+
+/// Вступить в комнату премии или церемонии → 204 (повторно — тоже 204): она появляется в
+/// «моих чатах», канал подписывается. Комната заводится при первом вступлении.
+///
+/// Для сущностей, людей и тегов участие идёт за интересами (`PUT /interests/...`), для своих
+/// комнат — `PUT /chat/rooms/{slug}/membership`; здесь только `award`.
+#[utoipa::path(
+    put, operation_id = "join_award_chat", path = "/chat/{kind}/{slug}/membership", tag = "chat",
+    security(("bearer" = [])),
+    params(
+        ("kind" = String, Path, description = "Только `award`", example = "award"),
+        ("slug" = String, Path, description = "slug премии или церемонии", example = "oscar-2024"),
+    ),
+    responses(
+        (status = 204, description = "Участник"),
+        (status = 400, description = "У этого вида комнат своё участие", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 404, description = "Нет такой премии или церемонии", body = ErrorBody),
+    )
+)]
+pub async fn join(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((kind, slug)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
+    let (room, _) = award_membership(&state, &kind, &slug).await?;
+    let mut tx = state.db.begin().await?;
+    let room_id = room_id(&mut tx, room).await?;
+    sqlx::query(
+        "INSERT INTO chat_room_members (user_id, room_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(user.id)
+    .bind(room_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(validate::missing_reference)?;
+    tx.commit().await?;
+
+    let (key, id) = interest_key(room);
+    events::publish(&state, events::interest("interest.added", user.id, key, id));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Выйти из комнаты премии или церемонии → 204 (даже если не был участником).
+#[utoipa::path(
+    delete, operation_id = "leave_award_chat", path = "/chat/{kind}/{slug}/membership",
+    tag = "chat", security(("bearer" = [])),
+    params(
+        ("kind" = String, Path, description = "Только `award`", example = "award"),
+        ("slug" = String, Path, description = "slug премии или церемонии", example = "oscar-2024"),
+    ),
+    responses(
+        (status = 204, description = "Не участник"),
+        (status = 400, description = "У этого вида комнат своё участие", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 404, description = "Нет такой премии или церемонии", body = ErrorBody),
+    )
+)]
+pub async fn leave(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((kind, slug)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
+    let (room, _) = award_membership(&state, &kind, &slug).await?;
+    sqlx::query(&format!(
+        "DELETE FROM chat_room_members cm USING chat_rooms r
+          WHERE r.id = cm.room_id AND cm.user_id = $1 AND r.{} = $2",
+        column(room)
+    ))
+    .bind(user.id)
+    .bind(room_parts(room).1)
+    .execute(&state.db)
+    .await?;
+
+    let (key, id) = interest_key(room);
+    events::publish(
+        &state,
+        events::interest("interest.removed", user.id, key, id),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Комната премии для участия: вид должен быть `award`, иначе 400 — у остальных комнат участие
+/// идёт интересами или своими эндпоинтами.
+async fn award_membership(
+    state: &AppState,
+    kind: &str,
+    slug: &str,
+) -> AppResult<(ChatRoom, AwardRoomRef)> {
+    if kind != "award" {
+        return Err(AppError::BadRequest(
+            "membership here is only for award rooms".into(),
+        ));
+    }
+    let found = refs::award(state, slug).await?;
+    Ok((award_room(&found), found))
+}
+
+/// Ключ события `interest.added` / `interest.removed`: по нему `realtime` подписывает канал.
+fn interest_key(room: ChatRoom) -> (&'static str, Uuid) {
+    match room {
+        ChatRoom::AwardEdition(id) => ("award_edition_id", id),
+        _ => ("award_id", room_parts(room).1),
+    }
 }
 
 /// История комнаты: страница по 50 (до 100), старые сверху; дальше в прошлое —

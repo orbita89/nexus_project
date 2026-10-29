@@ -71,6 +71,19 @@ pub async fn parse(
             }
             Ok((Channel::Dm(id), format!("dm:{id}")))
         }
+        Some(("award", slug)) => {
+            // `oscar` — премия, `oscar-2024` — её церемония; обе живут в канале `award:`.
+            let award = state
+                .awards
+                .by_slug(slug)
+                .await?
+                .ok_or_else(|| bad(format!("unknown award in channel: {name}")))?;
+            let channel = match award.year {
+                Some(_) => Channel::AwardEdition(award.id),
+                None => Channel::Award(award.id),
+            };
+            Ok((channel, format!("award:{}", award.slug)))
+        }
         Some(("tag", slug)) => {
             let tag = state
                 .tags
@@ -85,7 +98,7 @@ pub async fn parse(
     }
 }
 
-/// Комната чата из `chat.send` / `chat.read`: `entity:`, `person:` или `tag:<slug>` → комната и
+/// Комната чата из `chat.send` / `chat.read`: `entity:`, `person:`, `tag:` или `award:<slug>` → комната и
 /// каноничное имя. Сообщения комнаты приходят в канал с тем же именем.
 pub async fn chat_room(
     state: &AppState,
@@ -93,7 +106,7 @@ pub async fn chat_room(
     state_user: Option<Uuid>,
 ) -> AppResult<(ChatRoom, String)> {
     let unknown = || AppError::BadRequest(format!("unknown chat room: {name}"));
-    if !["entity:", "person:", "tag:", "room:", "dm:"]
+    if !["entity:", "person:", "tag:", "award:", "room:", "dm:"]
         .iter()
         .any(|prefix| name.starts_with(prefix))
     {
@@ -103,6 +116,8 @@ pub async fn chat_room(
         (Channel::Entity(id), name) => Ok((ChatRoom::Entity(id), name)),
         (Channel::Person(id), name) => Ok((ChatRoom::Person(id), name)),
         (Channel::Tag(id), name) => Ok((ChatRoom::Tag(id), name)),
+        (Channel::Award(id), name) => Ok((ChatRoom::Award(id), name)),
+        (Channel::AwardEdition(id), name) => Ok((ChatRoom::AwardEdition(id), name)),
         (Channel::Room(id), name) => Ok((ChatRoom::Room(id), name)),
         (Channel::Dm(id), name) => Ok((ChatRoom::Dm(id), name)),
         _ => Err(unknown()),
@@ -151,6 +166,23 @@ pub async fn tags(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Channel, Str
         .collect())
 }
 
+/// Каналы премий и церемоний по id (вступил в комнату): имена `award:<slug>`. Удалённые
+/// премии пропускаются.
+pub async fn awards(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Channel, String)>> {
+    let refs = state.awards.by_ids(ids).await?;
+    Ok(ids
+        .iter()
+        .filter_map(|id| {
+            let award = refs.get(id)?;
+            let channel = match award.year {
+                Some(_) => Channel::AwardEdition(award.id),
+                None => Channel::Award(award.id),
+            };
+            Some((channel, format!("award:{}", award.slug)))
+        })
+        .collect())
+}
+
 /// Каналы своих комнат по id (вступил): имена `room:<slug>`. Удалённые пропускаются.
 pub async fn rooms(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Channel, String)>> {
     let slugs = state.chat.room_slugs(state, ids).await?;
@@ -160,13 +192,14 @@ pub async fn rooms(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Channel, St
         .collect())
 }
 
-/// Все каналы интересов пользователя: сущности, люди, теги, свои комнаты, в которые вступил,
+/// Все каналы интересов пользователя: сущности, люди, теги, премии и свои комнаты, в которые вступил,
 /// и системные комнаты чата — в них состоят все.
 pub async fn interests(state: &AppState, user_id: Uuid) -> AppResult<Vec<(Channel, String)>> {
     let mut channels = entities(state, &state.interests.entity_ids(user_id).await?).await?;
     channels.extend(people(state, &state.interests.person_ids(user_id).await?).await?);
     channels.extend(tags(state, &state.interests.tag_ids(user_id).await?).await?);
     channels.extend(rooms(state, &state.interests.room_ids(user_id).await?).await?);
+    channels.extend(awards(state, &state.interests.award_ids(user_id).await?).await?);
     // Личные переписки: имя канала — сам id, читать ничего не нужно.
     channels.extend(
         state

@@ -9,7 +9,7 @@ use crate::models::{
     InterestRow, MarkRow, MarkedEntity, Post, PostRow, RatedEntity, RatedRow, Review,
     ReviewComment, ReviewCommentRow, ReviewRow, Thread, ThreadRow,
 };
-use shared::directory::{EntityRef, PersonRef, StudioRef, TagRef, UserRef};
+use shared::directory::{AwardRoomRef, EntityRef, PersonRef, StudioRef, TagRef, UserRef};
 use shared::{AppError, AppResult, AppState};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -40,6 +40,19 @@ pub async fn tag(state: &AppState, slug: &str) -> AppResult<TagRef> {
 
 pub async fn people(state: &AppState, ids: Vec<Uuid>) -> AppResult<HashMap<Uuid, PersonRef>> {
     state.people.by_ids(&dedup(ids)).await
+}
+
+/// Премия или её церемония по адресу раздела (`oscar`, `oscar-2024`), иначе 404.
+pub async fn award(state: &AppState, slug: &str) -> AppResult<AwardRoomRef> {
+    state.awards.by_slug(slug).await?.ok_or(AppError::NotFound)
+}
+
+/// Премии и церемонии по id: в одном списке приходят и те, и другие.
+pub async fn awards(state: &AppState, ids: Vec<Uuid>) -> AppResult<HashMap<Uuid, AwardRoomRef>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    state.awards.by_ids(&ids).await
 }
 
 pub async fn tags(state: &AppState, ids: Vec<Uuid>) -> AppResult<HashMap<Uuid, TagRef>> {

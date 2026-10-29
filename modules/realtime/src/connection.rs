@@ -441,6 +441,10 @@ impl Conn {
             Some((Channel::Person(id), id))
         } else if let Some(id) = id_of("tag_id") {
             Some((Channel::Tag(id), id))
+        } else if let Some(id) = id_of("award_id") {
+            Some((Channel::Award(id), id))
+        } else if let Some(id) = id_of("award_edition_id") {
+            Some((Channel::AwardEdition(id), id))
         } else {
             id_of("room_id").map(|id| (Channel::Room(id), id))
         };
@@ -455,6 +459,9 @@ impl Conn {
             Channel::Entity(_) => channels::entities(&self.state, &[id]).await?,
             Channel::Person(_) => channels::people(&self.state, &[id]).await?,
             Channel::Tag(_) => channels::tags(&self.state, &[id]).await?,
+            Channel::Award(_) | Channel::AwardEdition(_) => {
+                channels::awards(&self.state, &[id]).await?
+            }
             _ => channels::rooms(&self.state, &[id]).await?,
         };
         self.interests.extend(named);

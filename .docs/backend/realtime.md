@@ -30,6 +30,7 @@
 - `state.interests` — `shared::directory::InterestDirectory` (реализует `social`, `entity_ids(user)`): автоподписка соединений на интересы.
 - `state.chat` — `shared::directory::Chat` (реализует `social`, `send`, `read`): запись сообщений чата из `chat.send` / `chat.read`; комната `entity:`, `person:`, `tag:`, `room:<slug>` разбирается как канал (`channels::chat_room`); `room_by_slug`, `room_slugs` — slug своих комнат (таблицы `social`).
 - `state.people`, `state.tags` — `shared::directory::PersonDirectory`, `TagDirectory` (реализует `catalog`): slug людей и тегов для каналов `person:` / `tag:`.
+- `state.awards` — `shared::directory::AwardDirectory` (реализует `catalog`): премия или церемония по адресу раздела (`oscar`, `oscar-2024`) и обратно по id — каналы `award:`.
 - `state.events` — `shared::events::EventBus` (`tokio::sync::broadcast`, ёмкость 1024): приём событий, которые публикуют другие модули.
 - Проверка подписи и срока access-токена — общий код `shared` (правило 3 «Правил границ»), не модуль `auth`.
 
@@ -65,11 +66,12 @@
 | `entity:<slug>` | все | Новые темы о сущности, сообщения в её темах, изменение и удаление этих тем, рецензии |
 | `person:<slug>` | все | Чат комнаты человека (`chat.message.*`). Неизвестный или скрытый человек — `error` |
 | `tag:<slug>` | все | Чат комнаты тега. Неизвестный тег — `error` |
+| `award:<slug>` | все | Чат комнаты премии (`award:oscar`) или её церемонии (`award:oscar-2024`). Неизвестная премия или год — `error` |
 | `room:<slug>` | все | Комната со slug (системная, админская или своя): чат, `chat.room.updated` / `chat.room.deleted`. Неизвестная — `error` |
 | `dm:<id>` | только двое участников | Личная переписка: `chat.message.*`. Подписывается сама после `auth` и на лету по `dm.created`; чужая — `error` «unknown dm», гостю тоже |
 | `rooms` | все, только вручную | Каталог комнат чата: `chat.room.created` (новая комната), а также `chat.room.updated` / `chat.room.deleted` — чтобы открытый список обновлялся без перезагрузки. Автоматически никому не выдаётся |
 | `user:me` | только после `auth`, подписывается сам | `reply.created` — ответили на ваше сообщение; `interest.added` / `interest.removed`; `chat.mention` — вас назвали `@username` в чате; `dm.created` — с вами завели переписку |
-| интересы | только после `auth`, подписываются сами | Как `entity:<slug>`, `person:<slug>`, `tag:<slug>`: по каждой сущности, человеку и тегу из интересов пользователя, своей комнате, в которую он вступил, и каждой системной комнате чата (в них состоят все) (`InterestDirectory::entity_ids`, `person_ids`, `tag_ids`, `room_ids`; slug комнат — `Chat::room_slugs`). `interest.added` / `interest.removed` с `entity_id`, `person_id`, `tag_id` или `room_id` меняют подписки на лету |
+| интересы | только после `auth`, подписываются сами | Как `entity:<slug>`, `person:<slug>`, `tag:<slug>`: по каждой сущности, человеку и тегу из интересов пользователя, своей комнате, в которую он вступил, и каждой системной комнате чата (в них состоят все) (`InterestDirectory::entity_ids`, `person_ids`, `tag_ids`, `room_ids`, `award_ids`; slug комнат — `Chat::room_slugs`, премий — `AwardDirectory::by_ids`), плюс премии и церемонии, в чат которых вступил (`award:<slug>`). `interest.added` / `interest.removed` с `entity_id`, `person_id`, `tag_id`, `room_id`, `award_id` или `award_edition_id` меняют подписки на лету |
 
 Существование темы при подписке не проверяется (realtime не читает таблицы форума): на
 несуществующую тему просто не придёт событий. Неизвестная сущность — `error`.

@@ -426,6 +426,24 @@
 Вступление — как интерес: комната в «моих чатах», канал realtime подписывается сам
 (`InterestDirectory::room_ids`). Писать может любой вошедший (как в остальных комнатах).
 
+### Комнаты премий ✅
+
+Миграция `20261124100000_social_chat_award_rooms.sql`. `chat_rooms` получает `award_id` UNIQUE
+FK → `awards` CASCADE и `award_edition_id` UNIQUE FK → `award_editions` CASCADE; CHECK
+`chat_rooms_one_target` считает и их. Снаружи это один вид комнаты — `award` (`/chat/award/oscar`,
+`/chat/award/oscar-2024`, канал `award:<slug>` у обоих), внутри они разделены: у премии и
+церемонии разные таблицы каталога и свой FK, поэтому `ChatRoom::Award` / `ChatRoom::AwardEdition`
+и виды `award` / `award_edition` в `ChatMessage.kind`.
+
+Что за FK, `social` не читает: премия или церемония по адресу раздела (`oscar`, `oscar-2024`) и
+обратно по id — через `shared::directory::AwardDirectory` (`state.awards`, реализует `catalog`),
+`AwardRoomRef {id, slug, title, year, logo_url}`. Год отделяет `catalog`: сначала ищется премия
+с таким slug целиком, только потом хвост `-2024`.
+
+Участие — строка `chat_room_members`, как у своей комнаты (у сущностей, людей и тегов оно идёт
+интересами): `PUT`/`DELETE /chat/award/{slug}/membership`. Комната заводится при первом
+вступлении или первом сообщении.
+
 ### Системные комнаты, свои комнаты пользователей и жалобы ✅ — чат, этап 4
 
 Миграция `20261111100000_social_chat_public_rooms.sql` (2026-10-23). `chat_rooms` получает
@@ -891,9 +909,9 @@ WebSocket-соединений пользователя (`interest.added` / `int
 
 | Метод | Путь | Кто | Что делает |
 |---|---|---|---|
-| GET | `/chats` | user | Мои чаты = комнаты всех сущностей, людей и тегов из интересов и свои комнаты, в которые вступил (сообщений может не быть): `[{room: "entity:<slug>" \| "person:<slug>" \| "tag:<slug>" \| "room:<slug>" \| "dm:<id>", kind, entity \| null, person \| null, tag \| null, custom \| null, dm \| null, last_message \| null, unread (до 100), muted}]` — из `entity`/`person`/`tag`/`custom` заполнено одно, по `kind`; сверху со свежими сообщениями, затем без сообщений (новые интересы сверху). Без пагинации (интересов ≤ 3 × 500) |
-| GET | `/chat/{kind}/{slug}` | все (`Option<AuthUser>`) | Комната для открытой панели, в том числе не из «моих чатов» (открыта с карточки): `{room, kind, entity \| person \| tag \| custom, last_message \| null, me}`. `me` — вошедшему `{member, muted, unread (до 100), last_read_id}`: `member` — сущность, человек или тег в интересах / в свою комнату вступил; `last_read_id` — для разделителя «новые сообщения». Гостю `me: null`. 404 — неизвестный `kind` или slug; 401 — неверный токен |
-| GET | `/chat/{kind}/{slug}/messages?before=&limit=` | все | История комнаты (`kind` — `entity`, `person`, `tag`, `room`): `{items, next_before}` — `limit` 1–100 (50) сообщений старше `before` (без него — последние), в `items` старые сверху; `next_before` — курсор дальше в прошлое, `null` — начало. 400 — `limit` вне 1–100; 404 — неизвестный `kind` или slug |
+| GET | `/chats` | user | Мои чаты = комнаты всех сущностей, людей и тегов из интересов, премии и церемонии, в чат которых вступил, и свои комнаты (сообщений может не быть): `[{room: "entity:<slug>" \| "person:<slug>" \| "tag:<slug>" \| "award:<slug>" \| "room:<slug>" \| "dm:<id>", kind, entity \| null, person \| null, tag \| null, award \| null, custom \| null, dm \| null, last_message \| null, unread (до 100), muted}]` — из `entity`/`person`/`tag`/`award`/`custom` заполнено одно, по `kind` (`award` — `{id, slug, title, year, logo_url}`, `year` есть только у церемонии: строка ведёт на `/awards/{slug}` или `/awards/{slug}/{year}`); сверху со свежими сообщениями, затем без сообщений (новые интересы сверху). Без пагинации (интересов ≤ 3 × 500) |
+| GET | `/chat/{kind}/{slug}` | все (`Option<AuthUser>`) | Комната для открытой панели, в том числе не из «моих чатов» (открыта с карточки): `{room, kind, entity \| person \| tag \| award \| custom, last_message \| null, me}`. `kind` в пути — `entity`, `person`, `tag`, `award`, `room`, `dm`; у премии slug — `oscar`, у церемонии `oscar-2024`, в ответе вид `award` или `award_edition`, а `room` у обоих — `award:<slug>`. `me` — вошедшему `{member, muted, unread (до 100), last_read_id}`: `member` — сущность, человек или тег в интересах / в свою комнату или комнату премии вступил; `last_read_id` — для разделителя «новые сообщения». Гостю `me: null`. 404 — неизвестный `kind` или slug; 401 — неверный токен |
+| GET | `/chat/{kind}/{slug}/messages?before=&limit=` | все | История комнаты (`kind` — `entity`, `person`, `tag`, `award`, `room`): `{items, next_before}` — `limit` 1–100 (50) сообщений старше `before` (без него — последние), в `items` старые сверху; `next_before` — курсор дальше в прошлое, `null` — начало. 400 — `limit` вне 1–100; 404 — неизвестный `kind` или slug |
 | GET | `/chat/search` | все (`Option<AuthUser>`) | Поиск по сообщениям: `?q=` (1–100, по словам с русской морфологией), `?room=<kind>:<slug>` (без него — по всем моим чатам, нужен вход), `?limit=` 1–100 (50), `?before=` — курсор. `{items: [{room, message}], next_before}`, новые сверху; удалённые не находятся. 400 — пустой/длинный `q`, `limit` вне 1–100, `room` не вида `kind:slug`; 401 — без `room` и без входа; 404 — нет комнаты |
 | GET | `/chat/messages/{id}` | все | Одно сообщение (перечитать по `chat.message.updated` / `deleted`). 404 — нет |
 | PATCH | `/chat/messages/{id}` | автор | `{body}` 1–2000 → 200 сообщение с `edited_at`. 403 — чужое, 400 — пусто/длинно/удалено, 404 — нет |
@@ -908,6 +926,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | GET / PATCH | `/users/me/chat-settings` | user | `{dm_policy}` — `all` (по умолчанию), `following`, `none`. PATCH с `{dm_policy}` → 200. 400 — неизвестное значение |
 | PUT / DELETE | `/chat/rooms/{slug}/hidden` | user | Убрать комнату из «Моих чатов» / вернуть → 204 (повторно — 204). Скрытая не приходит в `GET /chats`, но остаётся рабочей: история, отправка и канал не меняются. 400 — комната не системная (из неё выходят); 404 — нет комнаты |
 | PUT / DELETE | `/chat/{kind}/{slug}/mute` | user | Заглушить / снять → 204 (повторно — 204). 404 — неизвестный `kind` или slug |
+| PUT / DELETE | `/chat/award/{slug}/membership` | user | Вступить в чат премии (`oscar`) или церемонии (`oscar-2024`) и выйти → 204 (повторно — 204). Комната заводится при первом вступлении; событие `interest.added` / `interest.removed` с `award_id` или `award_edition_id` подписывает канал `award:<slug>`. 400 — у остальных видов комнат своё участие (интересы, `/chat/rooms/{slug}/membership`); 404 — нет такой премии или года |
 | GET | `/chat/rooms` | все (`Option<AuthUser>`) | Комнаты: системные сверху, дальше по `?sort=active\|members\|new` (`active` — по умолчанию): `Page<CustomRoom>` (`?limit=&offset=`). `?q=` — поиск по названию и описанию (тогда порядок по близости, системные не первыми). `joined` — вступил ли вошедший (одним запросом на страницу), гостю `null`. 400 — неизвестный `sort`, `q` длиннее 100 |
 | GET | `/chat/rooms/{slug}` | все (`Option<AuthUser>`) | Комната: `CustomRoom` `{id, slug, title, description, members_count, messages_count, messages_24h, last_message_at, created_at, system, owner, joined, hidden}` (`owner` — `UserRef` владельца, `null` у системной и админской; `joined` — гостю `null`, в системной и в `/chats` всегда `true`; `hidden` — убрана ли из «Моих чатов», гостю `null`). 404 — нет |
 | POST | `/chat/rooms` | user | Своя комната: `{slug, title, description?}` → 201 `CustomRoom`, автор — владелец и участник (`interest.added`). 400 — неверный slug (a-z, 0-9, дефисы между ними, 1–80), пустое/длинное название (1–100), описание > 500; 409 — slug занят или зарезервирован (`slug_taken`), уже 5 своих комнат (`room_limit`); 429 — больше 3 за сутки (`Retry-After`) |
@@ -920,7 +939,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | PATCH | `/admin/chat/rooms/{slug}` | admin | То же, что `PATCH /chat/rooms/{slug}`, для любой несистемной комнаты |
 | DELETE | `/admin/chat/rooms/{slug}` | admin | То же, что `DELETE /chat/rooms/{slug}`, для любой несистемной комнаты |
 
-`ChatMessage`: `id`, `kind` (`entity` / `person` / `tag` / `room`), `target_id` (id сущности, человека, тега или своей комнаты), `author` (`UserRef`; `null` у удалённого), `body` (`null` у
+`ChatMessage`: `id`, `kind` (`entity` / `person` / `tag` / `award` / `award_edition` / `room`), `target_id` (id сущности, человека, тега, премии, церемонии или своей комнаты), `author` (`UserRef`; `null` у удалённого), `body` (`null` у
 удалённого), `reply_to`, `attachment` (картинка или `null`), `created_at`, `edited_at`, `deleted`. Тег OpenAPI — `chat`.
 
 ### Отметки «Посмотреть позже» и «Просмотрено»

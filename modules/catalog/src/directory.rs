@@ -1,12 +1,12 @@
-//! Справочники сущностей, людей и тегов для других модулей (`shared::directory::EntityDirectory`,
-//! `PersonDirectory`, `TagDirectory`) и сводки оценок от `social` для сортировок
+//! Справочники сущностей, людей, тегов и премий для других модулей
+//! (`shared::directory::EntityDirectory`, `PersonDirectory`, `TagDirectory`, `AwardDirectory`) и сводки оценок от `social` для сортировок
 //! (`shared::directory::EntityRatings`).
 
 use crate::models::VISIBLE;
 use crate::people::PUBLIC_PERSON;
 use shared::directory::{
-    async_trait, EntityDirectory, EntityRatings, EntityRef, PersonDirectory, PersonRef,
-    RatingStats, StudioDirectory, StudioRef, TagDirectory, TagRef,
+    async_trait, AwardDirectory, AwardRoomRef, EntityDirectory, EntityRatings, EntityRef,
+    PersonDirectory, PersonRef, RatingStats, StudioDirectory, StudioRef, TagDirectory, TagRef,
 };
 use shared::AppResult;
 use sqlx::PgPool;
@@ -307,6 +307,90 @@ impl EntityRatings for PgEntityRatings {
         upsert(&mut *tx, stats).await?;
         tx.commit().await?;
         Ok(())
+    }
+}
+
+/// Премии и их церемонии для чата и реалтайма: адрес раздела — `oscar` (премия) и `oscar-2024`
+/// (церемония). Скрытых премий нет, права не проверяются.
+pub struct PgAwardDirectory {
+    db: PgPool,
+}
+
+impl PgAwardDirectory {
+    pub fn new(db: PgPool) -> Self {
+        Self { db }
+    }
+}
+
+/// Хвост `-2024` у slug: отделяет год церемонии от slug премии. Сама премия ищется первой,
+/// поэтому премия со slug, кончающимся на четыре цифры, остаётся достижимой.
+fn split_year(slug: &str) -> Option<(&str, i32)> {
+    let (head, year) = slug.rsplit_once('-')?;
+    let year: i32 = year.parse().ok()?;
+    (!head.is_empty() && (1880..=2100).contains(&year)).then_some((head, year))
+}
+
+#[async_trait]
+impl AwardDirectory for PgAwardDirectory {
+    async fn by_slug(&self, slug: &str) -> AppResult<Option<AwardRoomRef>> {
+        let award: Option<AwardRoomRef> = sqlx::query_as(
+            "SELECT id, slug, title, NULL::int AS year, logo_url FROM awards WHERE slug = $1",
+        )
+        .bind(slug)
+        .fetch_optional(&self.db)
+        .await?;
+        if award.is_some() {
+            return Ok(award);
+        }
+        let Some((award_slug, year)) = split_year(slug) else {
+            return Ok(None);
+        };
+        Ok(sqlx::query_as(
+            "SELECT ed.id, a.slug || '-' || ed.year AS slug, a.title, ed.year, a.logo_url
+               FROM award_editions ed JOIN awards a ON a.id = ed.award_id
+              WHERE a.slug = $1 AND ed.year = $2",
+        )
+        .bind(award_slug)
+        .bind(year)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
+    async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, AwardRoomRef>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // Премии и церемонии приходят одним списком: id комнаты — либо то, либо другое.
+        let rows: Vec<AwardRoomRef> = sqlx::query_as(
+            "SELECT id, slug, title, NULL::int AS year, logo_url FROM awards WHERE id = ANY($1)
+             UNION ALL
+             SELECT ed.id, a.slug || '-' || ed.year, a.title, ed.year, a.logo_url
+               FROM award_editions ed JOIN awards a ON a.id = ed.award_id
+              WHERE ed.id = ANY($1)",
+        )
+        .bind(ids)
+        .fetch_all(&self.db)
+        .await?;
+        Ok(rows.into_iter().map(|row| (row.id, row)).collect())
+    }
+}
+
+#[cfg(test)]
+mod award_slug_tests {
+    use super::split_year;
+
+    #[test]
+    fn year_tail_is_split_off() {
+        assert_eq!(split_year("oscar-2024"), Some(("oscar", 2024)));
+        assert_eq!(
+            split_year("the-game-awards-2023"),
+            Some(("the-game-awards", 2023))
+        );
+        // Не год: премия без церемонии в адресе.
+        assert_eq!(split_year("oscar"), None);
+        assert_eq!(split_year("golden-globe"), None);
+        assert_eq!(split_year("award-12"), None);
+        assert_eq!(split_year("-2024"), None);
     }
 }
 

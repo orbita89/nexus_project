@@ -145,6 +145,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(dm::list_blocked))
         .routes(routes!(dm::settings, dm::update_settings))
         .routes(routes!(chat::info))
+        .routes(routes!(chat::join, chat::leave))
         .routes(routes!(chat::history))
         .routes(routes!(chat::get, chat::update, chat::delete))
         .routes(routes!(chat::mute, chat::unmute))

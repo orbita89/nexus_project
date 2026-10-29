@@ -21,6 +21,7 @@ Workspace: `app/` (bin `nexus`), `modules/{auth,catalog,social,realtime}` (one c
   - `state.ratings`: `EntityRatings` — `set`, `replace_all` (impl: `catalog`)
   - `state.people`: `PersonDirectory` — `by_slug`, `by_ids` → `PersonRef` (impl: `catalog`)
   - `state.tags`: `TagDirectory` — `by_slug`, `by_ids` → `TagRef` (impl: `catalog`)
+  - `state.awards`: `AwardDirectory` — `by_slug` (`oscar` / `oscar-2024`), `by_ids` → `AwardRoomRef` (impl: `catalog`)
   - `state.chat`: `Chat` — `send`, `read`, `room_by_slug`, `room_slugs` (impl: `social`; called by `realtime` for WS `chat.send`/`chat.read`)
   Batch always (`by_ids`, `by_slugs`): one query per list, no N+1. New need → new directory method, never a JOIN.
 - Auth checks (`AuthUser`, `AdminUser`, `Role`) live in `shared` — never re-implement them inside a module.

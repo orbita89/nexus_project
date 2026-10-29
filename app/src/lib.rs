@@ -111,6 +111,7 @@ pub fn directories(db: PgPool) -> Directories {
         chat: Arc::new(social::chat::PgChat),
         people: Arc::new(catalog::directory::PgPersonDirectory::new(db.clone())),
         tags: Arc::new(catalog::directory::PgTagDirectory::new(db.clone())),
+        awards: Arc::new(catalog::directory::PgAwardDirectory::new(db.clone())),
         studios: Arc::new(catalog::directory::PgStudioDirectory::new(db.clone())),
         person_likes: Arc::new(social::directory::PgPersonLikes::new(db.clone())),
     }

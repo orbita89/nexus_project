@@ -2626,3 +2626,146 @@ async fn dm_attachment_is_private(pool: PgPool) {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Чат премии и её церемонии: комната заводится при вступлении, в «моих чатах» ведёт на
+/// `/awards/...`, сообщения ходят каналом `award:<slug>`.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn award_chat_rooms(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let admin = ctx.login("admin", "admin").await;
+    let alice = ctx.login("alice", "user").await;
+
+    // Премия и её церемония заводятся в каталоге.
+    let catalog = |path: &str| format!("/api/v1/catalog{path}");
+    for (path, body) in [
+        (
+            catalog("/admin/awards"),
+            json!({ "slug": "oscar", "title": "Оскар", "kinds": ["movie"] }),
+        ),
+        (
+            catalog("/admin/awards/oscar/editions"),
+            json!({ "year": 2024 }),
+        ),
+    ] {
+        let app = nexus::build_app(ctx.state.clone());
+        let response = request(
+            app,
+            Method::POST,
+            &path,
+            Some(body),
+            Some(admin.token.as_str()),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::CREATED, "{path}");
+    }
+
+    // Премия целиком и отдельная церемония — один вид комнаты в адресе, разный `kind` в ответе.
+    let award = ctx
+        .api(StatusCode::OK, Method::GET, "/chat/award/oscar", None, None)
+        .await;
+    assert_eq!(award["room"], "award:oscar");
+    assert_eq!(award["kind"], "award");
+    assert_eq!(award["award"]["title"], "Оскар");
+    assert_eq!(award["award"]["year"], Value::Null);
+    assert_eq!(award["me"], Value::Null, "гостю — без состояния");
+
+    let edition = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/award/oscar-2024",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(edition["room"], "award:oscar-2024");
+    assert_eq!(edition["kind"], "award_edition");
+    assert_eq!(edition["award"]["year"], 2024);
+    assert_eq!(edition["me"]["member"], false);
+
+    // Нет такой премии или года — 404.
+    for path in ["/chat/award/nobel", "/chat/award/oscar-1900"] {
+        ctx.api(StatusCode::NOT_FOUND, Method::GET, path, None, None)
+            .await;
+    }
+    // Участие здесь только у премий: у сущности оно идёт интересами.
+    ctx.api(
+        StatusCode::BAD_REQUEST,
+        Method::PUT,
+        "/chat/entity/dune-2021/membership",
+        None,
+        Some(&alice),
+    )
+    .await;
+
+    // Вступление заводит комнату и подписывает канал.
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        "/chat/award/oscar-2024/membership",
+        None,
+        Some(&alice),
+    )
+    .await;
+    let edition = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/award/oscar-2024",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(edition["me"]["member"], true);
+
+    let mut alice_ws = ctx.authed(&alice).await;
+    let mut guest = ctx.client().await;
+    guest
+        .request(
+            json!({ "type": "subscribe", "channels": ["award:oscar-2024"] }),
+            "subscribed",
+        )
+        .await;
+    let sent = alice_ws
+        .reply_to(
+            json!({ "type": "chat.send", "room": "award:oscar-2024", "body": "Кто фаворит?" }),
+            "chat.sent",
+        )
+        .await;
+    assert_eq!(sent["room"], "award:oscar-2024");
+    let event = guest.event("chat.message.created").await;
+    assert_eq!(event["channels"], json!(["award:oscar-2024"]));
+    assert_eq!(event["data"]["kind"], "award_edition");
+    assert_eq!(event["data"]["message"]["body"], "Кто фаворит?");
+
+    // «Мои чаты»: строка ведёт на /awards/oscar/2024.
+    let chats = ctx.chats(&alice).await;
+    assert_eq!(chats.len(), 1, "{chats:?}");
+    assert_eq!(chats[0]["room"], "award:oscar-2024");
+    assert_eq!(chats[0]["kind"], "award_edition");
+    assert_eq!(chats[0]["award"]["slug"], "oscar-2024");
+    assert_eq!(chats[0]["award"]["title"], "Оскар");
+    assert_eq!(chats[0]["award"]["year"], 2024);
+    assert_eq!(chats[0]["last_message"]["body"], "Кто фаворит?");
+
+    // Выход убирает её из «моих чатов», история остаётся.
+    ctx.api(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        "/chat/award/oscar-2024/membership",
+        None,
+        Some(&alice),
+    )
+    .await;
+    assert!(ctx.chats(&alice).await.is_empty());
+    let history = ctx
+        .api(
+            StatusCode::OK,
+            Method::GET,
+            "/chat/award/oscar-2024/messages",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(history["items"].as_array().unwrap().len(), 1);
+}

@@ -172,6 +172,11 @@ https://query.wikidata.org/sparql`; для всего каталога — не�
 `TagDirectory` (`PgTagDirectory`, `state.tags`: `by_slug`, `by_ids` → `TagRef` `{id, slug, name, kind}`)
 в `catalog::directory`; ими `social` и `realtime` строят интересы и комнаты чата `person:` / `tag:`.
 
+Премии для других модулей — `AwardDirectory` (`PgAwardDirectory`, `state.awards`: `by_slug` —
+`oscar` это премия, `oscar-2024` её церемония (сначала ищется премия с таким slug целиком), и
+`by_ids` — премии и церемонии одним списком → `AwardRoomRef` `{id, slug, title, year, logo_url}`).
+По нему `social` держит комнаты чата премии и церемонии, а `realtime` — каналы `award:<slug>`.
+
 **Публичный человек** — с работой в активной сущности или вовсе без работ (заведён в админке):
 `/people` и `/people/{slug}` показывают только таких (админу карточка открыта всегда),
 фильмография — только активные сущности.
@@ -1145,7 +1150,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 |---|---|---|
 | GET | `/entities` | Список видимых (без поиска по названию: `q` → 400 `use_search`, искать — `GET /search`). Фильтры: `kind`, `tag` (slug), `year`, `studio` (slug студии: `metadata.studios` содержит её название; неизвестный — пусто). `sort`: `recommended` (по умолчанию, балл), `trending`, `top_rated`, `new` (только вышедшие), `soon`, `popular` (наши оценки), `rating`, `title` ([«Сортировка и активные»](#сортировка-и-активные-)). В элементах — `release_status`, `imdb_rating`, `imdb_votes` |
 | GET | `/awards` | все | Премии раздела: `Page<AwardListItem>` (премия + `editions_count`, `first_year`, `latest_year`), ручной порядок, затем алфавит. `?kind=movie\|series\|book\|game` — вкладки, `?q=` — поиск по названию, `?limit=1..100&offset=` |
-| GET | `/awards/{slug}` | все | Премия и её церемонии: `AwardDetail` = премия + `first_year`, `latest_year`, `editions_count` (те же поля, что в списке — фронту не надо считать их из `editions`) + `editions: [{year, season_year, number, held_on, cover_url, nominations_count, top: EntitySummary[]}]` (до 5 победителей главной категории), годы по убыванию. 404 — нет премии |
+| GET | `/awards/{slug}` | все | Премия и её церемонии: `AwardDetail` = премия + `first_year`, `latest_year`, `editions_count` (те же поля, что в списке — фронту не надо считать их из `editions`) + `editions: [{year, season_year, number, held_on, cover_url, nominations_count, top: EntitySummary[]}]` (до 5 победителей главной категории; работа с несколькими победами попадает в превью один раз), годы по убыванию. 404 — нет премии |
 | GET | `/awards/{slug}/{year}` | все | Церемония: `AwardEditionDetail` = `award {slug,title,logo_url,kinds}`, год, `season_year`, `number`, `held_on`, `place`, `cover_url` и `categories: [{slug, title, position, nominations}]`; в номинации `entity: EntitySummary\|null` (постер), `person: PersonSummary\|null` (фото), `name`, `role`, `title_override`, `won`, победители первыми. 404 — нет премии или года |
 | POST | `/admin/awards` | admin | Завести премию → 201 `Award`. 400 — поля, 409 — slug занят |
 | PATCH | `/admin/awards/{slug}` | admin | Поправить премию (`null` стирает необязательное поле) → `Award`. 404, 409 |

@@ -157,6 +157,31 @@ pub trait TagDirectory: Send + Sync {
     async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, TagRef>>;
 }
 
+/// Премия или её церемония для чата и реалтайма: `slug` — адрес раздела (`oscar`,
+/// `oscar-2024`), `year` заполнен у церемонии.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow, ToSchema)]
+pub struct AwardRoomRef {
+    pub id: Uuid,
+    #[schema(example = "oscar-2024")]
+    pub slug: String,
+    #[schema(example = "Оскар")]
+    pub title: String,
+    /// Год церемонии; `null` — комната премии целиком.
+    #[schema(example = 2024)]
+    pub year: Option<i32>,
+    pub logo_url: Option<String>,
+}
+
+/// Премии каталога и их церемонии. Реализует `catalog`; `social` держит на них комнаты чата,
+/// `realtime` — каналы.
+#[async_trait]
+pub trait AwardDirectory: Send + Sync {
+    /// По адресу раздела: `oscar` — премия, `oscar-2024` — её церемония. Нет такой — `None`.
+    async fn by_slug(&self, slug: &str) -> AppResult<Option<AwardRoomRef>>;
+    /// По id премий и церемоний разом: в одном списке приходят и те, и другие.
+    async fn by_ids(&self, ids: &[Uuid]) -> AppResult<HashMap<Uuid, AwardRoomRef>>;
+}
+
 /// Интересы пользователей. Реализует `social`, пользуется `realtime` (автоподписка).
 #[async_trait]
 pub trait InterestDirectory: Send + Sync {
@@ -166,8 +191,11 @@ pub trait InterestDirectory: Send + Sync {
     async fn person_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>>;
     /// Теги в интересах пользователя.
     async fn tag_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>>;
-    /// Свои комнаты чата, в которые пользователь вступил.
+    /// Свои комнаты чата, в которые пользователь вступил (комнат премий здесь нет).
     async fn room_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>>;
+    /// Премии и церемонии, в чат которых пользователь вступил: id из `awards` и
+    /// `award_editions`, как их принимает [`AwardDirectory::by_ids`].
+    async fn award_ids(&self, user_id: Uuid) -> AppResult<Vec<Uuid>>;
     /// Какие из `person_ids` нужны пользователям (в интересах, есть чат). `catalog` не удаляет
     /// таких, даже когда у человека не осталось работ (перенос в архив).
     async fn people_in_use(&self, person_ids: &[Uuid]) -> AppResult<HashSet<Uuid>>;
@@ -204,6 +232,11 @@ pub enum ChatRoom {
     Entity(Uuid),
     Person(Uuid),
     Tag(Uuid),
+    /// Премия целиком (`award:oscar`); id — строки `awards`.
+    Award(Uuid),
+    /// Церемония премии (`award:oscar-2024`); id — строки `award_editions`. Снаружи это тот же
+    /// вид комнаты `award`, разделены они только внутри: у каждой своя колонка и свой FK.
+    AwardEdition(Uuid),
     Room(Uuid),
     /// Личная переписка 1:1 (`dm:<id>`); id — сама комната, как у [`ChatRoom::Room`].
     Dm(Uuid),
@@ -275,6 +308,7 @@ pub struct Directories {
     pub chat: Arc<dyn Chat>,
     pub people: Arc<dyn PersonDirectory>,
     pub tags: Arc<dyn TagDirectory>,
+    pub awards: Arc<dyn AwardDirectory>,
     pub studios: Arc<dyn StudioDirectory>,
     pub person_likes: Arc<dyn PersonLikes>,
 }

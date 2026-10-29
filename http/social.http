@@ -832,3 +832,58 @@ Authorization: Bearer {{user_token}}
 > {%
     client.test("400", () => client.assert(response.status === 400, `got ${response.status}`));
 %}
+
+### Премия для чата (создаётся здесь же)
+POST {{host}}/api/v1/catalog/admin/awards
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{ "slug": "httpcheck-chat-award", "title": "Премия из social.http", "kinds": ["movie"] }
+
+> {%
+    client.test("201", () => client.assert(response.status === 201, `got ${response.status}`));
+%}
+
+### Чат премии: комната заводится при вступлении
+PUT {{host}}/api/v1/social/chat/award/httpcheck-chat-award/membership
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Комната премии гостю: ссылка на раздел и состояние участника
+GET {{host}}/api/v1/social/chat/award/httpcheck-chat-award
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.room === "award:httpcheck-chat-award");
+        client.assert(response.body.kind === "award");
+        client.assert(response.body.award.title === "Премия из social.http");
+    });
+%}
+
+### Участие в чате сущности сюда не ходит — 400
+PUT {{host}}/api/v1/social/chat/entity/dune-2021/membership
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("400", () => client.assert(response.status === 400, `got ${response.status}`));
+%}
+
+### Выйти из чата премии
+DELETE {{host}}/api/v1/social/chat/award/httpcheck-chat-award/membership
+Authorization: Bearer {{user_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}
+
+### Убрать премию (каскадом уносит и комнату)
+DELETE {{host}}/api/v1/catalog/admin/awards/httpcheck-chat-award?force=true
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
+%}

@@ -2913,6 +2913,147 @@
         }
       }
     },
+    "/api/v1/social/chat/{kind}/{slug}/membership": {
+      "put": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Вступить в комнату премии или церемонии → 204 (повторно — тоже 204): она появляется в\n«моих чатах», канал подписывается. Комната заводится при первом вступлении.",
+        "description": "Для сущностей, людей и тегов участие идёт за интересами (`PUT /interests/...`), для своих\nкомнат — `PUT /chat/rooms/{slug}/membership`; здесь только `award`.",
+        "operationId": "join_award_chat",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Только `award`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "award"
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии или церемонии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar-2024"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Участник"
+          },
+          "400": {
+            "description": "У этого вида комнат своё участие",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой премии или церемонии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Выйти из комнаты премии или церемонии → 204 (даже если не был участником).",
+        "operationId": "leave_award_chat",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Только `award`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "award"
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug премии или церемонии",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar-2024"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Не участник"
+          },
+          "400": {
+            "description": "У этого вида комнат своё участие",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой премии или церемонии",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/chat/{kind}/{slug}/messages": {
       "get": {
         "tags": [
@@ -9288,6 +9429,44 @@
           }
         }
       },
+      "AwardRoomRef": {
+        "type": "object",
+        "description": "Премия или её церемония для чата и реалтайма: `slug` — адрес раздела (`oscar`,\n`oscar-2024`), `year` заполнен у церемонии.",
+        "required": [
+          "id",
+          "slug",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "oscar-2024"
+          },
+          "title": {
+            "type": "string",
+            "example": "Оскар"
+          },
+          "year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Год церемонии; `null` — комната премии целиком.",
+            "example": 2024
+          }
+        }
+      },
       "ByKind": {
         "type": "object",
         "description": "Разрез по типам контента: `{\"movie\": 30, \"book\": 12}`.",
@@ -9401,7 +9580,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "Вид комнаты: `entity`, `person`, `tag`, `room`.",
+            "description": "Вид комнаты: `entity`, `person`, `tag`, `award`, `award_edition`, `room`.",
             "example": "entity"
           },
           "reply_to": {
@@ -9415,7 +9594,7 @@
           "target_id": {
             "type": "string",
             "format": "uuid",
-            "description": "id сущности, человека или тега комнаты; у своей комнаты — id комнаты."
+            "description": "id сущности, человека, тега, премии или церемонии комнаты; у своей комнаты — id комнаты."
           }
         }
       },
@@ -9427,6 +9606,17 @@
           "kind"
         ],
         "properties": {
+          "award": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AwardRoomRef",
+                "description": "Премия (`kind = award`) или её церемония (`kind = award_edition`, тогда есть `year`):\nссылка на `/awards/{slug}` и `/awards/{slug}/{year}`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "custom": {
             "oneOf": [
               {
@@ -9530,7 +9720,7 @@
           },
           "member": {
             "type": "boolean",
-            "description": "Комната в «моих чатах»: сущность, человек или тег в интересах, в свою комнату — вступил."
+            "description": "Комната в «моих чатах»: сущность, человек или тег в интересах, в свою комнату и в\nкомнату премии — вступил."
           },
           "muted": {
             "type": "boolean"
@@ -9604,6 +9794,17 @@
           "muted"
         ],
         "properties": {
+          "award": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AwardRoomRef",
+                "description": "Премия или её церемония: строка открывается на `/awards/...`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "custom": {
             "oneOf": [
               {
@@ -9666,7 +9867,7 @@
           },
           "room": {
             "type": "string",
-            "description": "Имя канала и комнаты для WebSocket: `entity:<slug>`, `person:<slug>`, `tag:<slug>`,\n`room:<slug>`.",
+            "description": "Имя канала и комнаты для WebSocket: `entity:<slug>`, `person:<slug>`, `tag:<slug>`,\n`award:<slug>`, `room:<slug>`.",
             "example": "entity:dune-2021"
           },
           "tag": {
