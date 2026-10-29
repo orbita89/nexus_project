@@ -64,6 +64,8 @@ from awards_build import ALIASES  # noqa: E402  (лежит рядом)
 
 MIN_YEAR, MAX_YEAR = 1880, 2100
 MAX_TITLE = 300
+# Больше этого числа категорий — у премии столько не бывает, это класс Wikidata.
+MAX_CATEGORIES = 500
 # Сколько категорий в одном запросе: запрос должен укладываться в таймаут WDQS (60 с).
 CATEGORIES_PER_QUERY = 8
 # Колонки CSV выгрузки.
@@ -94,6 +96,24 @@ def award_query(tmdb_ids: list[str]) -> str:
   OPTIONAL {{ ?fam rdfs:label ?famRu FILTER(LANG(?famRu) = "ru") }}
   OPTIONAL {{ ?fam rdfs:label ?famEn FILTER(LANG(?famEn) = "en") }}
 }} GROUP BY ?fam ?famRu ?famEn ORDER BY DESC(?n) LIMIT 5"""
+
+
+def parents_query(qids: list[str]) -> str:
+    """Чей «частью» или «экземпляром» является кандидат: по этому отсеиваются категории."""
+    values = " ".join(f"wd:{q}" for q in qids)
+    return PREFIXES + f"""SELECT ?a ?parent WHERE {{
+  VALUES ?a {{ {values} }}
+  {{ ?a wdt:P361 ?parent }} UNION {{ ?a wdt:P31 ?parent }}
+}}"""
+
+
+def categories_count_query(qids: list[str]) -> str:
+    """Сколько категорий у каждого кандидата: по ним и выбирается элемент премии."""
+    values = " ".join(f"wd:{q}" for q in qids)
+    return PREFIXES + f"""SELECT ?a (COUNT(DISTINCT ?cat) AS ?n) WHERE {{
+  VALUES ?a {{ {values} }}
+  {{ ?cat wdt:P361 ?a }} UNION {{ ?cat wdt:P31 ?a }}
+}} GROUP BY ?a"""
 
 
 def categories_query(award_qid: str) -> str:
@@ -158,19 +178,30 @@ async def ask(session: aiohttp.ClientSession, sparql: str, retries: int = 3) -> 
     return []
 
 
+# Слова, которые есть у половины премий: по ним «премия Гильдии режиссёров Америки» совпадает
+# с «премией BAFTA», а «награды Венецианского кинофестиваля» — со «степенью награды».
+STOPWORDS = {"премия", "премии", "премию", "награда", "награды", "приз", "призы", "кинопремия",
+             "кинофестиваль", "кинофестиваля", "фестиваль", "фестиваля", "церемония",
+             "award", "awards", "prize", "prizes", "festival", "international", "film",
+             "за", "лучший", "лучшую", "лучшее", "лучшая", "the", "of", "for", "and"}
+
+
+def distinctive(name: str) -> str:
+    """Отличительная часть названия: без слов, общих для всех премий."""
+    words = [word for word in re.split(r"[^\w]+", name_key(name)) if word and word not in STOPWORDS]
+    return " ".join(words)
+
+
 def match_score(row: dict, names: list[str]) -> int:
-    """Насколько название кандидата похоже на наши названия премии: 2 — одно внутри другого,
-    1 — общее значимое слово, 0 — ничего общего."""
-    labels = [name_key(clean(row.get(key))) for key in ("famRu", "famEn")]
-    labels = [label for label in labels if label]
-    ours = [name_key(name) for name in names]
+    """2 — отличительные части названий совпали (одна внутри другой), 0 — нет."""
+    labels = [distinctive(clean(row.get(key))) for key in ("famRu", "famEn")]
+    ours = [distinctive(name) for name in names]
     for label in labels:
+        if not label:
+            continue
         for name in ours:
-            if label in name or name in label:
+            if name and (label in name or name in label):
                 return 2
-    words = {word for label in labels for word in label.split() if len(word) > 4}
-    if words & {word for name in ours for word in name.split() if len(word) > 4}:
-        return 1
     return 0
 
 
@@ -214,8 +245,23 @@ def name_key(name: str) -> str:
 
 
 async def discover(session, conn, award: str, cache: Path, args) -> tuple[str, str]:
-    """Элемент премии в Wikidata: ищется по фильмам каталога и кэшируется. ('', '') — не нашли."""
+    """Элемент премии в Wikidata: ищется по фильмам каталога и кэшируется. ('', '') — не нашли.
+
+    Разметка премий в Wikidata неровная (у Канн кандидатом идёт «Золотая пальмовая ветвь», у
+    гильдий похожего названия нет вовсе), поэтому элемент можно задать руками: `--wikidata Q42369`
+    вместе с одним `--award`. Он тоже кладётся в кэш, так что повторять флаг не нужно.
+    """
     path = cache / f"{award}-item.csv"
+    if getattr(args, "wikidata", None):
+        title = clean((await ask(session, PREFIXES + f"""SELECT ?label WHERE {{
+  wd:{args.wikidata} rdfs:label ?label FILTER(LANG(?label) = "ru")
+}}"""))[0]["label"]) if True else ""
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, ["qid", "title", "n"])
+            writer.writeheader()
+            writer.writerow({"qid": args.wikidata, "title": title, "n": "задан руками"})
+        log.info("%s = %s (%s, задан руками)", award, title, args.wikidata)
+        return args.wikidata, title
     if path.exists() and not args.refresh:
         with path.open(newline="", encoding="utf-8") as f:
             row = next(csv.DictReader(f), None)
@@ -223,10 +269,11 @@ async def discover(session, conn, award: str, cache: Path, args) -> tuple[str, s
             return row["qid"], row["title"]
     if args.no_download:
         return "", ""
+    # И названия-синонимы из metadata, и наше название премии: у Канн синоним — «главная
+    # награда Каннского кинофестиваля», а нужен сам фестиваль.
     names = [name for name, key in ALIASES.items() if key == award]
-    if not names:
-        names = [row["title"] for row in await conn.fetch(
-            "SELECT title FROM awards WHERE slug = $1", award)]
+    names += [row["title"] for row in await conn.fetch(
+        "SELECT title FROM awards WHERE slug = $1", award)]
     tmdb = [row["tmdb"] for row in await conn.fetch(
         """SELECT e.external_ids->>'tmdb' AS tmdb FROM entities e
             WHERE e.external_ids ? 'tmdb'
@@ -239,9 +286,36 @@ async def discover(session, conn, award: str, cache: Path, args) -> tuple[str, s
     rows = await ask(session, award_query(tmdb))
     if not rows:
         return "", ""
-    # Самый частый родитель — не всегда наш: у каннских фильмов хватает и других премий.
-    # Поэтому сначала тот, чьё название совпадает с нашими (ALIASES), и только потом частота.
-    best = max(rows, key=lambda row: (match_score(row, names), int(row.get("n", 0) or 0)))
+    # Самый частый родитель — не наш: у каннских фильмов хватает и других премий, а у гильдий
+    # в выборке вообще преобладает BAFTA. Берём только кандидата, чьё название совпало с нашим;
+    # не совпало ни одно — лучше пропустить премию, чем налить ей чужие церемонии.
+    fitting = [row for row in rows if match_score(row, names) > 0]
+    if not fitting:
+        best = rows[0]
+        log.warning("%s: в Wikidata не нашлось премии с похожим названием (лучший кандидат — "
+                    "%s) — пропуск", award,
+                    clean(best.get("famRu")) or clean(best.get("famEn")) or "?")
+        return "", ""
+    # Среди подходящих по названию берём ту, у которой больше категорий: у Канн это сам
+    # фестиваль, а не «главная награда Каннского кинофестиваля» (у неё категорий нет).
+    if len(fitting) > 1:
+        ids = [qid(row["fam"]) for row in fitting]
+        # «Серебряный медведь» — часть Берлинале, «премия за лучший фильм» — экземпляр Kids'
+        # Choice Awards: если родитель кандидата тоже в списке, кандидат — категория, не премия.
+        parents = defaultdict(set)
+        for row in await ask(session, parents_query(ids)):
+            parents[qid(row.get("a", ""))].add(qid(row.get("parent", "")))
+        tops = [row for row in fitting
+                if not parents[qid(row["fam"])] & set(ids)]
+        fitting = tops or fitting
+        ids = [qid(row["fam"]) for row in fitting]
+        counts = {qid(row.get("a", "")): int(row.get("n", 0) or 0)
+                  for row in await ask(session, categories_count_query(ids))}
+        # Тысячи «категорий» — это класс вроде «степень награды», а не премия.
+        fitting = [row for row in fitting
+                   if counts.get(qid(row["fam"]), 0) <= MAX_CATEGORIES] or fitting
+        fitting.sort(key=lambda row: counts.get(qid(row["fam"]), 0), reverse=True)
+    best = fitting[0]
     qid_found = qid(best.get("fam", ""))
     title = clean(best.get("famRu")) or clean(best.get("famEn"))
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -447,6 +521,10 @@ async def load(conn, award: str, data: dict, args) -> tuple[int, int]:
                     award_id, slug, title, position)
                 categories_by_title[title] = category_id
             for index, n in enumerate(sorted(items, key=lambda n: not n["won"])):
+                # Работы нет в каталоге, человека нет, названия Wikidata не дала — записывать
+                # нечего (в таблице на это CHECK).
+                if not any((n["entity_id"], n["person_id"], n["name"])):
+                    continue
                 rows.append((edition_id, category_id, n["entity_id"], n["person_id"],
                              n["name"] or None, n["won"], index))
         await conn.executemany(
@@ -488,6 +566,7 @@ async def main() -> int:
     parser.add_argument("--award", action="append",
                         help="только эта премия (slug из таблицы awards), можно много")
     parser.add_argument("--since-year", type=int, help="церемонии не раньше этого года")
+    parser.add_argument("--wikidata", help="элемент премии в Wikidata (Q…), с одним --award")
     parser.add_argument("--cache-dir", default="cache/ceremonies")
     parser.add_argument("--refresh", action="store_true", help="перекачать выгрузку")
     parser.add_argument("--no-download", action="store_true",
