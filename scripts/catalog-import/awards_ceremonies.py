@@ -512,9 +512,9 @@ async def main() -> int:
         "SELECT slug FROM awards WHERE position > 0 ORDER BY position DESC")]
     total = [0, 0]
     try:
-        tx = conn.transaction()
-        await tx.start()
         async with aiohttp.ClientSession() as session:
+            # Транзакция на премию, а не на весь прогон: премии наливаются часами, и обрыв на
+            # середине не должен уносить уже залитое (и держать блокировки всё это время).
             for slug in awards:
                 award_qid, args.award_title = await discover(session, conn, slug, cache, args)
                 if not award_qid:
@@ -532,14 +532,16 @@ async def main() -> int:
                 if not data:
                     log.warning("%s: в выгрузке нет церемоний — ничего не трогаем", slug)
                     continue
+                tx = conn.transaction()
+                await tx.start()
                 editions, nominations = await load(conn, slug, data, args)
+                if args.dry_run:
+                    await tx.rollback()
+                    log.info("%s: dry-run, откат", slug)
+                else:
+                    await tx.commit()
                 total[0] += editions
                 total[1] += nominations
-        if args.dry_run:
-            await tx.rollback()
-            log.info("dry-run: откат")
-        else:
-            await tx.commit()
         log.info("итого: церемоний %d, номинаций %d", *total)
     finally:
         await conn.close()
