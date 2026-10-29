@@ -146,7 +146,7 @@ async fn awards_section(pool: PgPool) {
             { "slug": "best-actor", "title": "Лучшая мужская роль", "position": 1,
               "nominations": [
                 { "entity_slug": "dune-2021", "person_slug": "timothee-chalamet",
-                  "role": "Пол Атрейдес" },
+                  "role": "Пол Атрейдес", "won": true },
               ] },
         ] })),
     )
@@ -162,6 +162,11 @@ async fn awards_section(pool: PgPool) {
     assert_eq!(editions[0]["season_year"], 2021);
     assert_eq!(editions[0]["nominations_count"], 4);
     assert_eq!(editions[0]["top"][0]["slug"], "dune-2021");
+    assert_eq!(
+        editions[0]["top"].as_array().unwrap().len(),
+        1,
+        "две победы одной работы — одна плитка в превью"
+    );
 
     // Страница церемонии: категории по порядку, победители первыми, с постером и фото.
     let edition = ctx.get_ok("/awards/oscar/2022").await;

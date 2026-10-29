@@ -316,14 +316,18 @@ async fn top_winners(
         entity: EntitySummary,
     }
 
+    // Работа попадает в превью один раз, сколько бы побед у неё ни было на этой церемонии:
+    // сначала по одной строке на работу (лучшая её категория), потом уже нумерация.
     let rows: Vec<TopRow> = sqlx::query_as(&format!(
         "SELECT t.edition_id, {ENTITY_SUMMARY_COLUMNS} FROM (
-             SELECT n.edition_id, n.entity_id,
-                    row_number() OVER (PARTITION BY n.edition_id
-                                       ORDER BY c.position, c.title, n.position, n.id) AS rn
-               FROM award_nominations n
-               JOIN award_categories c ON c.id = n.category_id
-              WHERE n.edition_id = ANY($1) AND n.won AND n.entity_id IS NOT NULL
+             SELECT w.edition_id, w.entity_id,
+                    row_number() OVER (PARTITION BY w.edition_id ORDER BY w.rank) AS rn
+               FROM (SELECT n.edition_id, n.entity_id,
+                            min(ARRAY[c.position, n.position]) AS rank
+                       FROM award_nominations n
+                       JOIN award_categories c ON c.id = n.category_id
+                      WHERE n.edition_id = ANY($1) AND n.won AND n.entity_id IS NOT NULL
+                      GROUP BY n.edition_id, n.entity_id) w
          ) t JOIN entities e ON e.id = t.entity_id
           WHERE t.rn <= $2 AND {VISIBLE}
           ORDER BY t.rn"
