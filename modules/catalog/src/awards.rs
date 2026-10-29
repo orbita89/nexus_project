@@ -68,7 +68,8 @@ pub struct AwardListItem {
     pub latest_year: Option<i32>,
 }
 
-/// Премия в ссылке с карточки работы или человека.
+/// Премия в ссылке с карточки работы, человека или церемонии. `kinds` — чтобы фронт знал
+/// раздел каталога, не разглядывая тип первой работы.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct AwardRef {
     #[schema(example = "oscar")]
@@ -76,13 +77,22 @@ pub struct AwardRef {
     #[schema(example = "Оскар")]
     pub title: String,
     pub logo_url: Option<String>,
+    #[schema(example = json!(["movie"]))]
+    pub kinds: Vec<String>,
 }
 
-/// Страница премии: она сама и её церемонии, новые сверху.
+/// Страница премии: она сама и её церемонии, новые сверху. Диапазон лет — теми же полями, что
+/// в списке раздела, чтобы его не пересчитывали из `editions`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AwardDetail {
     #[serde(flatten)]
     pub award: Award,
+    #[schema(example = 1929)]
+    pub first_year: Option<i32>,
+    #[schema(example = 2024)]
+    pub latest_year: Option<i32>,
+    #[schema(example = 96)]
+    pub editions_count: i64,
     pub editions: Vec<AwardEditionBrief>,
 }
 
@@ -270,8 +280,9 @@ pub async fn get(
     .await?;
 
     let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    let years: Vec<i32> = rows.iter().map(|row| row.year).collect();
     let mut top = top_winners(&state.db, &ids).await?;
-    let editions = rows
+    let editions: Vec<AwardEditionBrief> = rows
         .into_iter()
         .map(|row| AwardEditionBrief {
             year: row.year,
@@ -284,7 +295,13 @@ pub async fn get(
         })
         .collect();
 
-    Ok(Json(AwardDetail { award, editions }))
+    Ok(Json(AwardDetail {
+        first_year: years.iter().min().copied(),
+        latest_year: years.iter().max().copied(),
+        editions_count: editions.len() as i64,
+        award,
+        editions,
+    }))
 }
 
 /// Победители главной категории церемоний одним запросом: по [`TOP_WINNERS`] на церемонию.
@@ -363,11 +380,14 @@ pub(crate) async fn edition_detail(
         award_slug: String,
         award_title: String,
         award_logo_url: Option<String>,
+        award_kinds: Vec<String>,
     }
 
     let row: Option<EditionRow> = sqlx::query_as(
         "SELECT ed.id, ed.year, ed.season_year, ed.number, ed.held_on, ed.place, ed.cover_url,
-                a.slug AS award_slug, a.title AS award_title, a.logo_url AS award_logo_url
+                a.slug AS award_slug, a.title AS award_title, a.logo_url AS award_logo_url,
+            a.kinds AS award_kinds,
+                a.kinds AS award_kinds
            FROM award_editions ed JOIN awards a ON a.id = ed.award_id
           WHERE a.slug = $1 AND ed.year = $2",
     )
@@ -382,6 +402,7 @@ pub(crate) async fn edition_detail(
             slug: row.award_slug,
             title: row.award_title,
             logo_url: row.award_logo_url,
+            kinds: row.award_kinds,
         },
         year: row.year,
         season_year: row.season_year,
@@ -516,6 +537,7 @@ struct EntityAwardRow {
     award_slug: String,
     award_title: String,
     award_logo_url: Option<String>,
+    award_kinds: Vec<String>,
     category_slug: String,
     category_title: String,
 }
@@ -523,6 +545,7 @@ struct EntityAwardRow {
 /// Общая часть запроса наград: `{owner}` — чьи они, `n.entity_id` / `n.person_id`.
 const AWARDS_OF: &str = "SELECT {owner} AS owner, n.entity_id, ed.year, n.role, n.won,
             a.slug AS award_slug, a.title AS award_title, a.logo_url AS award_logo_url,
+            a.kinds AS award_kinds,
             coalesce(n.title_override, c.title) AS category_title, c.slug AS category_slug
        FROM award_nominations n
        JOIN award_editions ed ON ed.id = n.edition_id
@@ -573,6 +596,7 @@ fn group(
                 slug: row.award_slug,
                 title: row.award_title,
                 logo_url: row.award_logo_url,
+                kinds: row.award_kinds,
             },
             year: row.year,
             category: AwardCategoryRef {

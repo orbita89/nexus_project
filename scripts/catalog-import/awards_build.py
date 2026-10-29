@@ -46,61 +46,156 @@ import asyncpg
 
 log = logging.getLogger("awards-build")
 
-# Крупные премии: slug, название и типы работ фиксируются, а не выводятся из данных —
-# по одной на тип работ, чтобы вкладки раздела не были пустыми.
+# Курируемые премии: slug, название, страна, год учреждения и типы работ задаются здесь, а не
+# выводятся из данных. Ключ — канонический, названия из `metadata.awards[].award` сводятся к
+# нему через ALIASES: «Золотой лев» и «награды Венецианского кинофестиваля» — одна премия.
+# Всё, чего здесь нет, заводится автоматически (slug транслитом, kinds — по типам работ).
 CURATED = {
-    "Оскар": {
-        "slug": "oscar",
-        "title": "Оскар",
-        "full_title": "Премия Американской академии кинематографических искусств и наук",
-        "kinds": ["movie"],
-        "country": "США",
-        "founded": 1929,
-        "position": 100,
-    },
-    "Прайм-тайм премия «Эмми»": {
-        "slug": "emmy",
-        "title": "Эмми",
-        "full_title": "Прайм-тайм премия «Эмми»",
-        "kinds": ["series"],
-        "country": "США",
-        "founded": 1949,
-        "position": 90,
-    },
-    "Хьюго": {
-        "slug": "hugo",
-        "title": "Хьюго",
-        "full_title": "Премия «Хьюго» за лучшую фантастику",
-        "kinds": ["book"],
-        "country": "США",
-        "founded": 1953,
-        "position": 80,
-    },
-    "The Game Awards": {
-        "slug": "the-game-awards",
-        "title": "The Game Awards",
-        "kinds": ["game"],
-        "country": "США",
-        "founded": 2014,
-        "position": 70,
-    },
-    "Золотой глобус": {
-        "slug": "golden-globe",
-        "title": "Золотой глобус",
-        "kinds": ["movie", "series"],
-        "country": "США",
-        "founded": 1944,
-        "position": 60,
-    },
-    "BAFTA": {
-        "slug": "bafta",
-        "title": "BAFTA",
-        "full_title": "Премия Британской академии кино и телевизионных искусств",
-        "kinds": ["movie", "series"],
-        "country": "Великобритания",
-        "founded": 1949,
-        "position": 50,
-    },
+    # --- главные, по одной на тип работ: вкладки раздела не должны быть пустыми
+    "oscar": {"title": "Оскар", "kinds": ["movie"], "country": "США", "founded": 1929,
+              "position": 100,
+              "full_title": "Премия Американской академии кинематографических искусств и наук"},
+    "emmy": {"title": "Эмми", "kinds": ["series"], "country": "США", "founded": 1949,
+             "position": 95, "full_title": "Прайм-тайм премия «Эмми»"},
+    "hugo": {"title": "Хьюго", "kinds": ["book"], "country": "США", "founded": 1953,
+             "position": 90, "full_title": "Премия «Хьюго» за лучшую фантастику"},
+    "the-game-awards": {"title": "The Game Awards", "kinds": ["game"], "country": "США",
+                        "founded": 2014, "position": 85},
+    # --- киноакадемии
+    "golden-globe": {"title": "Золотой глобус", "kinds": ["movie", "series"], "country": "США",
+                     "founded": 1944, "position": 80},
+    "bafta": {"title": "BAFTA", "kinds": ["movie", "series"], "country": "Великобритания",
+              "founded": 1949, "position": 78,
+              "full_title": "Премия Британской академии кино и телевизионных искусств"},
+    "cesar": {"title": "Сезар", "kinds": ["movie"], "country": "Франция", "founded": 1976,
+              "position": 70},
+    "goya": {"title": "Гойя", "kinds": ["movie"], "country": "Испания", "founded": 1987,
+             "position": 68},
+    "david-di-donatello": {"title": "Давид ди Донателло", "kinds": ["movie"], "country": "Италия",
+                           "founded": 1956, "position": 66},
+    "european-film-awards": {"title": "Премия Европейской киноакадемии", "kinds": ["movie"],
+                             "country": "Европа", "founded": 1988, "position": 64},
+    "japan-academy": {"title": "Премия Японской киноакадемии", "kinds": ["movie"],
+                      "country": "Япония", "founded": 1978, "position": 60},
+    "aacta": {"title": "AACTA", "kinds": ["movie"], "country": "Австралия", "founded": 1958,
+              "position": 58, "full_title": "Премия Австралийской киноакадемии"},
+    "nika": {"title": "Ника", "kinds": ["movie"], "country": "Россия", "founded": 1987,
+             "position": 56},
+    "golden-eagle": {"title": "Золотой орёл", "kinds": ["movie"], "country": "Россия",
+                     "founded": 2002, "position": 54},
+    # --- фестивали
+    "cannes": {"title": "Каннский кинофестиваль", "kinds": ["movie"], "country": "Франция",
+               "founded": 1946, "position": 76},
+    "venice": {"title": "Венецианский кинофестиваль", "kinds": ["movie"], "country": "Италия",
+               "founded": 1932, "position": 74},
+    "berlinale": {"title": "Берлинский кинофестиваль", "kinds": ["movie"], "country": "Германия",
+                  "founded": 1951, "position": 72},
+    "sundance": {"title": "Сандэнс", "kinds": ["movie"], "country": "США", "founded": 1978,
+                 "position": 50},
+    "locarno": {"title": "Кинофестиваль в Локарно", "kinds": ["movie"], "country": "Швейцария",
+                "founded": 1946, "position": 48},
+    # --- гильдии: именно они предсказывают «Оскар»
+    "sag": {"title": "Премия Гильдии киноактёров США", "kinds": ["movie", "series"],
+            "country": "США", "founded": 1995, "position": 46},
+    "dga": {"title": "Премия Гильдии режиссёров США", "kinds": ["movie", "series"],
+            "country": "США", "founded": 1948, "position": 45},
+    "wga": {"title": "Премия Гильдии сценаристов США", "kinds": ["movie", "series"],
+            "country": "США", "founded": 1949, "position": 44},
+    "pga": {"title": "Премия Гильдии продюсеров США", "kinds": ["movie", "series"],
+            "country": "США", "founded": 1990, "position": 43},
+    # --- критика
+    "critics-choice": {"title": "Critics’ Choice Awards", "kinds": ["movie", "series"],
+                       "country": "США", "founded": 1995, "position": 42},
+    "independent-spirit": {"title": "Независимый дух", "kinds": ["movie"], "country": "США",
+                           "founded": 1984, "position": 41},
+    "nbr": {"title": "Премия Национального совета кинокритиков США", "kinds": ["movie"],
+            "country": "США", "founded": 1909, "position": 40},
+    "nsfc": {"title": "Премия Национального общества кинокритиков США", "kinds": ["movie"],
+             "country": "США", "founded": 1966, "position": 39},
+    "nyfcc": {"title": "Премия кинокритиков Нью-Йорка", "kinds": ["movie"], "country": "США",
+              "founded": 1935, "position": 38},
+    "lafca": {"title": "Премия Ассоциации кинокритиков Лос-Анджелеса", "kinds": ["movie"],
+              "country": "США", "founded": 1975, "position": 37},
+    # --- жанровые и зрительские
+    "saturn": {"title": "Сатурн", "kinds": ["movie", "series"], "country": "США",
+               "founded": 1973, "position": 36},
+    "annie": {"title": "Энни", "kinds": ["movie", "series"], "country": "США", "founded": 1972,
+              "position": 35, "full_title": "Премия за достижения в анимации"},
+    "nebula": {"title": "Небьюла", "kinds": ["book"], "country": "США", "founded": 1966,
+               "position": 34},
+    "mtv-movie-awards": {"title": "MTV Movie & TV Awards", "kinds": ["movie", "series"],
+                         "country": "США", "founded": 1992, "position": 30},
+    "kids-choice": {"title": "Kids’ Choice Awards", "kinds": ["movie", "series"],
+                    "country": "США", "founded": 1988, "position": 29},
+    "satellite": {"title": "Спутник", "kinds": ["movie", "series"], "country": "США",
+                  "founded": 1996, "position": 28},
+    # --- антипремия
+    "razzie": {"title": "Золотая малина", "kinds": ["movie"], "country": "США", "founded": 1981,
+               "position": 20},
+}
+
+# Названия из `metadata.awards[].award` → ключ CURATED. Одна премия встречается под разными
+# именами (само название, главный приз, «награды такого-то фестиваля»).
+ALIASES = {
+    "Оскар": "oscar",
+    "Прайм-тайм премия «Эмми»": "emmy",
+    "Эмми": "emmy",
+    "Хьюго": "hugo",
+    "The Game Awards": "the-game-awards",
+    "Золотой глобус": "golden-globe",
+    "BAFTA": "bafta",
+    "Сезар": "cesar",
+    "Гойя": "goya",
+    "Давид ди Донателло": "david-di-donatello",
+    "премия Европейской киноакадемии": "european-film-awards",
+    "премия Японской киноакадемии": "japan-academy",
+    "AACTA": "aacta",
+    "Ника": "nika",
+    "Золотой орёл": "golden-eagle",
+    "главная награда Каннского кинофестиваля": "cannes",
+    "Каннский кинофестиваль": "cannes",
+    "Золотой лев": "venice",
+    "награды Венецианского кинофестиваля": "venice",
+    "Золотой медведь": "berlinale",
+    "Серебряный медведь": "berlinale",
+    "Sundance Festival Awards": "sundance",
+    "Сандэнс": "sundance",
+    "Награды Международного кинофестиваля в Локарно": "locarno",
+    "премия Гильдии киноактёров США": "sag",
+    "Премия Гильдии режиссёров Америки": "dga",
+    "премия Гильдии сценаристов США": "wga",
+    "премия Гильдии продюсеров США": "pga",
+    "Producers Guild Film Awards": "pga",
+    "Critics’ Choice Movie Awards": "critics-choice",
+    "Независимый дух": "independent-spirit",
+    "премия Национального совета кинокритиков США": "nbr",
+    "премия Национального общества кинокритиков США": "nsfc",
+    "премия кинокритиков Нью-Йорка": "nyfcc",
+    "премия Ассоциации кинокритиков Лос-Анджелеса": "lafca",
+    "Сатурн": "saturn",
+    "Энни": "annie",
+    "Небьюла": "nebula",
+    "MTV Movie & TV Awards": "mtv-movie-awards",
+    "Kids’ Choice Awards": "kids-choice",
+    "Kids’ Choice Award за любимый анимационный фильм": "kids-choice",
+    "Спутник": "satellite",
+    "Золотая малина": "razzie",
+}
+
+# Не премии: выдвижение страны на «Оскар», отдельные категории, служебные группы Wikidata.
+SKIP = {
+    "International Submission to the Academy Awards",
+    "приз зрительских симпатий",
+    "группа наград",
+    "премия «Оскар» за лучшую музыку к фильму",
+    "LGBT film award",
+    # Родовые названия без самой премии (в Wikidata это классы, а не награды).
+    "кинофестиваль",
+    "кинопремия",
+    "премия",
+    "премия для актёра или актрисы",
+    "награда в области телевидения",
+    "награда",
 }
 
 TRANSLIT = {
@@ -153,7 +248,7 @@ async def collect(conn, args) -> dict:
               AND jsonb_array_length(e.metadata -> 'awards') > 0"""
     )
     awards: dict[str, dict] = defaultdict(
-        lambda: {"kinds": set(), "years": defaultdict(list), "count": 0}
+        lambda: {"kinds": set(), "years": defaultdict(list), "count": 0, "names": set()}
     )
     skipped = 0
     for row in rows:
@@ -169,11 +264,16 @@ async def collect(conn, args) -> dict:
                 continue
             if args.since_year and year < args.since_year:
                 continue
-            if args.curated_only and name not in CURATED:
+            if name in SKIP:
+                skipped += 1
                 continue
-            if args.award and name != args.award:
+            key = ALIASES.get(name, name)
+            if args.curated_only and key not in CURATED:
                 continue
-            award = awards[name]
+            if args.award and args.award not in (name, key):
+                continue
+            award = awards[key]
+            award.setdefault("names", set()).add(name)
             award["kinds"].add(row["kind"])
             award["count"] += 1
             award["years"][year].append(
@@ -188,12 +288,12 @@ async def collect(conn, args) -> dict:
     return awards
 
 
-async def upsert_award(conn, name: str, data: dict, taken: set[str]) -> tuple:
+async def upsert_award(conn, key: str, data: dict, taken: set[str]) -> tuple:
     """Премия: курируемая — по CURATED, остальные — транслитом названия. Возвращает (id, slug)."""
-    curated = CURATED.get(name, {})
+    curated = CURATED.get(key, {})
     kinds = sorted(curated.get("kinds") or data["kinds"])
-    slug = curated.get("slug")
-    title = curated.get("title") or name
+    slug = key if curated else None
+    title = curated.get("title") or key
 
     row = None
     if slug:
@@ -213,7 +313,7 @@ async def upsert_award(conn, name: str, data: dict, taken: set[str]) -> tuple:
         taken.add(row["slug"])
         return row["id"], row["slug"]
 
-    slug = slug or unique_slug(slugify(name), taken, "award")
+    slug = slug or unique_slug(slugify(key), taken, "award")
     taken.add(slug)
     award_id = await conn.fetchval(
         """INSERT INTO awards (slug, title, full_title, kinds, country, founded, position)
@@ -244,13 +344,15 @@ async def categories_of(conn, award_id: int, titles: set[str]) -> dict:
 
 
 async def load(conn, awards: dict, args) -> tuple[int, int, int]:
-    """Заливает премии и церемонии. Возвращает (премий, церемоний, номинаций)."""
+    """Заливает премии и церемонии. Возвращает (залитых премий, церемоний, номинаций):
+    названия ниже `--min-records` пропускаются и в счёт не идут."""
     taken = {row["slug"] for row in await conn.fetch("SELECT slug FROM awards")}
-    total_editions = total_nominations = 0
-    for name, data in sorted(awards.items(), key=lambda kv: -kv[1]["count"]):
+    total_awards = total_editions = total_nominations = 0
+    for key, data in sorted(awards.items(), key=lambda kv: -kv[1]["count"]):
         if data["count"] < args.min_records:
             continue
-        award_id, slug = await upsert_award(conn, name, data, taken)
+        total_awards += 1
+        award_id, slug = await upsert_award(conn, key, data, taken)
         titles = {n["category"] for year in data["years"].values() for n in year}
         by_title = await categories_of(conn, award_id, titles)
 
@@ -277,20 +379,21 @@ async def load(conn, awards: dict, args) -> tuple[int, int, int]:
             )
             total_editions += 1
             total_nominations += len(rows)
-        log.info("%s (%s): %d церемоний, %d записей", name, slug, len(data["years"]),
-                 data["count"])
-    return len(awards), total_editions, total_nominations
+        log.info("%s (%s): %d церемоний, %d записей%s", CURATED.get(key, {}).get("title", key),
+                 slug, len(data["years"]), data["count"],
+                 "" if len(data["names"]) < 2 else f" (названий: {len(data['names'])})")
+    return total_awards, total_editions, total_nominations
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
-    parser.add_argument("--award", help="только эта премия (название из metadata.awards)")
+    parser.add_argument("--award", help="только эта премия (ключ CURATED или название)")
     parser.add_argument("--curated-only", action="store_true",
                         help="только премии из CURATED")
     parser.add_argument("--since-year", type=int, help="церемонии не раньше этого года")
-    parser.add_argument("--min-records", type=int, default=1,
+    parser.add_argument("--min-records", type=int, default=10,
                         help="пропускать премии, у которых меньше стольких записей")
     parser.add_argument("--dry-run", action="store_true", help="не записывать, откатить")
     parser.add_argument("--verbose", action="store_true")
@@ -313,7 +416,8 @@ async def main() -> int:
             log.info("dry-run: откат")
         else:
             await tx.commit()
-        log.info("премий %d, церемоний %d, номинаций %d", *counts)
+        log.info("найдено названий %d; залито премий %d, церемоний %d, номинаций %d",
+                 len(awards), *counts)
     finally:
         await conn.close()
     return 0

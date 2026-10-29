@@ -5113,6 +5113,7 @@
           {
             "type": "object",
             "required": [
+              "editions_count",
               "editions"
             ],
             "properties": {
@@ -5121,11 +5122,32 @@
                 "items": {
                   "$ref": "#/components/schemas/AwardEditionBrief"
                 }
+              },
+              "editions_count": {
+                "type": "integer",
+                "format": "int64",
+                "example": 96
+              },
+              "first_year": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "example": 1929
+              },
+              "latest_year": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "example": 2024
               }
             }
           }
         ],
-        "description": "Страница премии: она сама и её церемонии, новые сверху."
+        "description": "Страница премии: она сама и её церемонии, новые сверху. Диапазон лет — теми же полями, что\nв списке раздела, чтобы его не пересчитывали из `editions`."
       },
       "AwardEditionBrief": {
         "type": "object",
@@ -5283,12 +5305,22 @@
       },
       "AwardRef": {
         "type": "object",
-        "description": "Премия в ссылке с карточки работы или человека.",
+        "description": "Премия в ссылке с карточки работы, человека или церемонии. `kinds` — чтобы фронт знал\nраздел каталога, не разглядывая тип первой работы.",
         "required": [
           "slug",
-          "title"
+          "title",
+          "kinds"
         ],
         "properties": {
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "movie"
+            ]
+          },
           "logo_url": {
             "type": [
               "string",
@@ -5580,7 +5612,7 @@
               "null"
             ],
             "items": {
-              "$ref": "#/components/schemas/Award"
+              "$ref": "#/components/schemas/MetadataAward"
             },
             "description": "Награды и номинации: до 50."
           },
@@ -6618,7 +6650,7 @@
               "null"
             ],
             "items": {
-              "$ref": "#/components/schemas/Award"
+              "$ref": "#/components/schemas/MetadataAward"
             },
             "description": "Награды и номинации: до 50."
           },
@@ -6851,6 +6883,52 @@
         ],
         "description": "Поля, специфичные для типа (`kind`). Все поля необязательны, неизвестные запрещены.\nТолько для документации: разбирается по `kind` функцией [`validate`]."
       },
+      "MetadataAward": {
+        "type": "object",
+        "description": "Строчка награды в `metadata.awards` — текст блока «Производство и факты», а не раздел\n«Награды»: тот живёт в таблицах `award_*` и отдаётся схемой `Award` (`catalog::awards`).",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "award": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Премия: по ней работает вкладка «Награды» (`GET /awards/{slug}`). 1–200 символов;\n`null` у записей, заведённых до появления вкладки, и у ручных без премии.",
+            "example": "Оскар"
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Номинация внутри премии: «за лучшую операторскую работу». До 200 символов.",
+            "example": "за лучшую операторскую работу"
+          },
+          "title": {
+            "type": "string",
+            "description": "Как показывать одной строкой. 1–200 символов.",
+            "example": "«Оскар» за лучшую операторскую работу"
+          },
+          "won": {
+            "type": "boolean",
+            "description": "`true` — получена, `false` — номинация. По умолчанию `false`."
+          },
+          "year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1880–2100; `null` — год неизвестен.",
+            "example": 2022,
+            "maximum": 2100,
+            "minimum": 1880
+          }
+        },
+        "additionalProperties": false
+      },
       "MovieMetadata": {
         "type": "object",
         "description": "Поля фильма.",
@@ -6869,7 +6947,7 @@
               "null"
             ],
             "items": {
-              "$ref": "#/components/schemas/Award"
+              "$ref": "#/components/schemas/MetadataAward"
             },
             "description": "Награды и номинации: до 50."
           },
@@ -8279,7 +8357,7 @@
               "null"
             ],
             "items": {
-              "$ref": "#/components/schemas/Award"
+              "$ref": "#/components/schemas/MetadataAward"
             },
             "description": "Награды и номинации: до 50."
           },

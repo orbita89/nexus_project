@@ -87,7 +87,7 @@ TMDB с русским названием (121 371) и 500 самых попул
 | | `developer`, `publisher` | строки до 200 символов |
 | | `trailers` | как у `movie` |
 | `movie`, `series` | `studios` | студии производства: до 20 строк по 1–120 символов (у игр — `developer`/`publisher`, у книг — `publisher`) |
-| все типы | `awards` | награды и номинации, до 50: `[{"award": "Оскар", "category": "за лучший звук", "title": "премия «Оскар» за лучший звук", "year": 2022, "won": true}]`. Все строки 1–200 символов, `year` 1880–2100 или `null`, `won` — получена (`false` — номинация, по умолчанию). `award` — название премии, `category` — номинация внутри неё. Это текст карточки, а не раздел «Награды»: тот живёт в таблицах `award_*` |
+| все типы | `awards` | награды и номинации, до 50: `[{"award": "Оскар", "category": "за лучший звук", "title": "премия «Оскар» за лучший звук", "year": 2022, "won": true}]`. Все строки 1–200 символов, `year` 1880–2100 или `null`, `won` — получена (`false` — номинация, по умолчанию). `award` — название премии, `category` — номинация внутри неё. Это текст карточки, а не раздел «Награды»: тот живёт в таблицах `award_*`. Схема в OpenAPI — `MetadataAward` (схему `Award` занял раздел) |
 | | `trivia` | факты: до 30 строк по 1–1000 символов |
 
 `metadata.awards` — только строчки блока «Производство и факты»: раздел «Награды» и поле
@@ -238,14 +238,20 @@ CHECK: заполнено хотя бы одно из `entity_id`, `person_id`, 
 церемоний). Удалённая церемония и снятые номинации берутся из снимка адресов «до» записи.
 
 Карточка работы (`GET /entities/{slug}`) и профиль человека (`GET /people/{slug}`) отдают
-`awards: EntityAward[]` (`award {slug, title, logo_url}`, `year`, `category {slug, title}`,
+`awards: EntityAward[]` (`award {slug, title, logo_url, kinds}` (`kinds` — чтобы фронт знал раздел каталога), `year`, `category {slug, title}`,
 `entity` — работа, за которую номинирован человек, `role`, `won`): полученные сверху, затем по
 годам. Любая правка номинаций шлёт `publish::run` для затронутых работ и людей (и до, и после
 записи: номинацию могли снять с одной работы и повесить на другую).
 
 Наполнение: `scripts/catalog-import/awards_build.py` переносит плоские `metadata.awards`
 (их завёл `awards_wikidata.py` из Wikidata) в эти таблицы — премия по названию, церемония по
-году, категория по `category`, номинация по работе и `won`. Номинаций людей, `season_year`,
+году, категория по `category`, номинация по работе и `won`. Крупные премии описаны в скрипте
+(`CURATED`: slug, название, страна, год учреждения, `kinds`), разные названия одной премии
+сводятся через `ALIASES` («Золотой лев» и «награды Венецианского кинофестиваля» — Венеция),
+служебные классы Wikidata отсеивает `SKIP`; остальные заводятся автоматически (slug транслитом,
+`kinds` — по типам работ), порог — `--min-records` (по умолчанию 10). На dev залито 106 премий, 2356 церемоний,
+17341 номинация: 103 премии с `movie`, 13 с `series`, по одной с `book` и `game` — источник
+(`awards_wikidata.py`) ходил по id TMDB, то есть только по фильмам. Номинаций людей, `season_year`,
 номеров и дат церемоний в источнике нет: они заводятся в админке поверх залитого.
 
 Фасеты Meilisearch (`catalog::awards::facets_of`): `award_slugs`, `award_years` — фильтруемые,
@@ -1142,8 +1148,8 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 |---|---|---|
 | GET | `/entities` | Список видимых (без поиска по названию: `q` → 400 `use_search`, искать — `GET /search`). Фильтры: `kind`, `tag` (slug), `year`, `studio` (slug студии: `metadata.studios` содержит её название; неизвестный — пусто). `sort`: `recommended` (по умолчанию, балл), `trending`, `top_rated`, `new` (только вышедшие), `soon`, `popular` (наши оценки), `rating`, `title` ([«Сортировка и активные»](#сортировка-и-активные-)). В элементах — `release_status`, `imdb_rating`, `imdb_votes` |
 | GET | `/awards` | все | Премии раздела: `Page<AwardListItem>` (премия + `editions_count`, `first_year`, `latest_year`), ручной порядок, затем алфавит. `?kind=movie\|series\|book\|game` — вкладки, `?q=` — поиск по названию, `?limit=1..100&offset=` |
-| GET | `/awards/{slug}` | все | Премия и её церемонии: `AwardDetail` = премия + `editions: [{year, season_year, number, held_on, cover_url, nominations_count, top: EntitySummary[]}]` (до 5 победителей главной категории), годы по убыванию. 404 — нет премии |
-| GET | `/awards/{slug}/{year}` | все | Церемония: `AwardEditionDetail` = `award {slug,title,logo_url}`, год, `season_year`, `number`, `held_on`, `place`, `cover_url` и `categories: [{slug, title, position, nominations}]`; в номинации `entity: EntitySummary\|null` (постер), `person: PersonSummary\|null` (фото), `name`, `role`, `title_override`, `won`, победители первыми. 404 — нет премии или года |
+| GET | `/awards/{slug}` | все | Премия и её церемонии: `AwardDetail` = премия + `first_year`, `latest_year`, `editions_count` (те же поля, что в списке — фронту не надо считать их из `editions`) + `editions: [{year, season_year, number, held_on, cover_url, nominations_count, top: EntitySummary[]}]` (до 5 победителей главной категории), годы по убыванию. 404 — нет премии |
+| GET | `/awards/{slug}/{year}` | все | Церемония: `AwardEditionDetail` = `award {slug,title,logo_url,kinds}`, год, `season_year`, `number`, `held_on`, `place`, `cover_url` и `categories: [{slug, title, position, nominations}]`; в номинации `entity: EntitySummary\|null` (постер), `person: PersonSummary\|null` (фото), `name`, `role`, `title_override`, `won`, победители первыми. 404 — нет премии или года |
 | POST | `/admin/awards` | admin | Завести премию → 201 `Award`. 400 — поля, 409 — slug занят |
 | PATCH | `/admin/awards/{slug}` | admin | Поправить премию (`null` стирает необязательное поле) → `Award`. 404, 409 |
 | DELETE | `/admin/awards/{slug}` | admin | Снести премию с церемониями и номинациями → 204. С номинациями — только `?force=true`, иначе 409 |

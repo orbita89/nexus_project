@@ -39,7 +39,7 @@ pub struct MovieMetadata {
     pub studios: Option<Vec<String>>,
     /// Награды и номинации: до 50.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub awards: Option<Vec<Award>>,
+    pub awards: Option<Vec<MetadataAward>>,
     /// Факты: до 30, каждый 1–1000 символов.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = json!(["Пустыню снимали в Иордании и ОАЭ."]))]
@@ -95,7 +95,7 @@ pub struct SeriesMetadata {
     pub studios: Option<Vec<String>>,
     /// Награды и номинации: до 50.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub awards: Option<Vec<Award>>,
+    pub awards: Option<Vec<MetadataAward>>,
     /// Факты: до 30, каждый 1–1000 символов.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = json!(["Пустыню снимали в Иордании и ОАЭ."]))]
@@ -118,7 +118,7 @@ pub struct BookMetadata {
     pub publisher: Option<String>,
     /// Награды и номинации: до 50.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub awards: Option<Vec<Award>>,
+    pub awards: Option<Vec<MetadataAward>>,
     /// Факты: до 30, каждый 1–1000 символов.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = json!(["Пустыню снимали в Иордании и ОАЭ."]))]
@@ -177,17 +177,18 @@ pub struct GameMetadata {
     pub trailers: Option<Vec<TrailerSource>>,
     /// Награды и номинации: до 50.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub awards: Option<Vec<Award>>,
+    pub awards: Option<Vec<MetadataAward>>,
     /// Факты: до 30, каждый 1–1000 символов.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = json!(["Пустыню снимали в Иордании и ОАЭ."]))]
     pub trivia: Option<Vec<String>>,
 }
 
-/// Награда или номинация.
+/// Строчка награды в `metadata.awards` — текст блока «Производство и факты», а не раздел
+/// «Награды»: тот живёт в таблицах `award_*` и отдаётся схемой `Award` (`catalog::awards`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Award {
+pub struct MetadataAward {
     /// Премия: по ней работает вкладка «Награды» (`GET /awards/{slug}`). 1–200 символов;
     /// `null` у записей, заведённых до появления вкладки, и у ручных без премии.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,8 +212,8 @@ pub struct Award {
 
 /// Награды и номинации сущности из её `metadata`: полученные сверху, внутри — новые по году.
 /// Неразобранные записи пропускаются: карточка не должна падать из-за одной кривой строки.
-pub fn awards_of(metadata: &serde_json::Value) -> Vec<Award> {
-    let mut awards: Vec<Award> = metadata
+pub fn awards_of(metadata: &serde_json::Value) -> Vec<MetadataAward> {
+    let mut awards: Vec<MetadataAward> = metadata
         .get("awards")
         .and_then(|value| value.as_array())
         .map(|items| {
@@ -477,14 +478,14 @@ fn trivia(values: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> {
     })
 }
 
-fn awards(values: Option<Vec<Award>>) -> AppResult<Option<Vec<Award>>> {
+fn awards(values: Option<Vec<MetadataAward>>) -> AppResult<Option<Vec<MetadataAward>>> {
     list_of("awards", values, MAX_AWARDS, |award| {
         if let Some(year) = award.year {
             if !(1880..=2100).contains(&year) {
                 return Err(bad("metadata.awards: year must be between 1880 and 2100"));
             }
         }
-        Ok(Award {
+        Ok(MetadataAward {
             title: item("awards.title", award.title, MAX_AWARD_TITLE)?,
             award: match award.award {
                 Some(name) => Some(item("awards.award", name, MAX_AWARD_TITLE)?),
