@@ -1,12 +1,16 @@
 //! Клиент Meilisearch: тонкая обёртка над HTTP API, без SDK.
 //!
-//! Что и как индексировать, решает модуль (сейчас только `catalog`); здесь только транспорт,
-//! ожидание асинхронных задач Meilisearch и префикс имён индексов (у каждого теста свой).
+//! Что и как индексировать, решает модуль (`catalog` — произведения и люди, `social` —
+//! коллекции); здесь транспорт, ожидание асинхронных задач Meilisearch, префикс имён индексов
+//! (у каждого теста свой) и общие операции: страница выдачи с точным счётом ([`search_exact`])
+//! и переотправка изменённых документов ([`upsert_and_delete`]).
 
+use crate::AppError;
 use axum::http::Method;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
+use uuid::Uuid;
 
 /// Сколько ждать один HTTP-запрос к Meilisearch.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -167,5 +171,90 @@ impl Search {
                 _ => tokio::time::sleep(TASK_POLL_INTERVAL).await,
             }
         }
+    }
+}
+
+/// Поиск с точным числом совпадений. Точный `totalHits` Meilisearch отдаёт только в режиме
+/// `page` + `hitsPerPage` (`estimatedTotalHits` при `offset`/`limit` — оценка). `offset`, кратный
+/// `limit`, — одна страница; иначе выдача по `offset`/`limit` и параллельно счёт с
+/// `hitsPerPage: 0`. Возвращает ответ Meilisearch (`hits`) и точное число.
+pub async fn search_exact(
+    search: &Search,
+    path: &str,
+    mut body: Value,
+    limit: i64,
+    offset: i64,
+) -> Result<(Value, i64), SearchError> {
+    if offset % limit == 0 {
+        body["page"] = json!(offset / limit + 1);
+        body["hitsPerPage"] = json!(limit);
+        let response = search.call(Method::POST, path, Some(&body)).await?;
+        let total = response["totalHits"].as_i64().unwrap_or(0);
+        return Ok((response, total));
+    }
+    let mut count = body.clone();
+    count["page"] = json!(1);
+    count["hitsPerPage"] = json!(0);
+    count["attributesToRetrieve"] = json!([]);
+    if let Some(map) = count.as_object_mut() {
+        map.remove("sort");
+    }
+    body["offset"] = json!(offset);
+    body["limit"] = json!(limit);
+    let (response, count) = tokio::try_join!(
+        search.call(Method::POST, path, Some(&body)),
+        search.call(Method::POST, path, Some(&count)),
+    )?;
+    Ok((response, count["totalHits"].as_i64().unwrap_or(0)))
+}
+
+/// Обновляет документы `docs` в индексе `index` и удаляет те из `ids`, которых нет среди
+/// `present`. Ждёт применения.
+pub async fn upsert_and_delete(
+    search: &Search,
+    index: &str,
+    docs: &Value,
+    ids: &[Uuid],
+    present: &[Uuid],
+) -> Result<(), SearchError> {
+    if docs.as_array().is_some_and(|docs| !docs.is_empty()) {
+        search
+            .call_and_wait(
+                Method::POST,
+                &format!("/indexes/{index}/documents?primaryKey=id"),
+                Some(docs),
+            )
+            .await?;
+    }
+    let deleted: Vec<Uuid> = ids
+        .iter()
+        .filter(|id| !present.contains(id))
+        .copied()
+        .collect();
+    if !deleted.is_empty() {
+        let result = search
+            .call_and_wait(
+                Method::POST,
+                &format!("/indexes/{index}/documents/delete-batch"),
+                Some(&json!(deleted)),
+            )
+            .await;
+        // Удалять из ещё не созданного индекса нечего.
+        ignore(result, "index_not_found")?;
+    }
+    Ok(())
+}
+
+/// Поиск временно недоступен: Meilisearch не ответил или выключен. Отдаётся как 503 — данные
+/// целы, повторить запрос есть смысл.
+pub fn unavailable() -> AppError {
+    AppError::Unavailable("search is temporarily unavailable".into())
+}
+
+/// Пропускает ожидаемую ошибку Meilisearch (`index_not_found` — удалять нечего).
+pub fn ignore(result: Result<(), SearchError>, code: &str) -> Result<(), SearchError> {
+    match result {
+        Err(error) if error.code() == Some(code) => Ok(()),
+        other => other,
     }
 }

@@ -60,6 +60,8 @@ async fn main() -> anyhow::Result<()> {
     catalog::search::spawn_reindex(state.clone());
     catalog::search::spawn_ratings_sync(state.clone());
     social::ratings::spawn_sync_all(state.clone());
+    // Индекс коллекций: строится при старте, дальше его правят сами записи.
+    social::collection_search::spawn_fill(state.clone());
     // Рейтинг пользователей: полный пересчёт раз в сутки, первый — сразу после старта.
     social::reputation::spawn(state.clone());
     // Вложения, которые загрузили и не отправили: висят на диске без сообщения.

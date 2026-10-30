@@ -4302,7 +4302,7 @@
           "catalog"
         ],
         "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры. Весь\nпоиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).",
-        "description": "Фильтры (через AND): `kind`, `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`\n(год церемонии) и `awarded` (только с наградой).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;\n`awarded` — больше наград сверху.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
+        "description": "Фильтры (через AND): `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`\n(год церемонии) и `awarded` (только с наградой).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;\n`awarded` — больше наград сверху.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
         "operationId": "search",
         "parameters": [
           {
@@ -4322,14 +4322,6 @@
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/SearchSort"
-            }
-          },
-          {
-            "name": "kind",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "$ref": "#/components/schemas/EntityKind"
             }
           },
           {
@@ -4463,6 +4455,19 @@
               "type": "integer",
               "format": "int64"
             }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Типы работ: можно повторить (`kind=movie&kind=game`) или перечислить через запятую. Несколько — ИЛИ между собой и И с остальными фильтрами. Не передан — все типы",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/EntityKind"
+              }
+            },
+            "explode": true
           }
         ],
         "responses": {

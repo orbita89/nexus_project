@@ -12,6 +12,7 @@ pub mod attachments;
 pub mod chat;
 pub mod collection_comments;
 pub mod collection_links;
+pub mod collection_search;
 pub mod collections;
 pub mod comments;
 pub mod directory;

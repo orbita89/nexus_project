@@ -722,7 +722,9 @@ pub struct SearchQuery {
     pub q: Option<String>,
     /// Не передан — по релевантности.
     pub sort: Option<SearchSort>,
-    pub kind: Option<EntityKind>,
+    // `kind` здесь нет намеренно: параметр можно повторить (`?kind=movie&kind=game`), а
+    // serde_urlencoded на повторе падает с «duplicate field». Его разбирает
+    // `shared::extract::Repeated`, а в OpenAPI он описан прямо в `#[utoipa::path]` поиска.
     /// Slug тега.
     pub tag: Option<String>,
     /// Ровно этот год выхода. Вместе с `year_from` / `year_to` — 400.

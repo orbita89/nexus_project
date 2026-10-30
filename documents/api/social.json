@@ -3362,9 +3362,20 @@
         "tags": [
           "collections"
         ],
-        "summary": "Новые публичные коллекции.",
+        "summary": "Новые публичные коллекции, а с `?q=` — поиск по названию и описанию.",
+        "description": "Поиск идёт через Meilisearch (индекс [`crate::collection_search`]): опечатки, сортировка по\nрелевантности, при равной — свежие выше. В индексе только публичные коллекции, поэтому\nприватные не найдёт и их владелец. Страница ответа та же, что и без запроса.",
         "operationId": "list_public",
         "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Поиск по названию и описанию (Meilisearch, опечатки допустимы). Пустой или не передан —\nновые публичные коллекции, как и раньше.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "фильмы про космос"
+          },
           {
             "name": "limit",
             "in": "query",
@@ -3393,6 +3404,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Page_Collection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Слишком длинный запрос",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }

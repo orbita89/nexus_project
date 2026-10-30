@@ -81,6 +81,12 @@ impl Ctx {
             .await
     }
 
+    /// GET гостем, ожидающий 200.
+    async fn get_public(&self, path: &str) -> Value {
+        self.expect(StatusCode::OK, Method::GET, path, None, None)
+            .await
+    }
+
     async fn login(&self, email: &str, role: &str) -> User {
         let app = nexus::build_app(self.state.clone());
         let response = request(
@@ -4649,4 +4655,104 @@ async fn reviews_publish_events(pool: PgPool) {
     let (kind, _, data) = next();
     assert_eq!(kind, "review.deleted");
     assert_eq!(data["review_id"], id);
+}
+
+/// Поиск по коллекциям: `GET /collections?q=` — название и описание через Meilisearch,
+/// только публичные, та же страница ответа.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn collections_search(pool: PgPool) {
+    let mut ctx = Ctx::new(pool);
+    ctx.state = test_utils::with_search(ctx.state);
+    let _cleanup = test_utils::Cleanup::new(&ctx.state);
+    let alice = ctx.login("alice@example.com", "user").await;
+    let bob = ctx.login("bob@example.com", "user").await;
+
+    let space = ctx
+        .collection(
+            &alice,
+            json!({ "title": "Кино про космос", "description": "Полёты и станции" }),
+        )
+        .await;
+    ctx.collection(
+        &bob,
+        json!({ "title": "Уютное фэнтези", "description": "Драконы и чай" }),
+    )
+    .await;
+    let secret = ctx
+        .collection(
+            &alice,
+            json!({ "title": "Космос только для своих", "is_public": false }),
+        )
+        .await;
+
+    // Индекс строится при старте приложения; в тесте — вручную.
+    let built = social::collection_search::fill(&ctx.state).await.unwrap();
+    assert_eq!(built, 2, "приватная в индекс не идёт");
+
+    // По названию, с опечаткой.
+    let page = ctx.get_public("/collections?q=космас").await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["items"][0]["id"], space.as_str());
+    assert_eq!(
+        page["items"][0]["owner"]["username"],
+        alice.username.as_str()
+    );
+    assert_eq!(page["limit"], 20);
+    // По описанию.
+    assert_eq!(ctx.get_public("/collections?q=драконы").await["total"], 1);
+    // Приватную не находит даже владелец.
+    let page = ctx
+        .expect(
+            StatusCode::OK,
+            Method::GET,
+            "/collections?q=только%20для%20своих",
+            None,
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(page["total"], 0, "{page}");
+
+    // Пустой запрос — обычный список новых публичных.
+    assert_eq!(ctx.get_public("/collections?q=%20").await["total"], 2);
+    assert_eq!(ctx.get_public("/collections").await["total"], 2);
+
+    // Правка названия видна поиску сразу, как и снятие публичности.
+    ctx.expect(
+        StatusCode::OK,
+        Method::PATCH,
+        &format!("/collections/{space}"),
+        Some(json!({ "title": "Кино про подводные лодки" })),
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(ctx.get_public("/collections?q=лодки").await["total"], 1);
+    assert_eq!(ctx.get_public("/collections?q=космос").await["total"], 0);
+
+    ctx.expect(
+        StatusCode::OK,
+        Method::PATCH,
+        &format!("/collections/{secret}"),
+        Some(json!({ "is_public": true })),
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(ctx.get_public("/collections?q=космос").await["total"], 1);
+
+    // Удаление убирает из индекса.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &format!("/collections/{secret}"),
+        None,
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(ctx.get_public("/collections?q=космос").await["total"], 0);
+
+    // Слишком длинный запрос — 400.
+    let long = "а".repeat(400);
+    let response = ctx
+        .send(Method::GET, &format!("/collections?q={long}"), None, None)
+        .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
 }

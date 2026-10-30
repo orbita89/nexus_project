@@ -1,10 +1,12 @@
 //! Коллекции: подборки произведений. Публичные видны всем, приватные — только владельцу
 //! (для остальных их как будто нет: 404). Менять коллекцию может только владелец.
 
+use crate::collection_search;
 use crate::models::{
     Collection, CollectionBySlug, CollectionDetail, CollectionEntity, CollectionItem,
-    CollectionItemRow, CollectionRow, CreateCollection, PageQuery, PutCollectionItem, ReorderItems,
-    UpdateCollection, UserCollectionsQuery, COLLECTION_COLUMNS, ITEM_COLUMNS,
+    CollectionItemRow, CollectionRow, CollectionsQuery, CreateCollection, PageQuery,
+    PutCollectionItem, ReorderItems, UpdateCollection, UserCollectionsQuery, COLLECTION_COLUMNS,
+    ITEM_COLUMNS,
 };
 use crate::refs;
 use crate::validate::{
@@ -21,25 +23,62 @@ use sqlx::PgExecutor;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-/// Новые публичные коллекции.
+/// Новые публичные коллекции, а с `?q=` — поиск по названию и описанию.
+///
+/// Поиск идёт через Meilisearch (индекс [`crate::collection_search`]): опечатки, сортировка по
+/// релевантности, при равной — свежие выше. В индексе только публичные коллекции, поэтому
+/// приватные не найдёт и их владелец. Страница ответа та же, что и без запроса.
 #[utoipa::path(
     get, path = "/collections", tag = "collections",
-    params(PageQuery),
-    responses((status = 200, description = "Страница коллекций", body = Page<Collection>))
+    params(CollectionsQuery),
+    responses(
+        (status = 200, description = "Страница коллекций", body = Page<Collection>),
+        (status = 400, description = "Слишком длинный запрос", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+    )
 )]
 pub async fn list_public(
     State(state): State<AppState>,
     viewer: Option<AuthUser>,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<CollectionsQuery>,
 ) -> AppResult<Json<Page<Collection>>> {
-    page(
-        &state,
-        "c.is_public",
-        None,
-        query,
-        viewer.map(|viewer| viewer.id),
-    )
-    .await
+    let viewer = viewer.map(|viewer| viewer.id);
+    let page_query = PageQuery {
+        limit: query.limit,
+        offset: query.offset,
+    };
+    match query.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        None => page(&state, "c.is_public", None, page_query, viewer).await,
+        Some(q) => found(&state, q, page_query, viewer).await,
+    }
+}
+
+/// Страница поиска: порядок задаёт Meilisearch, строки читаются из БД (счётчики, обложка,
+/// автор — как в обычном списке).
+async fn found(
+    state: &AppState,
+    q: &str,
+    query: PageQuery,
+    viewer: Option<Uuid>,
+) -> AppResult<Json<Page<Collection>>> {
+    let (limit, offset) = page_bounds(query.limit, query.offset);
+    let (ids, total) = collection_search::search(state, q, &query).await?;
+    let rows: Vec<CollectionRow> = sqlx::query_as(&format!(
+        "SELECT {COLLECTION_COLUMNS} FROM collections c WHERE c.id = ANY($1) AND c.is_public"
+    ))
+    .bind(&ids)
+    .fetch_all(&state.db)
+    .await?;
+    // Порядок — как в выдаче поиска; строки, удалённые прямо сейчас, пропускаются.
+    let mut by_id: HashMap<Uuid, CollectionRow> =
+        rows.into_iter().map(|row| (row.id, row)).collect();
+    let rows: Vec<CollectionRow> = ids.iter().filter_map(|id| by_id.remove(id)).collect();
+    Ok(Json(Page {
+        items: refs::collections(state, rows, viewer).await?,
+        total,
+        limit,
+        offset,
+    }))
 }
 
 /// Особые коллекции (помечены admin) по порядку — все сразу, их немного.
@@ -284,6 +323,7 @@ pub async fn create(
     .await
     .map_err(validate::missing_reference)?;
 
+    collection_search::update(&state, &[id]).await;
     tracing::info!(user_id = %user.id, collection_id = %id, "collection created");
     let row = load(&state.db, id).await?.ok_or(AppError::NotFound)?;
     Ok((
@@ -340,6 +380,8 @@ pub async fn update(
     .await
     .map_err(featured_must_be_public)?;
 
+    // Название, описание и видимость — всё, что есть в индексе.
+    collection_search::update(&state, &[id]).await;
     let row = load(&state.db, id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(detail(&state, row, Some(user.id)).await?))
 }
@@ -366,6 +408,7 @@ pub async fn delete(
         .bind(id)
         .execute(&state.db)
         .await?;
+    collection_search::update(&state, &[id]).await;
     tracing::info!(user_id = %user.id, collection_id = %id, "collection deleted");
     Ok(StatusCode::NO_CONTENT)
 }

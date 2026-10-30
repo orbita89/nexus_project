@@ -45,7 +45,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use shared::directory::RatingStats;
 use shared::error::ErrorBody;
-use shared::extract::Query;
+use shared::extract::{Query, Repeated};
 use shared::search::{Search, SearchError};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use std::collections::{HashMap, HashSet};
@@ -71,6 +71,10 @@ const RUNNING_LOCK_TTL: Duration = Duration::from_secs(120);
 const RUNNING_LOCK_RENEW: Duration = Duration::from_secs(30);
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+// Общая часть работы с Meilisearch живёт в `shared::search`: ею пользуется и `social`
+// (индекс коллекций), а модули не зависят друг от друга.
+pub(crate) use shared::search::{ignore, search_exact, unavailable, upsert_and_delete};
 
 /// Документ индекса — компактный (решение 2026-10-14): то, по чему ищут (`title`,
 /// `original_title`, `studios`), что показывает выдача (`EntitySummary`: `slug`, постер, дата,
@@ -195,40 +199,6 @@ fn entity_settings() -> Value {
 /// Потолок счёта и листания Meilisearch (по умолчанию 1000) — с запасом на рост горячего слоя.
 pub(crate) const MAX_TOTAL_HITS: u32 = 500_000;
 
-/// Поиск с точным числом совпадений. Точный `totalHits` Meilisearch отдаёт только в режиме
-/// `page` + `hitsPerPage` (`estimatedTotalHits` при `offset`/`limit` — оценка). `offset`, кратный
-/// `limit`, — одна страница; иначе выдача по `offset`/`limit` и параллельно счёт с
-/// `hitsPerPage: 0`. Возвращает ответ Meilisearch (`hits`) и точное число.
-pub(crate) async fn search_exact(
-    search: &Search,
-    path: &str,
-    mut body: Value,
-    limit: i64,
-    offset: i64,
-) -> Result<(Value, i64), SearchError> {
-    if offset % limit == 0 {
-        body["page"] = json!(offset / limit + 1);
-        body["hitsPerPage"] = json!(limit);
-        let response = search.call(Method::POST, path, Some(&body)).await?;
-        let total = response["totalHits"].as_i64().unwrap_or(0);
-        return Ok((response, total));
-    }
-    let mut count = body.clone();
-    count["page"] = json!(1);
-    count["hitsPerPage"] = json!(0);
-    count["attributesToRetrieve"] = json!([]);
-    if let Some(map) = count.as_object_mut() {
-        map.remove("sort");
-    }
-    body["offset"] = json!(offset);
-    body["limit"] = json!(limit);
-    let (response, count) = tokio::try_join!(
-        search.call(Method::POST, path, Some(&body)),
-        search.call(Method::POST, path, Some(&count)),
-    )?;
-    Ok((response, count["totalHits"].as_i64().unwrap_or(0)))
-}
-
 /// Документы пачки сущностей: строки уже прочитаны, теги, оценки Nexus и slug'и студий — по
 /// запросу на пачку. Участников в документе нет: фильтр `person` — через [`person_filter`].
 async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchDoc>, BoxError> {
@@ -311,43 +281,6 @@ async fn update_entities(state: &AppState, touched: &Touched) -> Result<(), BoxE
         {
             tracing::warn!(%error, %shadow, "shadow index sync failed");
         }
-    }
-    Ok(())
-}
-
-/// Обновляет документы `docs` в индексе `index` и удаляет те из `ids`, которых нет среди
-/// `present`. Ждёт применения.
-pub(crate) async fn upsert_and_delete(
-    search: &Search,
-    index: &str,
-    docs: &Value,
-    ids: &[Uuid],
-    present: &[Uuid],
-) -> Result<(), BoxError> {
-    if docs.as_array().is_some_and(|docs| !docs.is_empty()) {
-        search
-            .call_and_wait(
-                Method::POST,
-                &format!("/indexes/{index}/documents?primaryKey=id"),
-                Some(docs),
-            )
-            .await?;
-    }
-    let deleted: Vec<Uuid> = ids
-        .iter()
-        .filter(|id| !present.contains(id))
-        .copied()
-        .collect();
-    if !deleted.is_empty() {
-        let result = search
-            .call_and_wait(
-                Method::POST,
-                &format!("/indexes/{index}/documents/delete-batch"),
-                Some(&json!(deleted)),
-            )
-            .await;
-        // Удалять из ещё не созданного индекса нечего.
-        ignore(result, "index_not_found")?;
     }
     Ok(())
 }
@@ -912,13 +845,6 @@ async fn drop_index(search: &Search, index: &str) {
     }
 }
 
-fn ignore(result: Result<(), SearchError>, code: &str) -> Result<(), SearchError> {
-    match result {
-        Err(error) if error.code() == Some(code) => Ok(()),
-        other => other,
-    }
-}
-
 /// Перестройка в фоне: сразу при старте приложения, затем каждые
 /// `SEARCH_REINDEX_INTERVAL_SECS` (если не 0). По расписанию перестраивает только один инстанс:
 /// блокировка в Redis. Статику фронтенда не трогает.
@@ -1013,14 +939,10 @@ pub async fn sync_ratings(
     ))
 }
 
-pub(crate) fn unavailable() -> AppError {
-    AppError::Unavailable("search is temporarily unavailable".into())
-}
-
 /// Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры. Весь
 /// поиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).
 ///
-/// Фильтры (через AND): `kind`, `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон
+/// Фильтры (через AND): `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон
 /// включительно), `studio` (точное название, без учёта регистра), `person` (slug участника) и
 /// `role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`
 /// (год церемонии) и `awarded` (только с наградой).
@@ -1033,7 +955,13 @@ pub(crate) fn unavailable() -> AppError {
 /// Индекс обновляется после изменений в админке с задержкой в доли секунды.
 #[utoipa::path(
     get, path = "/search", tag = "catalog",
-    params(SearchQuery),
+    params(
+        SearchQuery,
+        ("kind" = Option<Vec<EntityKind>>, Query,
+         description = "Типы работ: можно повторить (`kind=movie&kind=game`) или перечислить \
+                        через запятую. Несколько — ИЛИ между собой и И с остальными фильтрами. \
+                        Не передан — все типы", explode = true),
+    ),
     responses(
         (status = 200, description = "Страница результатов. `total` — всего найдено (точно)", body = Page<EntitySummary>),
         (status = 400, description = "Неверный фильтр", body = ErrorBody),
@@ -1042,10 +970,12 @@ pub(crate) fn unavailable() -> AppError {
 )]
 pub async fn search(
     State(state): State<AppState>,
+    repeated: Repeated,
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Json<Page<EntitySummary>>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
-    let mut filters = filters_of(&query)?;
+    let kinds = kinds_of(&repeated)?;
+    let mut filters = filters_of(&query, &kinds)?;
     if let Some(person) = &query.person {
         match person_filter(&state.db, person, query.role.as_deref()).await? {
             Some(filter) => filters.push(filter),
@@ -1177,10 +1107,21 @@ pub(crate) async fn similar(
 const MAX_STUDIO: usize = 200;
 
 /// Фильтры Meilisearch из запроса. Всё, что подставляется строкой, проверено или экранировано.
-fn filters_of(query: &SearchQuery) -> AppResult<Vec<String>> {
+fn filters_of(query: &SearchQuery, kinds: &[EntityKind]) -> AppResult<Vec<String>> {
     let mut filters = Vec::new();
-    if let Some(kind) = query.kind {
-        filters.push(format!("kind = {}", kind.as_str()));
+    // Типы — ИЛИ между собой и И со всеми остальными фильтрами: «фильмы и игры, но только
+    // с тегом sci-fi». Один тип выглядит в фильтре так же, как раньше.
+    if !kinds.is_empty() {
+        let any = kinds
+            .iter()
+            .map(|kind| format!("kind = {}", kind.as_str()))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        filters.push(if kinds.len() > 1 {
+            format!("({any})")
+        } else {
+            any
+        });
     }
     if let Some(tag) = &query.tag {
         // Проверенный slug безопасно подставлять в строку фильтра.
@@ -1258,6 +1199,23 @@ fn filters_of(query: &SearchQuery) -> AppResult<Vec<String>> {
         (None, None) => {}
     }
     Ok(filters)
+}
+
+/// Типы из запроса: `?kind=movie&kind=game` или `?kind=movie,game`. Неизвестный — 400, как и
+/// раньше у единственного `kind`. Повторы схлопываются, порядок не важен (это ИЛИ).
+fn kinds_of(repeated: &Repeated) -> AppResult<Vec<EntityKind>> {
+    let mut kinds: Vec<EntityKind> = Vec::new();
+    for value in repeated.values("kind") {
+        let kind = EntityKind::parse(value).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "kind must be one of movie, series, book, game (got {value})"
+            ))
+        })?;
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    Ok(kinds)
 }
 
 /// Фильтр `person` (+ `role`): работы человека — из `entity_credits` (индекс по `person_id`), в
@@ -1452,19 +1410,56 @@ mod tests {
         serde_json::from_value(params).unwrap()
     }
 
+    /// Типы запроса из строки вида `kind=movie&kind=game` — как их видит обработчик.
+    fn kinds(raw: &str) -> AppResult<Vec<EntityKind>> {
+        kinds_of(&Repeated::from_query(raw))
+    }
+
+    #[test]
+    fn several_kinds() {
+        assert_eq!(kinds("").unwrap(), []);
+        assert_eq!(kinds("kind=movie").unwrap(), [EntityKind::Movie]);
+        // Повторяющийся параметр и перечисление через запятую — одно и то же.
+        for raw in [
+            "kind=movie&kind=game",
+            "kind=movie,game",
+            "kind=movie&kind=game&kind=movie",
+        ] {
+            assert_eq!(
+                kinds(raw).unwrap(),
+                [EntityKind::Movie, EntityKind::Game],
+                "{raw}"
+            );
+        }
+        assert_eq!(kinds("kind=comic").unwrap_err().code(), "validation");
+        assert_eq!(
+            kinds("kind=movie&kind=comic").unwrap_err().code(),
+            "validation"
+        );
+
+        // В фильтр типы идут как ИЛИ, остальное — через И.
+        let filters = filters_of(
+            &query(json!({ "year": 2001 })),
+            &[EntityKind::Movie, EntityKind::Game],
+        )
+        .unwrap();
+        assert_eq!(filters, ["(kind = movie OR kind = game)", "year = 2001"]);
+        assert_eq!(
+            filters_of(&query(json!({})), &[EntityKind::Movie]).unwrap(),
+            ["kind = movie"]
+        );
+    }
+
     #[test]
     fn filters() {
-        let ok = |params| filters_of(&query(params)).unwrap();
+        let ok = |params| filters_of(&query(params), &[]).unwrap();
         assert_eq!(ok(json!({ "year": 2001 })), ["year = 2001"]);
         assert_eq!(
             ok(json!({ "year_from": 2000, "year_to": 2010 })),
             ["year 2000 TO 2010"]
         );
         assert_eq!(ok(json!({ "year_from": 2000 })), ["year >= 2000"]);
-        assert_eq!(
-            ok(json!({ "year_to": 2010, "kind": "movie" })),
-            ["kind = movie", "year <= 2010"]
-        );
+        assert_eq!(ok(json!({ "year_to": 2010 })), ["year <= 2010"]);
         // Кавычка и обратный слеш не выходят из строки фильтра.
         assert_eq!(
             ok(json!({ "studio": r#" A" OR kind = book \"# })),
@@ -1479,7 +1474,7 @@ mod tests {
             json!({ "person": "Bad Slug" }),
             json!({ "person": "christopher-nolan", "role": "Director" }),
         ] {
-            let error = filters_of(&query(bad.clone())).unwrap_err();
+            let error = filters_of(&query(bad.clone()), &[]).unwrap_err();
             assert_eq!(error.code(), "validation", "{bad}");
         }
         // Фильтр по людям собирает `person_filter` (по БД), здесь — только проверка.

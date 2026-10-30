@@ -3,6 +3,7 @@
 //! закрывает темы.
 
 use crate::collection_comments;
+use crate::collection_search;
 use crate::collections::{self, Editor};
 use crate::comments;
 use crate::events;
@@ -150,6 +151,7 @@ pub async fn delete_collection(
             .fetch_optional(&state.db)
             .await?;
     let owner = owner.ok_or(AppError::NotFound)?;
+    collection_search::update(&state, &[id]).await;
     tracing::info!(admin_id = %admin.id, collection_id = %id, owner_id = %owner, "collection deleted by admin");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -497,6 +499,7 @@ pub async fn update_collection(
     if updated.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
+    collection_search::update(&state, &[id]).await;
     tracing::info!(admin_id = %admin.id, collection_id = %id, "collection updated by admin");
     let row = collections::load(&state.db, id)
         .await?

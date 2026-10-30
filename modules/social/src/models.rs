@@ -222,6 +222,20 @@ pub struct PageQuery {
     pub offset: Option<i64>,
 }
 
+/// Страница публичных коллекций с поиском.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct CollectionsQuery {
+    /// Поиск по названию и описанию (Meilisearch, опечатки допустимы). Пустой или не передан —
+    /// новые публичные коллекции, как и раньше.
+    #[param(example = "фильмы про космос")]
+    pub q: Option<String>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
 // ---------------------------------------------------------------- подписки
 
 /// Подписчик или подписка.

@@ -593,3 +593,24 @@ Authorization: Bearer {{admin_token}}
 > {%
     client.test("204", () => client.assert(response.status === 204, `got ${response.status}`));
 %}
+
+### Поиск по нескольким типам: фильмы и игры, книги не предлагать
+GET {{host}}/api/v1/catalog/search?kind=movie&kind=game&limit=5
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const kinds = new Set(response.body.items.map((i) => i.kind));
+        client.assert(!kinds.has("book"), [...kinds].join());
+    });
+%}
+
+### Неизвестный тип рядом с верным — 400
+GET {{host}}/api/v1/catalog/search?kind=movie&kind=comic
+
+> {%
+    client.test("400 validation", () => {
+        client.assert(response.status === 400, `got ${response.status}`);
+        client.assert(response.body.code === "validation");
+    });
+%}

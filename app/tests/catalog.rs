@@ -3206,3 +3206,46 @@ async fn award_pages_are_revalidated(pool: PgPool) {
         );
     }
 }
+
+/// Несколько типов в одном поиске: `?kind=movie&kind=game` — ИЛИ между типами, И с остальными
+/// фильтрами, порядок общий по всей выдаче (не по типам).
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn search_several_kinds(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+
+    // Один тип — как раньше.
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?kind=book&sort=title").await),
+        ["dune-novel"]
+    );
+    // Два типа: фильмы и игры, книга не предлагается.
+    let page = ctx.get_ok("/search?kind=movie&kind=game&sort=title").await;
+    // Порядок — общий по всей выдаче: «Ведьмак» стоит раньше «Дюны» по алфавиту, хотя это
+    // другой тип.
+    assert_eq!(
+        slugs(&page),
+        ["witcher-3", "dune-2021", "dune-part-two-2024"]
+    );
+    assert_eq!(page["total"], 3);
+    // Перечисление через запятую — то же самое; повтор значения ничего не меняет.
+    for query in ["kind=movie,game", "kind=movie&kind=game&kind=movie"] {
+        assert_eq!(
+            slugs(&ctx.get_ok(&format!("/search?{query}&sort=title")).await),
+            ["witcher-3", "dune-2021", "dune-part-two-2024"],
+            "{query}"
+        );
+    }
+    // И с остальными фильтрами: из двух типов остаётся то, что подходит под тег.
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?kind=movie&kind=game&tag=fantasy").await),
+        ["witcher-3"]
+    );
+    // Без типов — всё, как и было.
+    assert_eq!(ctx.get_ok("/search?sort=title").await["total"], 5);
+    // Неизвестный тип — 400, даже рядом с верным.
+    for query in ["kind=comic", "kind=movie&kind=comic", "kind=movie,comic"] {
+        let response = ctx.get(&format!("/search?{query}")).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{query}");
+        assert!(response.json()["error"].as_str().unwrap().contains("kind"));
+    }
+}

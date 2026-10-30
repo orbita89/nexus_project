@@ -94,6 +94,62 @@ fn rejected(status: StatusCode, text: String) -> AppError {
     }
 }
 
+/// Повторяющиеся параметры запроса: `?kind=movie&kind=game`.
+///
+/// `serde_urlencoded` (на нём стоит [`Query`]) оставляет от повторов только последнее значение,
+/// поэтому такие параметры читаются отдельно — экстрактором рядом с обычным `Query`. Значения,
+/// перечисленные через запятую (`?kind=movie,game`), разбираются так же: клиенту удобнее то
+/// одно, то другое, а для API это одно и то же.
+pub struct Repeated(Vec<(String, String)>);
+
+impl Repeated {
+    /// Из строки запроса (`kind=movie&kind=game`) — для тестов и внутренних вызовов.
+    pub fn from_query(query: &str) -> Self {
+        Self(
+            form_urlencoded::parse(query.as_bytes())
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect(),
+        )
+    }
+
+    /// Все значения параметра в порядке появления; пустые пропускаются.
+    pub fn values(&self, key: &str) -> Vec<&str> {
+        self.0
+            .iter()
+            .filter(|(name, _)| name == key)
+            .flat_map(|(_, value)| value.split(','))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect()
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Repeated {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self::from_query(parts.uri.query().unwrap_or_default()))
+    }
+}
+
+#[cfg(test)]
+mod repeated_tests {
+    use super::Repeated;
+
+    #[test]
+    fn repeats_and_commas_are_one_list() {
+        let repeated = Repeated::from_query("kind=movie&kind=game&tag=sci-fi");
+        assert_eq!(repeated.values("kind"), ["movie", "game"]);
+        assert_eq!(repeated.values("tag"), ["sci-fi"]);
+        assert_eq!(repeated.values("year"), Vec::<&str>::new());
+        // Перечисление через запятую, пробелы и пустые значения.
+        assert_eq!(
+            Repeated::from_query("kind=movie,%20game&kind=&kind=,").values("kind"),
+            ["movie", "game"]
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
