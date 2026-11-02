@@ -39,7 +39,9 @@ Commons — всё под свободной лицензией и с русск
     scripts/catalog-import/.venv/bin/pip install -r scripts/catalog-import/requirements.txt
     DATABASE_URL=postgres://nexus_user:nexus_password@localhost:5432/nexus_db \\
         scripts/catalog-import/.venv/bin/python scripts/catalog-import/paintings_wikidata.py \\
-        [--limit 100] [--min-sitelinks 15] [--dry-run] [-v]
+        [--limit 100] [--min-sitelinks 15] [--pool N] [--dry-run] [-v]
+Дозаполнить размеры обложек у картин, записанных до того, как они стали сохраняться:
+    ... paintings_wikidata.py --fill-sizes
 Затем — точечная индексация записанных картин (скрипт печатает готовую команду):
     scripts/index-entities.sh mona-lisa guernica ...
 Полная перестройка (scripts/reindex-search.sh) для этого не нужна: она строит оба индекса
@@ -54,7 +56,7 @@ import re
 import sys
 import time
 import unicodedata
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 import psycopg2
 import requests
@@ -261,7 +263,9 @@ def cover_sizes(session: requests.Session, names: list[str],
     for start in range(0, len(names), BATCH):
         chunk = names[start:start + BATCH]
         data = http(session, "GET", COMMONS_API, delay=delay, params={
-            "action": "query", "prop": "imageinfo", "iiprop": "size",
+            # `thumbwidth`/`thumbheight` приходят только вместе с `iiprop=url`; с одним `size`
+            # ответ — размеры оригинала, и в базу попадали бы они, а не скачиваемая копия.
+            "action": "query", "prop": "imageinfo", "iiprop": "size|url",
             "iiurlwidth": COVER_WIDTH, "redirects": 1,
             "titles": "|".join(f"File:{name}" for name in chunk), "format": "json",
         })
@@ -451,6 +455,36 @@ def save(conn, row: dict) -> str:
     return "written"
 
 
+def fill_sizes(conn, session: requests.Session, delay: float, dry_run: bool,
+               every: bool = False) -> int:
+    """Дозаполнить `cover_width`/`cover_height` у картин, записанных до того, как размеры стали
+    сохраняться (`every` — перечитать у всех, а не только у пустых). Имя файла Commons берётся
+    из самого `cover_url`."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, cover_url FROM entities WHERE kind = 'painting' "
+                    "AND cover_url LIKE %s" + ("" if every else " AND cover_width IS NULL"),
+                    (f"{COMMONS_FILEPATH}%",))
+        rows = cur.fetchall()
+    by_name: dict[str, list[str]] = {}
+    for entity_id, url in rows:
+        name = unquote(urlparse(url).path.rsplit("/", 1)[-1])
+        by_name.setdefault(name, []).append(entity_id)
+    log.info("дозаполнение размеров: %d картин, %d файлов", len(rows), len(by_name))
+    sizes = cover_sizes(session, sorted(by_name), delay)
+    filled = 0
+    for name, ids in by_name.items():
+        size = sizes.get(name)
+        if not size:
+            continue
+        filled += len(ids)
+        if dry_run:
+            continue
+        with conn, conn.cursor() as cur:
+            cur.execute("UPDATE entities SET cover_width = %s, cover_height = %s "
+                        "WHERE id = ANY(%s::uuid[])", (size[0], size[1], ids))
+    return filled
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -459,8 +493,16 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=100, help="сколько картин записать")
     parser.add_argument("--min-sitelinks", type=int, default=15,
                         help="нижняя граница известности: языковых разделов Википедии")
+    parser.add_argument("--pool", type=int, default=None,
+                        help="сколько id брать у Wikidata (по умолчанию --limit * 3). Нужно для "
+                             "добора: самые известные уже записаны, и окно id надо раздвинуть "
+                             "дальше них, не поднимая число записываемых")
     parser.add_argument("--delay", type=float, default=DELAY,
                         help="пауза между запросами к API Викимедиа, с (429 — увеличить)")
+    parser.add_argument("--fill-sizes", action="store_true",
+                        help="только дозаполнить cover_width/cover_height у записанных картин")
+    parser.add_argument("--all", action="store_true",
+                        help="с --fill-sizes: перечитать размеры у всех, а не только у пустых")
     parser.add_argument("--dry-run", action="store_true", help="не писать в БД")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -476,16 +518,29 @@ def main() -> int:
     session = requests.Session()
     session.headers["User-Agent"] = USER_AGENT
     conn = psycopg2.connect(dsn) if dsn else None
+    if args.fill_sizes:
+        if not conn:
+            log.error("--fill-sizes требует DATABASE_URL")
+            return 2
+        try:
+            log.info("done: размеры у %d картин", fill_sizes(conn, session, args.delay,
+                                                             args.dry_run, args.all))
+        except RuntimeError as error:
+            log.error("%s", error)
+            return 1
+        finally:
+            conn.close()
+        return 0
     known = known_qids(conn) if conn else set()
     stats = {"written": 0, "known": 0, "duplicate": 0, "skipped": 0}
     written_slugs: list[str] = []
     try:
         # С запасом: часть картин уже записана, часть отсеется без названия или изображения.
-        ids = top_paintings(session, args.limit * 3, args.min_sitelinks)
+        ids = top_paintings(session, args.pool or args.limit * 3, args.min_sitelinks)
         log.info("Wikidata: %d картин по известности", len(ids))
         fresh = [qid for qid in ids if qid not in known]
         stats["known"] = len(ids) - len(fresh)
-        fresh = fresh[:args.limit * 2]
+        fresh = fresh[:max(args.limit * 2, args.limit + 100)]
         found = entities(session, fresh, "labels|claims|sitelinks", args.delay)
         # Названия всего, на что ссылаются картины, — одной пачкой на весь прогон.
         linked = sorted({q for entity in found.values()
