@@ -29,9 +29,9 @@
 use crate::entities::check_year;
 use crate::jobs::{self, DoneEvent, JobEvent, Reporter, Step, StepStatus};
 use crate::models::{
-    page_bounds, Entity, EntityKind, EntitySummary, Page, ReindexQuery, ReindexResult,
-    ReleaseStatus, SearchQuery, SearchSort, StudioHit, StudiosQuery, ENTITY_COLUMNS,
-    ENTITY_STATS_JOIN, VISIBLE,
+    page_bounds, Entity, EntityKind, EntitySummary, FacetQuery, IndexEntities, IndexResult, Page,
+    PublisherHit, ReindexQuery, ReindexResult, ReleaseStatus, SearchQuery, SearchSort, StudioHit,
+    StudiosQuery, TagHit, ENTITY_COLUMNS, ENTITY_STATS_JOIN, VISIBLE,
 };
 use crate::people_search;
 use crate::publish::Touched;
@@ -45,7 +45,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use shared::directory::RatingStats;
 use shared::error::ErrorBody;
-use shared::extract::{Query, Repeated};
+use shared::extract::{JsonBody, Query, Repeated};
 use shared::search::{Search, SearchError};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use std::collections::{HashMap, HashSet};
@@ -98,6 +98,12 @@ struct SearchDoc {
     release_ts: Option<i64>,
     /// Все студии из `metadata.studios`: поиск («dreamworks»), фильтр `studio`, подсказки.
     studios: Vec<String>,
+    /// Издатели: `metadata.publisher` книги, `publisher` и `developer` игры — у них студий нет,
+    /// а фильтр раздела тот же по смыслу. Фильтр `publisher`, подсказки `GET /search/publishers`.
+    publishers: Vec<String>,
+    /// Музей или собрание картины (`metadata.museum`): фильтр `museum`, подсказки
+    /// `GET /search/museums`.
+    museums: Vec<String>,
     /// Slug'и тегов: фильтр.
     tags: Vec<String>,
     /// Статистика (`entity_stats`): сортировки `recommended` (`rank_score`), `trending`
@@ -147,6 +153,22 @@ impl SearchDoc {
             .iter()
             .filter_map(|name| studio_slugs.get(name).cloned())
             .collect();
+        // Издатель книги и издатель с разработчиком игры — по одному полю, без повторов.
+        let mut publishers: Vec<String> = Vec::new();
+        for key in ["publisher", "developer"] {
+            if let Some(value) = entity.metadata[key].as_str() {
+                let value = value.trim();
+                if !value.is_empty() && !publishers.iter().any(|p| p == value) {
+                    publishers.push(value.to_owned());
+                }
+            }
+        }
+        let museums = entity.metadata["museum"]
+            .as_str()
+            .map(str::trim)
+            .filter(|museum| !museum.is_empty())
+            .map(|museum| vec![museum.to_owned()])
+            .unwrap_or_default();
         Self {
             id: entity.id,
             kind: entity.kind,
@@ -158,6 +180,8 @@ impl SearchDoc {
             release_date: entity.release_date,
             cover_url: entity.cover_url,
             studios,
+            publishers,
+            museums,
             tags,
             rank_score: entity.rank_score,
             popularity: entity.tmdb_popularity,
@@ -181,17 +205,22 @@ fn day_ts(date: NaiveDate) -> i64 {
 fn entity_settings() -> Value {
     json!({
         // Порядок задаёт вес: совпадение в названии важнее, чем в студии.
-        "searchableAttributes": ["title", "original_title", "studios"],
+        "searchableAttributes": ["title", "original_title", "studios", "publishers"],
         "filterableAttributes": [
-            "kind", "tags", "year", "slug", "studios", "release_ts", "studio_slugs",
+            "kind", "tags", "year", "slug", "studios", "publishers", "museums", "release_ts",
+            "studio_slugs",
             "award_slugs", "award_years", "award_wins", "award_nominations",
         ],
         "sortableAttributes": [
             "rank_score", "popularity", "quality", "release_ts", "title",
             "nexus_ratings_count", "nexus_rating_avg", "award_wins", "award_nominations",
         ],
-        // Подсказки студий без запроса — самые частые.
-        "faceting": { "sortFacetValuesBy": { "studios": "count" } },
+        // Подсказки студий, издателей и тегов без запроса — самые частые.
+        "faceting": {
+            "sortFacetValuesBy": {
+                "studios": "count", "publishers": "count", "museums": "count", "tags": "count",
+            },
+        },
         "pagination": { "maxTotalHits": MAX_TOTAL_HITS },
     })
 }
@@ -943,7 +972,9 @@ pub async fn sync_ratings(
 /// поиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).
 ///
 /// Фильтры (через AND): `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон
-/// включительно), `studio` (точное название, без учёта регистра), `person` (slug участника) и
+/// включительно), `studio` (точное название, без учёта регистра), `publisher` (издательство книги,
+/// издатель или разработчик игры — тоже точное название), `museum` (музей картины),
+/// `person` (slug участника) и
 /// `role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`
 /// (год церемонии) и `awarded` (только с наградой).
 ///
@@ -1164,6 +1195,24 @@ fn filters_of(query: &SearchQuery, kinds: &[EntityKind]) -> AppResult<Vec<String
         }
         filters.push(format!("studios = {}", filter_string(studio)));
     }
+    if let Some(publisher) = &query.publisher {
+        let publisher = publisher.trim();
+        if publisher.is_empty() || publisher.chars().count() > MAX_STUDIO {
+            return Err(AppError::BadRequest(format!(
+                "publisher must be 1-{MAX_STUDIO} characters"
+            )));
+        }
+        filters.push(format!("publishers = {}", filter_string(publisher)));
+    }
+    if let Some(museum) = &query.museum {
+        let museum = museum.trim();
+        if museum.is_empty() || museum.chars().count() > MAX_STUDIO {
+            return Err(AppError::BadRequest(format!(
+                "museum must be 1-{MAX_STUDIO} characters"
+            )));
+        }
+        filters.push(format!("museums = {}", filter_string(museum)));
+    }
     if let Some(studio) = &query.studio_slug {
         // Проверенный slug безопасно подставлять в строку фильтра.
         validate::slug("studio_slug", studio)?;
@@ -1208,7 +1257,7 @@ fn kinds_of(repeated: &Repeated) -> AppResult<Vec<EntityKind>> {
     for value in repeated.values("kind") {
         let kind = EntityKind::parse(value).ok_or_else(|| {
             AppError::BadRequest(format!(
-                "kind must be one of movie, series, book, game (got {value})"
+                "kind must be one of movie, series, book, game, painting (got {value})"
             ))
         })?;
         if !kinds.contains(&kind) {
@@ -1270,30 +1319,7 @@ pub async fn studios(
             "q must be at most {MAX_STUDIO} characters"
         )));
     }
-    let limit = query.limit.unwrap_or(10).clamp(1, 50) as usize;
-    let body = json!({
-        "facetName": "studios",
-        "facetQuery": q,
-        "filter": query.kind.map(|kind| format!("kind = {}", kind.as_str())),
-    });
-    let path = format!("/indexes/{}/facet-search", state.search.index(INDEX));
-    let response = match state.search.call(Method::POST, &path, Some(&body)).await {
-        Ok(response) => response,
-        Err(error) if error.code() == Some("index_not_found") => json!({ "facetHits": [] }),
-        Err(SearchError::Disabled) => return Err(unavailable()),
-        Err(error) => {
-            tracing::warn!(%error, "studio facet search failed");
-            return Err(unavailable());
-        }
-    };
-    let hits: Vec<(String, i64)> = response["facetHits"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .take(limit)
-        .filter_map(|hit| Some((hit["value"].as_str()?.to_string(), hit["count"].as_i64()?)))
-        .collect();
+    let hits = facet_hits(&state, "studios", q, query.kind, query.limit).await?;
     // Slug'и страниц студий — одним запросом на ответ.
     let names: Vec<String> = hits.iter().map(|(name, _)| name.clone()).collect();
     let refs = crate::studios::refs(&state.db, &names).await?;
@@ -1306,6 +1332,230 @@ pub async fn studios(
             })
             .collect(),
     ))
+}
+
+/// Значения фасета с числом видимых сущностей: по части значения с опечатками, без `q` — самые
+/// частые (`sortFacetValuesBy`). `kind` сужает до типа: набор фильтров свой у каждого раздела.
+/// Индекса ещё нет — пусто, Meilisearch недоступен — 503.
+async fn facet_hits(
+    state: &AppState,
+    facet: &str,
+    q: &str,
+    kind: Option<EntityKind>,
+    limit: Option<i64>,
+) -> AppResult<Vec<(String, i64)>> {
+    let limit = limit.unwrap_or(10).clamp(1, 50) as usize;
+    let body = json!({
+        "facetName": facet,
+        "facetQuery": q,
+        "filter": kind.map(|kind| format!("kind = {}", kind.as_str())),
+    });
+    let path = format!("/indexes/{}/facet-search", state.search.index(INDEX));
+    let response = match state.search.call(Method::POST, &path, Some(&body)).await {
+        Ok(response) => response,
+        Err(error) if error.code() == Some("index_not_found") => json!({ "facetHits": [] }),
+        Err(SearchError::Disabled) => return Err(unavailable()),
+        Err(error) => {
+            tracing::warn!(%error, %facet, "facet search failed");
+            return Err(unavailable());
+        }
+    };
+    Ok(response["facetHits"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(limit)
+        .filter_map(|hit| Some((hit["value"].as_str()?.to_string(), hit["count"].as_i64()?)))
+        .collect())
+}
+
+/// Подсказки издателей для фильтра `publisher` (facet search по полю `publishers`): издательство
+/// книги, издатель или разработчик игры. `kind` сужает до раздела — у книг и игр свои издатели.
+#[utoipa::path(
+    get, operation_id = "search_publishers", path = "/search/publishers", tag = "catalog",
+    params(FacetQuery),
+    responses(
+        (status = 200, description = "Издатели", body = Vec<PublisherHit>),
+        (status = 400, description = "Слишком длинный `q`", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+    )
+)]
+pub async fn publishers(
+    State(state): State<AppState>,
+    Query(query): Query<FacetQuery>,
+) -> AppResult<Json<Vec<PublisherHit>>> {
+    let q = query.q.as_deref().unwrap_or_default().trim();
+    if q.chars().count() > MAX_STUDIO {
+        return Err(AppError::BadRequest(format!(
+            "q must be at most {MAX_STUDIO} characters"
+        )));
+    }
+    let hits = facet_hits(&state, "publishers", q, query.kind, query.limit).await?;
+    Ok(Json(
+        hits.into_iter()
+            .map(|(name, count)| PublisherHit { name, count })
+            .collect(),
+    ))
+}
+
+/// Подсказки музеев для фильтра `museum` (facet search по полю `museums`): где хранится картина.
+#[utoipa::path(
+    get, operation_id = "search_museums", path = "/search/museums", tag = "catalog",
+    params(FacetQuery),
+    responses(
+        (status = 200, description = "Музеи", body = Vec<PublisherHit>),
+        (status = 400, description = "Слишком длинный `q`", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+    )
+)]
+pub async fn museums(
+    State(state): State<AppState>,
+    Query(query): Query<FacetQuery>,
+) -> AppResult<Json<Vec<PublisherHit>>> {
+    let q = query.q.as_deref().unwrap_or_default().trim();
+    if q.chars().count() > MAX_STUDIO {
+        return Err(AppError::BadRequest(format!(
+            "q must be at most {MAX_STUDIO} characters"
+        )));
+    }
+    let hits = facet_hits(&state, "museums", q, query.kind, query.limit).await?;
+    Ok(Json(
+        hits.into_iter()
+            .map(|(name, count)| PublisherHit { name, count })
+            .collect(),
+    ))
+}
+
+/// Подсказки тегов и жанров для фильтра `tag` (facet search по полю `tags`): только те, что есть
+/// у сущностей этого типа — жанры фильмов не предлагаются в книгах. Фасет хранит slug'и, поэтому
+/// названия и `kind` тегов дочитываются из `tags` одним запросом на ответ. Запрос `q` по названию
+/// бессмысленен (в фасете slug'и), фильтровать по названию — на стороне клиента.
+#[utoipa::path(
+    get, operation_id = "search_tags", path = "/search/tags", tag = "catalog",
+    params(FacetQuery),
+    responses(
+        (status = 200, description = "Теги и жанры", body = Vec<TagHit>),
+        (status = 400, description = "Слишком длинный `q`", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+    )
+)]
+pub async fn tags(
+    State(state): State<AppState>,
+    Query(query): Query<FacetQuery>,
+) -> AppResult<Json<Vec<TagHit>>> {
+    let q = query.q.as_deref().unwrap_or_default().trim();
+    if q.chars().count() > MAX_STUDIO {
+        return Err(AppError::BadRequest(format!(
+            "q must be at most {MAX_STUDIO} characters"
+        )));
+    }
+    let hits = facet_hits(&state, "tags", q, query.kind, query.limit).await?;
+    let slugs: Vec<String> = hits.iter().map(|(slug, _)| slug.clone()).collect();
+    let rows: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT slug, name, kind FROM tags WHERE slug = ANY($1)")
+            .bind(&slugs)
+            .fetch_all(&state.db)
+            .await?;
+    let named: HashMap<String, (String, String)> = rows
+        .into_iter()
+        .map(|(slug, name, kind)| (slug, (name, kind)))
+        .collect();
+    Ok(Json(
+        hits.into_iter()
+            .map(|(slug, count)| {
+                let (name, kind) = named
+                    .get(&slug)
+                    .cloned()
+                    .unwrap_or_else(|| (slug.clone(), "tag".to_owned()));
+                TagHit {
+                    slug,
+                    name,
+                    kind,
+                    count,
+                }
+            })
+            .collect(),
+    ))
+}
+
+/// Дослать в поисковый индекс только указанные сущности — вместо полной перестройки.
+///
+/// Нужно после загрузки данных в БД в обход API (импорты `scripts/`, `make seed`): перестройка
+/// обоих индексов идёт десятки минут, а сотне новых карточек хватает одного запроса. Делает то
+/// же, что правка в админке ([`update_index`]), но без ISR: видимые сущности переотправляются
+/// (и в теневой индекс, если идёт перестройка), скрытые и удалённые — удаляются из индекса.
+#[utoipa::path(
+    post, operation_id = "index_entities", path = "/admin/search/entities", tag = "catalog-admin",
+    security(("bearer" = [])),
+    request_body = IndexEntities,
+    responses(
+        (status = 200, description = "Отправлено в индекс", body = IndexResult),
+        (status = 400, description = "Нужен ровно один из `slugs` / `ids`, не больше 1000", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+    )
+)]
+pub async fn index_entities(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    JsonBody(req): JsonBody<IndexEntities>,
+) -> AppResult<Json<IndexResult>> {
+    let ids = match (req.slugs, req.ids) {
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(AppError::BadRequest(
+                "exactly one of slugs / ids is required".into(),
+            ))
+        }
+        (Some(slugs), None) => {
+            check_count(slugs.len())?;
+            for slug in &slugs {
+                validate::slug("slugs", slug)?;
+            }
+            sqlx::query_scalar("SELECT id FROM entities WHERE slug = ANY($1)")
+                .bind(&slugs)
+                .fetch_all(&state.db)
+                .await?
+        }
+        (None, Some(ids)) => {
+            check_count(ids.len())?;
+            ids
+        }
+    };
+    let requested = ids.len();
+    // Та же дорога, что у правки в админке: пачками, с ожиданием применения Meilisearch.
+    for chunk in ids.chunks(BATCH) {
+        if let Err(error) = update_entities(&state, &Touched::entities(chunk)).await {
+            tracing::warn!(%error, "index entities failed");
+            return Err(unavailable());
+        }
+    }
+    // Сколько из запрошенных реально видимы: остальные из индекса удалены.
+    let indexed: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM entities e {ENTITY_STATS_JOIN} WHERE e.id = ANY($1) AND {VISIBLE}"
+    ))
+    .bind(&ids)
+    .fetch_one(&state.db)
+    .await?;
+    let indexed = indexed as usize;
+    tracing::info!(admin_id = %admin.id, requested, indexed, "entities sent to search index");
+    Ok(Json(IndexResult {
+        indexed,
+        removed: requested.saturating_sub(indexed),
+    }))
+}
+
+/// Сколько сущностей принимаем за один запрос: ровно столько же читает из БД перестройка.
+const MAX_INDEX_ENTITIES: usize = 1000;
+
+fn check_count(count: usize) -> AppResult<()> {
+    if count == 0 || count > MAX_INDEX_ENTITIES {
+        return Err(AppError::BadRequest(format!(
+            "1-{MAX_INDEX_ENTITIES} entities per request"
+        )));
+    }
+    Ok(())
 }
 
 /// Перестроить поисковый индекс из PostgreSQL без простоя: теневой индекс, проверка размера,

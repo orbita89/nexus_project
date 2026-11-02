@@ -184,6 +184,39 @@ pub struct GameMetadata {
     pub trivia: Option<Vec<String>>,
 }
 
+/// Поля картины. Художник — не здесь, а в титрах (`entity_credits`, роль `artist`): у него своя
+/// страница и фильтр поиска, как у режиссёра. Год создания — `entities.release_date`.
+#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaintingMetadata {
+    /// Техника и материал: «холст, масло».
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "холст, масло")]
+    pub technique: Option<String>,
+    /// Где хранится: музей или собрание. Фильтр `museum` в поиске.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "Лувр")]
+    pub museum: Option<String>,
+    /// Город музея.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "Париж")]
+    pub city: Option<String>,
+    /// Размер в сантиметрах: высота × ширина.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 77.0, minimum = 0.1, maximum = 10000.0)]
+    pub height_cm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 53.0, minimum = 0.1, maximum = 10000.0)]
+    pub width_cm: Option<f64>,
+    /// Награды и номинации: до 50 (у картин почти не бывает, но форма админки общая).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awards: Option<Vec<MetadataAward>>,
+    /// Факты: до 30, каждый 1–1000 символов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = json!(["Украдена из Лувра в 1911 году."]))]
+    pub trivia: Option<Vec<String>>,
+}
+
 /// Строчка награды в `metadata.awards` — текст блока «Производство и факты», а не раздел
 /// «Награды»: тот живёт в таблицах `award_*` и отдаётся схемой `Award` (`catalog::awards`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -327,6 +360,7 @@ pub enum Metadata {
     Series(SeriesMetadata),
     Book(BookMetadata),
     Game(GameMetadata),
+    Painting(PaintingMetadata),
 }
 
 const MAX_TEXT: usize = 200;
@@ -390,6 +424,27 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             m.trivia = trivia(m.trivia)?;
             to_value(m)
         }
+        EntityKind::Painting => {
+            let mut m: PaintingMetadata = parse(kind, metadata)?;
+            m.technique = text("technique", m.technique, MAX_TEXT)?;
+            m.museum = text("museum", m.museum, MAX_TEXT)?;
+            m.city = text("city", m.city, MAX_TEXT)?;
+            size("height_cm", m.height_cm)?;
+            size("width_cm", m.width_cm)?;
+            m.awards = awards(m.awards)?;
+            m.trivia = trivia(m.trivia)?;
+            to_value(m)
+        }
+    }
+}
+
+/// Размер картины в сантиметрах: 0,1–10 000 (меньше миниатюры и больше любого полотна не бывает).
+fn size(field: &str, value: Option<f64>) -> AppResult<()> {
+    match value {
+        Some(v) if !v.is_finite() || !(0.1..=10_000.0).contains(&v) => Err(bad(format!(
+            "metadata.{field} must be between 0.1 and 10000"
+        ))),
+        _ => Ok(()),
     }
 }
 

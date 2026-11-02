@@ -65,10 +65,18 @@ pub enum EntityKind {
     Series,
     Book,
     Game,
+    /// Живопись: раздел «Картины» (импорт `scripts/catalog-import/paintings_wikidata.py`).
+    Painting,
 }
 
 impl EntityKind {
-    pub const ALL: [EntityKind; 4] = [Self::Movie, Self::Series, Self::Book, Self::Game];
+    pub const ALL: [EntityKind; 5] = [
+        Self::Movie,
+        Self::Series,
+        Self::Book,
+        Self::Game,
+        Self::Painting,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -76,6 +84,7 @@ impl EntityKind {
             Self::Series => "series",
             Self::Book => "book",
             Self::Game => "game",
+            Self::Painting => "painting",
         }
     }
 
@@ -92,6 +101,7 @@ impl EntityKind {
             Self::Series => "series",
             Self::Book => "books",
             Self::Game => "games",
+            Self::Painting => "paintings",
         }
     }
 }
@@ -657,6 +667,42 @@ pub struct StudiosQuery {
     pub limit: Option<i64>,
 }
 
+/// Подсказки издателей (`GET /search/publishers`) и тегов (`GET /search/tags`) для фильтров
+/// раздела: набор фильтров свой у каждого типа, поэтому `kind` сужает подсказки до него.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct FacetQuery {
+    /// Начало или часть названия, опечатки допустимы. Пустой — самые частые.
+    #[param(example = "аст")]
+    pub q: Option<String>,
+    /// Только у сущностей этого типа: жанры фильмов не предлагаются в книгах.
+    pub kind: Option<EntityKind>,
+    /// 1–50, по умолчанию 10. Вне диапазона приводится к границам.
+    pub limit: Option<i64>,
+}
+
+/// Издатель в подсказках: название (значение для `publisher`) и сколько сущностей в индексе.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PublisherHit {
+    #[schema(example = "АСТ")]
+    pub name: String,
+    pub count: i64,
+}
+
+/// Тег или жанр в подсказках: slug (значение для `tag`), название и сколько сущностей типа.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct TagHit {
+    #[schema(example = "drama")]
+    pub slug: String,
+    /// Название из `tags`; у тега, которого уже нет в БД, — его slug.
+    #[schema(example = "Драма")]
+    pub name: String,
+    /// `genre` или `tag`.
+    #[schema(example = "genre")]
+    pub kind: String,
+    pub count: i64,
+}
+
 /// Поиск людей.
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -743,6 +789,14 @@ pub struct SearchQuery {
     /// пустая выдача.
     #[param(example = "warner-bros-pictures")]
     pub studio_slug: Option<String>,
+    /// Издатель — точное название (без учёта регистра): издательство книги, издатель или
+    /// разработчик игры. Подсказки — `GET /search/publishers`.
+    #[param(example = "АСТ")]
+    pub publisher: Option<String>,
+    /// Музей или собрание картины — точное название (без учёта регистра). Подсказки —
+    /// `GET /search/museums`.
+    #[param(example = "Лувр")]
+    pub museum: Option<String>,
     /// Slug человека: сущности с его участием (в любой роли).
     #[param(example = "christopher-nolan")]
     pub person: Option<String>,
@@ -920,6 +974,27 @@ pub struct ReindexResult {
     /// Удалённые устаревшие версии.
     #[schema(example = json!(["entities_v1759800000000"]))]
     pub deleted: Vec<String>,
+}
+
+/// Какие сущности дослать в поисковый индекс: `slugs` или `ids`, ровно одно из двух.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IndexEntities {
+    /// Slug'и сущностей: до 1000.
+    #[schema(example = json!(["mona-lisa", "guernica"]))]
+    pub slugs: Option<Vec<String>>,
+    /// Id сущностей: до 1000.
+    pub ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IndexResult {
+    /// Сколько документов ушло в индекс.
+    #[schema(example = 100)]
+    pub indexed: usize,
+    /// Сколько из запрошенных в индексе нет: удалены из БД или скрыты (`active = false`).
+    #[schema(example = 0)]
+    pub removed: usize,
 }
 
 #[derive(Debug, Default, Deserialize, IntoParams)]

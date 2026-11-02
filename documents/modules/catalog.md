@@ -22,7 +22,7 @@
 | Колонка | Тип | Ограничения | Описание |
 |---|---|---|---|
 | `id` | `uuid` | PK | Идентификатор |
-| `kind` | `entity_kind` | NOT NULL | Тип: `movie`, `series`, `book`, `game` |
+| `kind` | `entity_kind` | NOT NULL | Тип: `movie`, `series`, `book`, `game`, `painting` |
 | `slug` | `text` | NOT NULL, UNIQUE | Человекочитаемый id для URL: `dune-2021` |
 | `title` | `text` | NOT NULL | Название (локализованное) |
 | `original_title` | `text` | | Оригинальное название |
@@ -83,6 +83,10 @@ TMDB с русским названием (121 371) и 500 самых попул
 | `game` | `platforms` | до 30 строк по 50 символов: `["pc", "ps5", "switch"]` |
 | | `developer`, `publisher` | строки до 200 символов |
 | | `trailers` | как у `movie` |
+| `painting` | `technique` | строка до 200 символов: «холст, масло» |
+| | `museum` | строка до 200 символов: где хранится; фильтр поиска `museum` |
+| | `city` | строка до 200 символов: город музея |
+| | `height_cm`, `width_cm` | число 0.1–10000, сантиметры (высота × ширина) |
 | `movie`, `series` | `studios` | студии производства: до 20 строк по 1–120 символов (у игр — `developer`/`publisher`, у книг — `publisher`) |
 | все типы | `awards` | награды и номинации, до 50: `[{"award": "Оскар", "category": "за лучший звук", "title": "премия «Оскар» за лучший звук", "year": 2022, "won": true}]`. Все строки 1–200 символов, `year` 1880–2100 или `null`, `won` — получена (`false` — номинация, по умолчанию). `award` — название премии, `category` — номинация внутри неё. Это текст карточки, а не раздел «Награды»: тот живёт в таблицах `award_*`. Схема в OpenAPI — `MetadataAward` (схему `Award` занял раздел) |
 | | `trivia` | факты: до 30 строк по 1–1000 символов |
@@ -100,8 +104,37 @@ id TMDB. Когда QLever отвечает 502, для одного фильм�
 https://query.wikidata.org/sparql`; для всего каталога — нет, у WDQS таймаут 60 с.
 Покрытие Wikidata неполное: у «Оппенгеймера» приходит 6 наград из семи «Оскаров».
 
-**Новый тип** (комиксы, искусство): миграция `ALTER TYPE entity_kind ADD VALUE '...'`, вариант в
+**Новый тип** (комиксы, музыка): миграция `ALTER TYPE entity_kind ADD VALUE '...'`, вариант в
 `EntityKind` (`models.rs`), структура и ветка `validate` в `metadata.rs`.
+
+### Картины ✅ — `scripts/catalog-import/paintings_wikidata.py`
+
+Раздел «Картины» (`kind = painting`, миграция `20261125100000_catalog_paintings.sql`:
+`ALTER TYPE entity_kind ADD VALUE 'painting'` и уникальный индекс
+`entities_external_wikidata_uq` по `external_ids ->> 'wikidata'`). Источник — Wikidata и
+Wikimedia Commons (решение пользователя 2026-10-30): у них есть и полотна, и художники, и музеи,
+и само изображение, и русские названия.
+
+- **Отбор** — SPARQL к WDQS: `wdt:P31 wd:Q3305213` (картина) + `wdt:P18` (изображение),
+  по убыванию `wikibase:sitelinks` (число языковых разделов Википедии — прокси известности),
+  порог `--min-sitelinks` (15), `--limit` (100 по умолчанию, «топ-100»).
+- **Данные** — `wbgetentities` пачками по 50 (заявления и названия), вторая пачка — названия
+  того, на что картины ссылаются (художник, музей, материал, жанр, направление), описания —
+  вступления статей ру-Википедии (`action=query&prop=extracts`).
+- **Запись**: `title` (ру, иначе en), `original_title` (en, если отличается), `description`,
+  `release_date` — год создания P571 (1 января этого года), `cover_url` — Commons
+  `Special:FilePath/<файл>?width=1000` (как логотипы премий), `metadata` — `technique` (P186),
+  `museum` (P195), `city` (P276, если не совпал с музеем), `height_cm`/`width_cm` (P2048/P2049 с
+  переводом единиц в сантиметры), `external_ids = {"wikidata": "Q…"}`. Художник P170 — `people` +
+  `entity_credits` с ролью `artist` (как режиссёр у фильма, страница человека и фильтр `person`
+  работают сами). Жанр P136 → тег `kind = genre`, направление P135 → тег `kind = tag`; нет
+  тега — создаётся.
+- Повторный прогон безопасен: уже записанные qid пропускаются (индекс выше). После прогона —
+  `scripts/reindex-search.sh`, иначе картин не будет ни в поиске, ни в разделе `/paintings`.
+- Трейлеров и обложек со стороны у картин нет: `media` (`providers.rs`) для `painting` ничего не
+  ищет — изображение приходит вместе с данными.
+- Премии (`awards.kinds`) пока ограничены CHECK `movie|series|book|game`: вкладок «Награды» у
+  картин нет.
 
 ### `tags` ✅ — теги
 
@@ -500,7 +533,7 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 | `slides` | `jsonb NOT NULL DEFAULT '[]'` | массив `{image_url, title, subtitle, content_html, link_url}`, ≤ 10 (CHECK), ≥ 1 при `kind=slides` |
 | `buttons` | `jsonb NOT NULL DEFAULT '[]'` | массив `{label 1..60, url, style: primary\|secondary\|ghost}`, ≤ 3 (CHECK) |
 | `theme` | `text` | пресет оформления из `banners::THEMES`: `default, halloween, romance, new-year, horror, sci-fi, family, summer` (проверка в коде) |
-| `targets` | `jsonb NOT NULL DEFAULT '[{"type":"all"}]'` | `{type:"all"}` (только главные страницы разделов: `/`, `/films`, `/series`, `/books`, `/games`, `/people`) \| `{type:"page",page}` \| `{type:"path",pattern}`; 1..20 (CHECK) |
+| `targets` | `jsonb NOT NULL DEFAULT '[{"type":"all"}]'` | `{type:"all"}` (только главные страницы разделов: `/`, `/films`, `/series`, `/books`, `/games`, `/paintings`, `/people`) \| `{type:"page",page}` \| `{type:"path",pattern}`; 1..20 (CHECK) |
 | `exclude_paths` | `text[] NOT NULL DEFAULT '{}'` | шаблоны путей, где не показывать, ≤ 20 (CHECK); `/admin/*` исключён всегда (в коде) |
 | `priority` | `int NOT NULL DEFAULT 0` | больше — выше |
 | `position` | `int NOT NULL DEFAULT 0` | порядок при равном `priority`, по возрастанию |
@@ -539,6 +572,8 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 | `year_from`, `year_to` | `year 2000 TO 2010` (включительно), одна граница — `year >= …` / `year <= …` | 1–9998; `from > to` — 400 |
 | `studio` | `studios = "<название>"` — точное, без учёта регистра (так сравнивает Meilisearch), любая из студий | 1–200 символов после trim; `\` и `"` экранируются |
 | `studio_slug` | `studio_slugs = "<slug>"` — студия по slug страницы `/studios/{slug}` (2026-10-15); неизвестный — пусто | slug, иначе 400 |
+| `publisher` | `publishers = "<название>"` — издательство книги (`metadata.publisher`), издатель или разработчик игры (`publisher`, `developer`); точное, без учёта регистра (2026-10-30) | 1–200 символов после trim; `\` и `"` экранируются |
+| `museum` | `museums = "<название>"` — музей картины (`metadata.museum`); точное, без учёта регистра (2026-10-30) | 1–200 символов после trim; `\` и `"` экранируются |
 | `person` | `people = "<slug>"` — человек в титрах в любой роли (2026-10-15) | slug, иначе 400 |
 | `person` + `role` | `credits = "<role>:<slug>"` — человек именно в этой роли | `person` — slug, `role` — `a-z`/`_`; `role` без `person` — 400 |
 
@@ -552,6 +587,15 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 `q` — самые частые (`faceting.sortFacetValuesBy.studios = count`). Ответ `[{name, slug, count}]`,
 `name` — значение для `studio`, `slug` — страница студии и значение для `studio_slug` (из `studios`
 одним запросом на ответ, `studios::refs`; `null` — строки студии ещё нет, 2026-10-15).
+
+**Подсказки издателей** `GET /search/publishers?q=&kind=&limit=` (2026-10-30) — тот же facet search
+по полю `publishers`. Ответ `[{name, count}]`, `name` — значение для фильтра `publisher`.
+
+**Подсказки тегов** `GET /search/tags?q=&kind=&limit=` (2026-10-30) — facet search по полю `tags`:
+только теги и жанры, которые есть у сущностей этого `kind` (жанры фильмов не попадают в книги).
+Ответ `[{slug, name, kind, count}]`: в фасете только slug'и, название и `kind` (`genre`/`tag`)
+дочитываются из таблицы `tags` одним запросом на ответ. `q` сопоставляется со slug'ом, поэтому
+фронтенд фильтрует по названию у себя, а отсюда берёт состав раздела и счётчики.
 
 Источник правды — PostgreSQL, индекс производный:
 
@@ -595,7 +639,10 @@ Meilisearch считал и листал только 1000: `total` был 1000,
 Документ индекса `entities` — компактный (2026-10-14, `SearchDoc` в `search.rs`): `id`, `kind`,
 `slug`, `title`, `original_title`, `release_date`, `cover_url`, `year`, `release_ts`
 (`release_date` в unix-секундах полуночи UTC: сортировки `new`/`soon`, Meilisearch сравнивает только
-числа), `studios` (все из `metadata.studios`), `tags` (slug'и тегов, фильтр), `rank_score`,
+числа), `studios` (все из `metadata.studios`), `publishers` (издатели: `metadata.publisher` книги,
+`publisher` и `developer` игры, без повторов; фильтр `publisher` и подсказки, 2026-10-30),
+`museums` (музей картины из `metadata.museum`; фильтр `museum` и подсказки, 2026-10-30),
+`tags` (slug'и тегов, фильтр), `rank_score`,
 `popularity`, `quality` (сортировки), `imdb_rating`, `imdb_votes`, `release_status` (выдача),
 `nexus_ratings_count`, `nexus_rating_avg` (оценки Nexus из `entity_ratings`; без оценок — `0` и
 `null`; сортировки `popular`/`rating`, 2026-10-15), `people`, `credits` (участники, фильтр
@@ -603,11 +650,14 @@ Meilisearch считал и листал только 1000: `total` был 1000,
 `metadata.studios`, одним запросом на пачку; фильтр `studio_slug`, 2026-10-15; slug студии не
 меняется, а `studios::sync` идёт до документов — в перестройке перед `fill`, в `publish::run` перед
 индексом).
-Настройки (`entity_settings`): `searchableAttributes` — `title`, `original_title`, `studios`;
-`filterableAttributes` — `kind`, `tags`, `year`, `slug`, `studios`, `release_ts`;
+Настройки (`entity_settings`): `searchableAttributes` — `title`, `original_title`, `studios`,
+`publishers`;
+`filterableAttributes` — `kind`, `tags`, `year`, `slug`, `studios`, `publishers`, `museums`,
+`release_ts`;
 `sortableAttributes` — `rank_score`, `popularity`, `quality`, `release_ts`, `title`,
 `nexus_ratings_count`, `nexus_rating_avg`; в `filterableAttributes` также `people`, `credits`, `studio_slugs`;
-`faceting.sortFacetValuesBy` — `studios: count`; `pagination.maxTotalHits` — 500000. Настройки ставятся на теневой индекс при
+`faceting.sortFacetValuesBy` — `studios: count`, `publishers: count`, `museums: count`,
+`tags: count`; `pagination.maxTotalHits` — 500000. Настройки ставятся на теневой индекс при
 перестройке: после выкладки фильтры `studio`/диапазон/`new` работают, когда пройдёт перестройка
 (при старте — в фоне). Карточки (`card`), описания,
 имён участников и названий тегов в индексе больше нет: поиск по имени актёра или названию тега не
@@ -776,6 +826,15 @@ data: {"type":"done","ok":true,"entity":{ ...карточка как в GET /ent
 | `make seed` (SQL в обход API) | перестройка |
 
 ## Перестройка поиска ✅
+
+**Точечная индексация** (2026-10-30): данные, залитые в БД мимо API (импорты `scripts/`,
+`make seed`), доходят до поиска и без полной перестройки — `POST /admin/search/entities`
+(`search::index_entities`) с телом `{"slugs": [...]}` или `{"ids": [...]}`, до 1000 за запрос.
+Внутри — та же `update_entities`, что и у правки в админке: видимые переотправляются (и в теневой
+индекс, если идёт перестройка), скрытые и удалённые — удаляются; ISR при этом не трогается.
+Обёртка — `scripts/index-entities.sh mona-lisa guernica` (slug'и аргументами или на stdin), её
+печатает импорт картин после прогона. Полная перестройка (`scripts/reindex-search.sh`) нужна
+только когда индекс отстал целиком: она строит оба индекса и идёт десятки минут.
 
 Код — `search.rs` (`reindex`), события — `jobs.rs`. Прямая очистка живого индекса не используется
 никогда. Поиск всегда читает индексы `entities` и `people` — они играют роль алиасов (в Meilisearch
@@ -1190,7 +1249,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/people/{slug}` | Человек и его работы в активных сущностях, новые сверху. Из PostgreSQL. Все работы скрыты — 404; админу — 200 со всеми работами |
 | GET | `/tags` | Все теги с `kind` и `entities_count` (активных сущностей), без пагинации (тегов немного); `?kind=genre\|tag` — только жанры или только теги |
 | GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `entities_count`; нет — 404 |
-| GET | `/banners?path=` / `/banners?page=` | Баннеры страницы сайта. `path` — путь страницы (`/films/dune-2021`; query и `#` отбрасываются, хвостовой `/` тоже; должен начинаться с `/`, ≤ 2048); `page` (совместимость: `home`→`/`, `films`→`/films`, `series`, `books`, `games`, `people`). Возвращает `is_active`, сейчас в окне `starts_at`/`ends_at` (пустая граница — открыта), у которых совпал хотя бы один target (`all` — только главные страницы разделов `/`, `/films`, `/series`, `/books`, `/games`, `/people` после нормализации пути; `page`, соответствующий пути: `/`→home, `/films`→films, …, точное совпадение; `path`-шаблон: `*` — любая последовательность символов, `/x/*` совпадает и с `/x`) и не совпал ни один `exclude_paths`; на `/admin` и `/admin/*` — всегда `[]`. Порядок `priority desc`, `position`, `created_at`; до 20, без пагинации → `[Banner]` (`id`, `page` — первый `targets[].page` или `null`, переходный период; `kind`, `title`, `subtitle`, `image_url`, `link_url`, `content_html`, `custom_html`, `slides`, `buttons`, `theme`, `targets`, `exclude_paths`, `priority`, `position`, `is_active`, `starts_at`, `ends_at`, `created_at`, `updated_at`). Заголовок `Cache-Control: public, max-age=60`. Публичный. 400 `validation` + `field` — нет ни `path`, ни `page`, неизвестная `page`, `path` не с `/` |
+| GET | `/banners?path=` / `/banners?page=` | Баннеры страницы сайта. `path` — путь страницы (`/films/dune-2021`; query и `#` отбрасываются, хвостовой `/` тоже; должен начинаться с `/`, ≤ 2048); `page` (совместимость: `home`→`/`, `films`→`/films`, `series`, `books`, `games`, `paintings`, `people`). Возвращает `is_active`, сейчас в окне `starts_at`/`ends_at` (пустая граница — открыта), у которых совпал хотя бы один target (`all` — только главные страницы разделов `/`, `/films`, `/series`, `/books`, `/games`, `/paintings`, `/people` после нормализации пути; `page`, соответствующий пути: `/`→home, `/films`→films, …, точное совпадение; `path`-шаблон: `*` — любая последовательность символов, `/x/*` совпадает и с `/x`) и не совпал ни один `exclude_paths`; на `/admin` и `/admin/*` — всегда `[]`. Порядок `priority desc`, `position`, `created_at`; до 20, без пагинации → `[Banner]` (`id`, `page` — первый `targets[].page` или `null`, переходный период; `kind`, `title`, `subtitle`, `image_url`, `link_url`, `content_html`, `custom_html`, `slides`, `buttons`, `theme`, `targets`, `exclude_paths`, `priority`, `position`, `is_active`, `starts_at`, `ends_at`, `created_at`, `updated_at`). Заголовок `Cache-Control: public, max-age=60`. Публичный. 400 `validation` + `field` — нет ни `path`, ни `page`, неизвестная `page`, `path` не с `/` |
 | GET | `/archive/search` | Поиск по холодному архиву (Tantivy): `q` (1–200 символов, все слова в `title` или `orig_title`; синтаксис Tantivy разбирается снисходительно), `limit` 1–20 (20), `offset` 0–1000 (0) → `Page<ArchiveDoc>` `{items, total, limit, offset}` (`total` — всего найдено, `Count`); `ArchiveDoc`: `slug`, `title`, `original_title`, `kind`, `tmdb_id`, `release_date`, `popularity`, `cover_url` (`null` — нет постера). Публичный. На сайте — второй блок выдачи после `GET /search` (чекбокс «Архив», по умолчанию включён). 400 — пустой/длинный `q`, `limit`/`offset` вне диапазона; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/stats` | Размер холодного архива: `{"total": N, "by_kind": {"book": 0, "game": 0, "movie": N, "series": 0}}` — документов в индексе Tantivy (работы не на сайте, их ищет `GET /archive/search`). `by_kind` — все типы `EntityKind::ALL` (нет в архиве — 0; новый тип появляется сам), счёт — `Count` по терму поля `type`, удалённые не считаются; всё с одного снимка индекса (`Archive::counts`). `?kind=movie\|series\|book\|game` — `total` только этого типа (как фильтр `kind` у `/search`). Публичный, без запроса к PostgreSQL. Для подписи на сайте («ещё N в архиве»). 400 — неизвестный `kind`; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/entities/{slug}` | Фильм из архива для его страницы (только чтение): `ArchiveDoc` (название, оригинальное название, дата, постер). Публичный. 404 — нет в архиве или неверный slug (фильм мог вернуться на сайт — `GET /entities/{slug}`); 503 — архив недоступен |
@@ -1198,6 +1257,9 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/search` | Весь поиск сайта, Meilisearch, по видимым: `q` (название, оригинальное, студии; пустой — все), фильтры `kind` (можно повторить — `kind=movie&kind=game` — или перечислить через запятую: ИЛИ между типами, И с остальными фильтрами; ранжирование общее по всей выдаче), `tag`, `year` (ровно) или `year_from`/`year_to` (диапазон включительно), `studio` (точное название, без учёта регистра), `studio_slug` (slug студии), `person` (slug, в любой роли) и `person`+`role` (в этой роли) ([«Поиск»](#поиск)). По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb; `new` (вышедшие, новые сверху), `soon` (будущие, ближайшие сверху), `title` (без значения — в конце), `popular` (больше оценок Nexus, затем новее), `rating` (средняя оценка Nexus, затем число оценок, затем новее; без оценок — в конце; оценки доезжают до индекса за ~1 мин); другое значение — 400. `total` — точное число совпадений (до 500000), листается весь результат. 400 — неизвестный `kind` (в том числе рядом с верным), `year` вместе с диапазоном, `year_from > year_to`, год вне 1–9998, пустая/длинная (>200) студия, `role` без `person`, неверный slug тега/человека |
 | GET | `/search/people` | Поиск людей, Meilisearch, индекс `people` ([«Поиск людей»](#поиск-людей-)): `q` (имя по-русски или латиницей, опечатки, начало слова; до 300 символов; пустой — самые известные), `known_for` (основная роль: `actor`, `director`, …), `limit` 1–100 (20), `offset` → `Page<PersonHit>` (`total` точный): `id`, `slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `known_for`. Ранжирование — качество совпадения, затем известность (`person_stats.fame`). 400 — длинный `q`, `known_for` не `a-z`/`_`; 503 — Meilisearch недоступен; индекса нет — пустая страница |
 | GET | `/search/studios` | Подсказки для фильтра `studio` (facet search Meilisearch): `q` — часть названия, опечатки допустимы (пустой — самые частые), `kind`, `limit` 1–50 (10) → `[{"name", "slug", "count"}]` (`slug` — страница студии, значение для `studio_slug`; `null` — страницы нет). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` |
+| GET | `/search/publishers` | Подсказки для фильтра `publisher` (facet search по полю `publishers`): издательство книги, издатель или разработчик игры. `q`, `kind`, `limit` 1–50 (10) → `[{"name", "count"}]`. 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
+| GET | `/search/tags` | Подсказки для фильтра `tag`: теги и жанры, которые есть у сущностей этого `kind` (жанры фильмов не предлагаются в книгах). `q` (по slug'у), `kind`, `limit` 1–50 (10) → `[{"slug", "name", "kind", "count"}]` (название и `kind` — из таблицы `tags`). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
+| GET | `/search/museums` | Подсказки для фильтра `museum` (facet search по полю `museums`): где хранится картина. `q`, `kind`, `limit` 1–50 (10) → `[{"name", "count"}]`. 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
 
 **`related`** в карточке — одна лента для карусели: `[{...EntitySummary, "relation": "prequel"|"sequel"|"remake"}, ...]`, хронологически по `release_date` (без даты — в конце, затем `position`, затем заголовок), пусто — `[]`. Сиквелы, ремейки и приквелы идут **в одной полосе**, тип связи — у каждой карточки. Связи — в самой карточке, а не отдельным запросом: карточка — статика фронтенда, они попадают в HTML.
 
@@ -1254,6 +1316,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 **Санитизация `content_html`** (`banners::sanitize_html`, `ammonia`; и у `slides[].content_html`): теги `p, br, h2, h3, h4, strong, em, b, i, u, s, span, ul, ol, li, a, img, small, mark` (прочие снимаются, текст остаётся; `script`/`style` — с содержимым); атрибуты `a[href]` (`http(s)://` или `/…`, не `//`; `rel`/`target` не ставятся — их выставляет фронт), `img[src]` (только `https://`), `img[alt, width, height]` (размеры — до 5 цифр), `class` — только классы `text-*`/`font-*` (в т.ч. `text-center|left|right`), остальные вырезаются; `style`, `on*`, `iframe`, `form` — вырезаются. Пусто после очистки — `NULL`.
 
 **Санитизация `custom_html`** (`banners::sanitize_custom_html`, отдельный мягкий builder `ammonia`; поле `custom_html`): теги вёрстки `div, section, article, header, footer, nav, aside, main, p, span, br, hr, h1-h6, strong, em, b, i, u, s, small, mark, sub, sup, del, ins, abbr, time, blockquote, q, cite, code, pre, ul, ol, li, dl, dt, dd, a, img, picture, source, figure, figcaption, table, thead, tbody, tfoot, tr, th, td, caption, colgroup, col, wbr`, `<style>` и svg (`svg, g, path, circle, ellipse, line, polyline, polygon, rect, text, tspan, defs, linearGradient, radialGradient, stop, clipPath, mask, pattern, symbol, use, title, desc`); атрибуты на любом теге `class, style, id, href, src, srcset, alt, width, height, target` (`_blank|_self|_top|_parent`), `rel`, `aria-*`, `data-*` (+ `title, role, lang, dir, sizes, media, type, loading, decoding, colspan, rowspan` и атрибуты рисования svg: `viewBox, xmlns, fill*, stroke*, d, cx, cy, r, rx, ry, x, y, x1..y2, points, transform, opacity, offset, stop-*, gradient*, preserveAspectRatio, clip-path, mask, font-size, font-weight, text-anchor, dominant-baseline`). С содержимым вырезаются `script, iframe, object, embed, form, input, base, meta, link, noscript, template, textarea, select, button, frame, frameset, applet`; все `on*` и HTML-комментарии — всегда. URL (`href`, `src`, `xlink:href`, каждый кандидат `srcset`) — только `http(s)://` или путь `/…` (не `//`); `data:image/*` — только `img[src]`, `#id` — только svg `use`; иначе атрибут снимается. CSS (`style="…"` и содержимое `<style>`, `banners::sanitize_css`): убираются комментарии `/*…*/`, `\`-экраны и `NUL`; вырезаются `expression(`, `javascript:`, `vbscript:`, `behavior:`, `-moz-binding`, `@import …;` целиком; аргумент `url(…)` не `http(s)://`/`/…` → `url()`; до неподвижной точки. Пусто после очистки — `NULL` (при `kind=custom` — 400). Фронт рендерит в `<iframe sandbox srcdoc>` без `allow-scripts`, серверная очистка — вторая линия защиты.
+| POST | `/admin/search/entities` | Дослать в индекс только указанные сущности: тело `{"slugs": [...]}` или `{"ids": [...]}` (ровно одно, 1–1000) → `{"indexed", "removed"}` (`removed` — удалены из индекса: нет в БД или скрыты). Делает то же, что правка в админке (`update_entities`), без ISR и без полной перестройки — для импортов, пишущих в БД мимо API. 400 — нет ровно одного списка, пустой или длиннее 1000, неверный slug; 503 — Meilisearch недоступен (2026-10-30) |
 | POST | `/admin/search/reindex` | Перестроить поисковый индекс без простоя (`?force=true` — без проверки размера, `SEARCH_REINDEX_MIN_PERCENT`: 80, в dev 0) → `ReindexResult`; `409` — уже идёт или новый индекс слишком мал |
 | POST | `/admin/search/reindex/stream` | То же потоком `text/event-stream` ([«Перестройка поиска»](#перестройка-поиска-)) |
 | POST | `/admin/tmdb/stats/stream` | «Обновить рейтинги»: дампы TMDB (popularity) и IMDb (рейтинг) → `entity_stats`, пересчёт балла, перестройка поиска; потоком; `done.stats`. `409` — уже идёт долгая операция ([«Сортировка и активные»](#сортировка-и-активные-)) |
@@ -1593,7 +1656,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `metadata.rs` | Схемы `metadata` по типам и их проверка (у книг — `LibgenSource`, `LibgenFile`) |
 | `validate.rs` | Проверка slug, строк, URL, ролей; UNIQUE → 409 |
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение |
-| `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), `GET /search` (фильтры — `filters_of`), `GET /search/studios` |
+| `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), точечная индексация `POST /admin/search/entities` (`index_entities`), `GET /search` (фильтры — `filters_of`), подсказки `GET /search/studios`, `GET /search/publishers`, `GET /search/museums`, `GET /search/tags` (общий `facet_hits`) |
 | `studios.rs` | Студии: `sync(db, ids, companies)` (из `metadata.studios` и `production_companies` ответа TMDB, если передан), `refs` (ссылки в карточке), `GET /studios/{slug}` (данные компании из TMDB при первом открытии), `metadata_filter` для `GET /entities?studio=` |
 | `awards.rs` | Раздел «Награды»: `Award`/`AwardDetail`/`AwardEditionDetail`/`Nomination`/`EntityAward`, `GET /awards`, `/awards/{slug}`, `/awards/{slug}/{year}` (`edition_detail` — и для ответов админки), `entity_awards` / `person_awards` для карточек, `facets_of` для документа индекса |
 | `banners.rs` | Баннеры: `Banner`, `BannerKind`/`BannerSlide`/`BannerButton`/`BannerTarget`, `PAGES`, `THEMES`, `Draft::validate` (проверки с `field`), `sanitize_html` (ammonia), `sanitize_custom_html` + `sanitize_css` (kind=custom), сопоставление путей (`glob`, `/admin/*`, `ALL_PATHS` для цели `all`), `GET /banners` |

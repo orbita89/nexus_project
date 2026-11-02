@@ -1117,8 +1117,10 @@ async fn search_filters_and_sorts(pool: PgPool) {
     sqlx::raw_sql(
         "UPDATE entities SET metadata = metadata || '{\"studios\": [\"Legendary Pictures\", \"Warner Bros. Pictures\"]}'
          WHERE slug IN ('dune-2021', 'dune-part-two-2024');
-         UPDATE entities SET metadata = metadata || '{\"studios\": [\"CD Projekt Red\"]}'
+         UPDATE entities SET metadata = metadata || '{\"studios\": [\"CD Projekt Red\"], \"developer\": \"CD Projekt Red\", \"publisher\": \"CD Projekt\"}'
          WHERE slug = 'witcher-3';
+         UPDATE entities SET metadata = metadata || '{\"publisher\": \"АСТ\"}'
+         WHERE slug = 'dune-novel';
          INSERT INTO entities (kind, slug, title, release_date)
          VALUES ('movie', 'future-film', 'Будущий фильм', current_date + 30);",
     )
@@ -1205,6 +1207,53 @@ async fn search_filters_and_sorts(pool: PgPool) {
     assert_eq!(studios[0]["count"], 1);
     assert!(studios[0]["slug"].is_string(), "{studios}");
 
+    // Издатель: книга — `metadata.publisher`, игра — издатель и разработчик.
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?publisher=%D0%90%D0%A1%D0%A2").await),
+        ["dune-novel"]
+    );
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?publisher=cd%20projekt%20red").await),
+        ["witcher-3"]
+    );
+    assert_eq!(
+        ctx.get("/search?publisher=%20").await.status,
+        StatusCode::BAD_REQUEST
+    );
+    // Подсказки издателей — по разделу: у книг свои, у игр свои.
+    let publishers = ctx.get_ok("/search/publishers?kind=book").await;
+    assert_eq!(publishers.as_array().unwrap().len(), 1, "{publishers}");
+    assert_eq!(publishers[0]["name"], "АСТ");
+    assert_eq!(publishers[0]["count"], 1);
+    let game_publishers = ctx.get_ok("/search/publishers?kind=game").await;
+    let names: Vec<&str> = game_publishers
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names.contains(&"CD Projekt"), "{names:?}");
+
+    // Подсказки тегов — только те, что есть у этого типа: жанры фильмов не лезут в игры.
+    let tags = ctx.get_ok("/search/tags?kind=game").await;
+    assert_eq!(tags.as_array().unwrap().len(), 1, "{tags}");
+    assert_eq!(tags[0]["slug"], "fantasy");
+    assert_eq!(tags[0]["name"], "Фэнтези");
+    assert_eq!(tags[0]["count"], 1);
+    let tags = ctx.get_ok("/search/tags?kind=book").await;
+    assert_eq!(tags.as_array().unwrap().len(), 1, "{tags}");
+    assert_eq!(tags[0]["slug"], "sci-fi");
+    // Без `kind` — все теги индекса; тега без сущностей («unused») в фасете нет.
+    let tags = ctx.get_ok("/search/tags").await;
+    let tag_slugs: Vec<&str> = tags
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(tag_slugs, ["sci-fi", "fantasy"], "{tags}");
+
     // Люди: `person` — в любой роли, `person` + `role` — именно в этой.
     let sorted = |page: &Value| {
         let mut slugs: Vec<String> = slugs(page).into_iter().map(str::to_owned).collect();
@@ -1287,6 +1336,97 @@ async fn search_follows_admin_changes(pool: PgPool) {
         .await;
     ctx.search_until("/search?q=neuromancer", |p| p["total"] == 0)
         .await;
+}
+
+/// Точечная индексация: данные, залитые в БД мимо API, доходят до поиска одним запросом — без
+/// полной перестройки обоих индексов.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn index_entities_without_full_reindex(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    sqlx::raw_sql(
+        "INSERT INTO entities (kind, slug, title, release_date)
+         VALUES ('painting', 'mona-lisa', 'Мона Лиза', '1503-01-01');",
+    )
+    .execute(&ctx.state.db)
+    .await
+    .unwrap();
+    // Запись мимо API в индекс сама не попадает.
+    assert_eq!(ctx.get_ok("/search?kind=painting").await["total"], 0);
+
+    let (status, body) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/search/entities",
+            Some(json!({ "slugs": ["mona-lisa"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["indexed"], 1);
+    assert_eq!(body["removed"], 0);
+    ctx.search_until("/search?kind=painting", |p| slugs(p) == ["mona-lisa"])
+        .await;
+
+    // Скрытая сущность уходит из индекса тем же запросом; её id в ответе — `removed`.
+    let id = ctx.entity_id("mona-lisa").await;
+    sqlx::raw_sql("UPDATE entities SET active = false WHERE slug = 'mona-lisa';")
+        .execute(&ctx.state.db)
+        .await
+        .unwrap();
+    let (status, body) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/search/entities",
+            Some(json!({ "ids": [id] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["indexed"], 0);
+    assert_eq!(body["removed"], 1);
+    ctx.search_until("/search?kind=painting", |p| p["total"] == 0)
+        .await;
+
+    // Нужен ровно один список и непустой; чужой slug — просто ничего не находится.
+    for body in [
+        json!({}),
+        json!({ "slugs": [], "ids": [] }),
+        json!({ "slugs": [] }),
+        json!({ "slugs": ["Не Slug"] }),
+    ] {
+        let (status, error) = ctx
+            .admin_send(Method::POST, "/admin/search/entities", Some(body.clone()))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
+    }
+    let (status, body) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/search/entities",
+            Some(json!({ "slugs": ["no-such-entity"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["removed"], 0, "{body}");
+
+    // Только админ.
+    let response = ctx
+        .send(
+            Method::POST,
+            "/admin/search/entities",
+            Some(json!({ "slugs": ["mona-lisa"] })),
+            None,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    let user = ctx.token("user@example.com", "user").await;
+    let response = ctx
+        .send(
+            Method::POST,
+            "/admin/search/entities",
+            Some(json!({ "slugs": ["mona-lisa"] })),
+            Some(&user),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::FORBIDDEN);
 }
 
 // ---------------------------------------------------------------- карточки из БД

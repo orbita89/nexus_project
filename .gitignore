@@ -15,3 +15,6 @@ scripts/catalog-import/cache/
 
 # Вложения чата при локальном запуске без docker (ATTACHMENTS_DIR по умолчанию).
 data/
+
+# Байткод питоновых скриптов импорта.
+__pycache__/

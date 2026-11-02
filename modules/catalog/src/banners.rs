@@ -19,7 +19,15 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 /// Страницы сайта для цели `{type:"page"}` и `?page=`.
-pub const PAGES: [&str; 6] = ["home", "films", "series", "books", "games", "people"];
+pub const PAGES: [&str; 7] = [
+    "home",
+    "films",
+    "series",
+    "books",
+    "games",
+    "paintings",
+    "people",
+];
 /// Пресеты оформления: те же id, что у тем особых коллекций (общий список фронтенда).
 pub const THEMES: [&str; 8] = [
     "default",
@@ -43,7 +51,15 @@ pub const MAX_HTML: usize = 20_000;
 /// Лимит `custom_html` (символы; до и после санитизации).
 pub const MAX_CUSTOM_HTML: usize = 100_000;
 /// Пути, где показывается цель `{type:"all"}`: главные страницы разделов.
-pub const ALL_PATHS: [&str; 6] = ["/", "/films", "/series", "/books", "/games", "/people"];
+pub const ALL_PATHS: [&str; 7] = [
+    "/",
+    "/films",
+    "/series",
+    "/books",
+    "/games",
+    "/paintings",
+    "/people",
+];
 /// Разделы, где баннеры не показываются никогда (кроме `exclude_paths` баннера).
 const ALWAYS_EXCLUDED: [&str; 1] = ["/admin/*"];
 
@@ -123,9 +139,11 @@ pub struct BannerButton {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum BannerTarget {
-    /// Главные страницы разделов: `/`, `/films`, `/series`, `/books`, `/games`, `/people`.
+    /// Главные страницы разделов: `/`, `/films`, `/series`, `/books`, `/games`, `/paintings`,
+    /// `/people`.
     All,
-    /// Страница: `home` (`/`), `films` (`/films`), `series`, `books`, `games`, `people`.
+    /// Страница: `home` (`/`), `films` (`/films`), `series`, `books`, `games`, `paintings`,
+    /// `people`.
     Page { page: String },
     /// Шаблон пути: начинается с `/`, `*` — любой хвост (`/collections/*`), без `?` и `#`, ≤ 200.
     Path { pattern: String },
@@ -176,7 +194,8 @@ pub struct Banner {
 pub struct BannersQuery {
     /// Путь страницы сайта: `/films/dune-2021` (query и `#` отбрасываются). Нужен `path` или `page`.
     pub path: Option<String>,
-    /// Совместимость: `home`, `films`, `series`, `books`, `games`, `people` (= путь `/`, `/films`, …).
+    /// Совместимость: `home`, `films`, `series`, `books`, `games`, `paintings`, `people`
+    /// (= путь `/`, `/films`, …).
     pub page: Option<String>,
 }
 

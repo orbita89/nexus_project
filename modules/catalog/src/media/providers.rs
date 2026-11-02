@@ -298,6 +298,8 @@ impl Finder for HttpFinder {
                     )
                 })
             }),
+            // Картины приходят из Wikidata вместе с изображением из Commons: искать негде.
+            EntityKind::Painting => None,
         }?;
         // Найденное проверяем сразу: незачем записывать битую ссылку.
         (self.image_alive(&url).await == Liveness::Alive).then_some(url)
@@ -310,7 +312,7 @@ impl Finder for HttpFinder {
                 .igdb_game(target)
                 .await
                 .and_then(|g| pick::igdb_trailer(&g).map(str::to_string)),
-            EntityKind::Book => None,
+            EntityKind::Book | EntityKind::Painting => None,
         }?;
         let source = TrailerSource {
             provider: TrailerProvider::Youtube,
@@ -320,7 +322,7 @@ impl Finder for HttpFinder {
     }
 
     async fn rutube_trailer(&self, target: &Target) -> Option<String> {
-        if target.kind == EntityKind::Book {
+        if matches!(target.kind, EntityKind::Book | EntityKind::Painting) {
             return None;
         }
         let id = self.rutube_search(target).await?;

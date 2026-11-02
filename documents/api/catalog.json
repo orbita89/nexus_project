@@ -2932,6 +2932,83 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/search/entities": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Дослать в поисковый индекс только указанные сущности — вместо полной перестройки.",
+        "description": "Нужно после загрузки данных в БД в обход API (импорты `scripts/`, `make seed`): перестройка\nобоих индексов идёт десятки минут, а сотне новых карточек хватает одного запроса. Делает то\nже, что правка в админке ([`update_index`]), но без ISR: видимые сущности переотправляются\n(и в теневой индекс, если идёт перестройка), скрытые и удалённые — удаляются из индекса.",
+        "operationId": "index_entities",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IndexEntities"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Отправлено в индекс",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Нужен ровно один из `slugs` / `ids`, не больше 1000",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/search/reindex": {
       "post": {
         "tags": [
@@ -3905,7 +3982,7 @@
           {
             "name": "page",
             "in": "query",
-            "description": "Совместимость: `home`, `films`, `series`, `books`, `games`, `people` (= путь `/`, `/films`, …).",
+            "description": "Совместимость: `home`, `films`, `series`, `books`, `games`, `paintings`, `people`\n(= путь `/`, `/films`, …).",
             "required": false,
             "schema": {
               "type": "string"
@@ -4302,7 +4379,7 @@
           "catalog"
         ],
         "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры. Весь\nпоиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).",
-        "description": "Фильтры (через AND): `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`\n(год церемонии) и `awarded` (только с наградой).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;\n`awarded` — больше наград сверху.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
+        "description": "Фильтры (через AND): `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `publisher` (издательство книги,\nиздатель или разработчик игры — тоже точное название), `museum` (музей картины),\n`person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`\n(год церемонии) и `awarded` (только с наградой).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;\n`awarded` — больше наград сверху.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
         "operationId": "search",
         "parameters": [
           {
@@ -4385,6 +4462,26 @@
               "type": "string"
             },
             "example": "warner-bros-pictures"
+          },
+          {
+            "name": "publisher",
+            "in": "query",
+            "description": "Издатель — точное название (без учёта регистра): издательство книги, издатель или\nразработчик игры. Подсказки — `GET /search/publishers`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "АСТ"
+          },
+          {
+            "name": "museum",
+            "in": "query",
+            "description": "Музей или собрание картины — точное название (без учёта регистра). Подсказки —\n`GET /search/museums`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "Лувр"
           },
           {
             "name": "person",
@@ -4504,6 +4601,81 @@
         }
       }
     },
+    "/api/v1/catalog/search/museums": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Подсказки музеев для фильтра `museum` (facet search по полю `museums`): где хранится картина.",
+        "operationId": "search_museums",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Начало или часть названия, опечатки допустимы. Пустой — самые частые.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "аст"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Только у сущностей этого типа: жанры фильмов не предлагаются в книгах.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–50, по умолчанию 10. Вне диапазона приводится к границам.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Музеи",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PublisherHit"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Слишком длинный `q`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/catalog/search/people": {
       "get": {
         "tags": [
@@ -4586,6 +4758,81 @@
         }
       }
     },
+    "/api/v1/catalog/search/publishers": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Подсказки издателей для фильтра `publisher` (facet search по полю `publishers`): издательство\nкниги, издатель или разработчик игры. `kind` сужает до раздела — у книг и игр свои издатели.",
+        "operationId": "search_publishers",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Начало или часть названия, опечатки допустимы. Пустой — самые частые.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "аст"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Только у сущностей этого типа: жанры фильмов не предлагаются в книгах.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–50, по умолчанию 10. Вне диапазона приводится к границам.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Издатели",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PublisherHit"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Слишком длинный `q`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/catalog/search/studios": {
       "get": {
         "tags": [
@@ -4633,6 +4880,81 @@
                   "type": "array",
                   "items": {
                     "$ref": "#/components/schemas/StudioHit"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Слишком длинный `q`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/search/tags": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Подсказки тегов и жанров для фильтра `tag` (facet search по полю `tags`): только те, что есть\nу сущностей этого типа — жанры фильмов не предлагаются в книгах. Фасет хранит slug'и, поэтому\nназвания и `kind` тегов дочитываются из `tags` одним запросом на ответ. Запрос `q` по названию\nбессмысленен (в фасете slug'и), фильтровать по названию — на стороне клиента.",
+        "operationId": "search_tags",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Начало или часть названия, опечатки допустимы. Пустой — самые частые.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "аст"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Только у сущностей этого типа: жанры фильмов не предлагаются в книгах.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–50, по умолчанию 10. Вне диапазона приводится к границам.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Теги и жанры",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TagHit"
                   }
                 }
               }
@@ -5553,7 +5875,7 @@
         "oneOf": [
           {
             "type": "object",
-            "description": "Главные страницы разделов: `/`, `/films`, `/series`, `/books`, `/games`, `/people`.",
+            "description": "Главные страницы разделов: `/`, `/films`, `/series`, `/books`, `/games`, `/paintings`,\n`/people`.",
             "required": [
               "type"
             ],
@@ -5568,7 +5890,7 @@
           },
           {
             "type": "object",
-            "description": "Страница: `home` (`/`), `films` (`/films`), `series`, `books`, `games`, `people`.",
+            "description": "Страница: `home` (`/`), `films` (`/films`), `series`, `books`, `games`, `paintings`,\n`people`.",
             "required": [
               "page",
               "type"
@@ -6520,7 +6842,8 @@
           "movie",
           "series",
           "book",
-          "game"
+          "game",
+          "painting"
         ]
       },
       "EntitySort": {
@@ -6723,6 +7046,59 @@
         },
         "additionalProperties": false
       },
+      "IndexEntities": {
+        "type": "object",
+        "description": "Какие сущности дослать в поисковый индекс: `slugs` или `ids`, ровно одно из двух.",
+        "properties": {
+          "ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Id сущностей: до 1000."
+          },
+          "slugs": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Slug'и сущностей: до 1000.",
+            "example": [
+              "mona-lisa",
+              "guernica"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "IndexResult": {
+        "type": "object",
+        "required": [
+          "indexed",
+          "removed"
+        ],
+        "properties": {
+          "indexed": {
+            "type": "integer",
+            "description": "Сколько документов ушло в индекс.",
+            "example": 100,
+            "minimum": 0
+          },
+          "removed": {
+            "type": "integer",
+            "description": "Сколько из запрошенных в индексе нет: удалены из БД или скрыты (`active = false`).",
+            "example": 0,
+            "minimum": 0
+          }
+        }
+      },
       "JobEvent": {
         "oneOf": [
           {
@@ -6884,6 +7260,9 @@
           },
           {
             "$ref": "#/components/schemas/GameMetadata"
+          },
+          {
+            "$ref": "#/components/schemas/PaintingMetadata"
           }
         ],
         "description": "Поля, специфичные для типа (`kind`). Все поля необязательны, неизвестные запрещены.\nТолько для документации: разбирается по `kind` функцией [`validate`]."
@@ -7790,6 +8169,81 @@
           }
         }
       },
+      "PaintingMetadata": {
+        "type": "object",
+        "description": "Поля картины. Художник — не здесь, а в титрах (`entity_credits`, роль `artist`): у него своя\nстраница и фильтр поиска, как у режиссёра. Год создания — `entities.release_date`.",
+        "properties": {
+          "awards": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/MetadataAward"
+            },
+            "description": "Награды и номинации: до 50 (у картин почти не бывает, но форма админки общая)."
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Город музея.",
+            "example": "Париж"
+          },
+          "height_cm": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Размер в сантиметрах: высота × ширина.",
+            "example": 77.0,
+            "maximum": 10000,
+            "minimum": 0.1
+          },
+          "museum": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Где хранится: музей или собрание. Фильтр `museum` в поиске.",
+            "example": "Лувр"
+          },
+          "technique": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Техника и материал: «холст, масло».",
+            "example": "холст, масло"
+          },
+          "trivia": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Факты: до 30, каждый 1–1000 символов.",
+            "example": [
+              "Украдена из Лувра в 1911 году."
+            ]
+          },
+          "width_cm": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "example": 53.0,
+            "maximum": 10000,
+            "minimum": 0.1
+          }
+        },
+        "additionalProperties": false
+      },
       "Person": {
         "type": "object",
         "description": "Человек целиком (строка `people`).",
@@ -8076,6 +8530,24 @@
             "format": "int64",
             "example": 100000,
             "minimum": 0
+          }
+        }
+      },
+      "PublisherHit": {
+        "type": "object",
+        "description": "Издатель в подсказках: название (значение для `publisher`) и сколько сущностей в индексе.",
+        "required": [
+          "name",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string",
+            "example": "АСТ"
           }
         }
       },
@@ -8725,6 +9197,36 @@
           "slug": {
             "type": "string",
             "example": "sci-fi"
+          }
+        }
+      },
+      "TagHit": {
+        "type": "object",
+        "description": "Тег или жанр в подсказках: slug (значение для `tag`), название и сколько сущностей типа.",
+        "required": [
+          "slug",
+          "name",
+          "kind",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`genre` или `tag`.",
+            "example": "genre"
+          },
+          "name": {
+            "type": "string",
+            "description": "Название из `tags`; у тега, которого уже нет в БД, — его slug.",
+            "example": "Драма"
+          },
+          "slug": {
+            "type": "string",
+            "example": "drama"
           }
         }
       },
