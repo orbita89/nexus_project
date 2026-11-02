@@ -34,7 +34,7 @@
 | `cover_url` | `text` | | Постер или обложка |
 | `cover_width`, `cover_height` | `int` | > 0 | Размеры файла обложки в пикселях: карточка получает точное `aspect-ratio` до загрузки картинки (стена картин не перестраивается на лету). Неизвестны — `NULL`. Миграция `20261126100000_entity_cover_size.sql`. Пишет тот, кто кладёт `cover_url`: импорт картин (размер превью Commons) и админка (`cover_width` + `cover_height` только вместе с `cover_url`, иначе 400; `cover_url` без них их стирает — от другого файла они неверны). `make media`, подобрав новый постер, тоже обнуляет |
 | `metadata` | `jsonb` | NOT NULL, default `{}` | Поля, специфичные для типа (см. ниже) |
-| `external_ids` | `jsonb` | NOT NULL, default `{}` | Id во внешних сервисах: `{"tmdb": 550}`. Новый сервис — новый ключ, без новой таблицы. Индекс `entities_external_tmdb_uq` — UNIQUE `((external_ids->>'tmdb')::int)` WHERE `external_ids ? 'tmdb'` (запросы пишут то же условие). Игры: `{"steam": 292030}`, индекс `entities_external_steam_uq` — UNIQUE `((external_ids->>'steam')::int)` WHERE `external_ids ? 'steam'` (миграция `20261029100000_external_steam.sql`, пишет `scripts/games-import/steam_games.py`). Пишут импорт (`merge.py`), сборка горячего слоя и возврат из архива; читают VISIBLE, «Обновить рейтинги», «Пересобрать активные», `nexus archive dump`, demote. Миграция `20261027100000_external_ids.sql` (перенос из `entity_tmdb`) |
+| `external_ids` | `jsonb` | NOT NULL, default `{}` | Id во внешних сервисах: `{"tmdb": 550}`. Новый сервис — новый ключ, без новой таблицы. Индекс `entities_external_tmdb_uq` — UNIQUE `((external_ids->>'tmdb')::int)` WHERE `external_ids ? 'tmdb'` (запросы пишут то же условие). Игры: `{"steam": 292030}`, индекс `entities_external_steam_uq` — UNIQUE `((external_ids->>'steam')::int)` WHERE `external_ids ? 'steam'` (миграция `20261029100000_external_steam.sql`, пишет `scripts/games-import/steam_games.py`). Сериалы из TMDB: `{"tmdb_tv": 1396}`, индекс `entities_external_tmdb_tv_uq` (миграция `20261127100000_external_tmdb_tv.sql`) — **не** `tmdb`: id фильмов и сериалов у TMDB независимы, а `external_ids ? 'tmdb'` по всему каталогу значит «фильм из TMDB» (видимость, «Пересобрать активные», архив). Пишут импорт (`merge.py`), сборка горячего слоя и возврат из архива; читают VISIBLE, «Обновить рейтинги», «Пересобрать активные», `nexus archive dump`, demote. Миграция `20261027100000_external_ids.sql` (перенос из `entity_tmdb`) |
 | `active` | `boolean` | NOT NULL, default `true` | Видна на сайте. Миграция `20261016100000_entity_active.sql`, см. ниже |
 | `active_manual` | `boolean` | NOT NULL, default `false` | `active` переключали в админке (`PATCH`, `POST` с `active`) или это сид, привязанный импортом: «Пересобрать активные» не трогает. Миграция `20261017100000_entity_tmdb.sql` |
 | `created_at` | `timestamptz` | NOT NULL | |
@@ -110,6 +110,41 @@ https://query.wikidata.org/sparql`; для всего каталога — не�
 
 **Новый тип** (комиксы, музыка): миграция `ALTER TYPE entity_kind ADD VALUE '...'`, вариант в
 `EntityKind` (`models.rs`), структура и ветка `validate` в `metadata.rs`.
+
+### Сериалы ✅ — `scripts/catalog-import/series_tmdb.py`
+
+Топ сериалов TMDB (`kind = series`). Отдельный маленький скрипт, а не ветка конвейера фильмов
+(`fetch_tmdb.py` → `merge.py`): тот рассчитан на 1,2 млн строк с кэшем, дампом id и слиянием с
+Wikidata, здесь — сотня-другая прямыми запросами.
+
+- **Отбор** — `/discover/tv`: `--source rated` (по умолчанию) — по рейтингу среди сериалов с 500+
+  голосами (`MIN_VOTES`), `voted` — по числу голосов, `popular` — по популярности; `--limit` (100).
+  Готовый `/tv/top_rated` не годится: он поднимает наверх свежие премьеры с десятком оценок.
+- **Данные** — `GET /3/tv/{id}?language=ru-RU&append_to_response=credits,videos,images` на сериал.
+- **Запись**: `title` (ru, иначе `original_name`), `original_title` (если отличается),
+  `description` (`overview`), `release_date` (`first_air_date`), `cover_url` — постер
+  `image.tmdb.org/t/p/w780` (как у фильмов), `cover_width`/`cover_height` — размеры этой копии
+  (ширина 780, высота по пропорциям оригинала из `images`), `metadata` — `seasons`, `episodes`,
+  `status` (`Returning Series`/`Ended`/`Canceled` → `ongoing`/`ended`/`canceled`, прочие — пусто),
+  `countries` (`origin_country`), `studios` (`production_companies`), `trailers` (YouTube из
+  `videos`, официальные первыми, до 5). Участники: `created_by` → роль `creator`, первые 15
+  `credits.cast` → `actor` с именем персонажа. Жанры — `/genre/tv/list` (ru + en, slug как у
+  фильмов, где id совпадают); нет тега — создаётся. В `entity_stats` пишутся `tmdb_popularity` и
+  `tmdb_votes`.
+- **`external_ids = {"tmdb_tv": id}`, а не `tmdb`** (индекс `entities_external_tmdb_tv_uq`,
+  миграция `20261127100000_external_tmdb_tv.sql`). Две причины, обе ломающие: у TMDB независимые
+  пространства id фильмов и сериалов (1399 — и фильм, и «Игра престолов»), общий
+  `entities_external_tmdb_uq` отверг бы такой сериал как дубль; и условие `external_ids ? 'tmdb'`
+  по всему каталогу значит «фильм из TMDB» — по нему считается `visible`, «Пересобрать активные»
+  гасит всё, что не вошло в топ по баллу «Рекомендуемые», туда же смотрит перенос в холодный
+  архив. Под ключом `tmdb` сериалы погасли бы при первом же пересчёте.
+- Slug: транслит оригинального названия, затем русского (у японских и корейских оригиналов
+  транслит пуст: «進撃の巨人» → `ataka-titanov`), в последнюю очередь `<base>-tv<id>`.
+- Балл «Рекомендуемые» считается только по фильмам (`ranking.rs`), поэтому у сериалов
+  `rank_score` пуст и в сортировке по умолчанию они идут последними; работают `rating`, `popular`,
+  `trending`, `new`, `title`.
+- Повторный прогон безопасен: записанные id пропускаются (и не запрашиваются у TMDB). После
+  прогона — `scripts/index-entities.sh <slug'и>` (скрипт печатает готовую команду).
 
 ### Картины ✅ — `scripts/catalog-import/paintings_wikidata.py`
 
