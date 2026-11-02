@@ -39,7 +39,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Повторяющиеся параметры запроса (`?kind=movie&kind=game`): serde_urlencoded их теряет.
 form_urlencoded = "1"
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls",
     "postgres",
