@@ -33,6 +33,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(entities::list))
         .routes(routes!(entities::get))
         .routes(routes!(entities::similar))
+        .routes(routes!(search::neighbors))
         .routes(routes!(people::list))
         .routes(routes!(people::get))
         .routes(routes!(studios::get))

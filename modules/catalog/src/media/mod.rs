@@ -245,12 +245,20 @@ pub async fn run_with<F: Finder>(
             if !options.dry_run {
                 let metadata = metadata::validate(row.kind, metadata)
                     .map_err(|e| format!("{}: {e}", row.slug))?;
-                sqlx::query("UPDATE entities SET cover_url = $2, metadata = $3 WHERE id = $1")
-                    .bind(row.id)
-                    .bind(&cover_url)
-                    .bind(&metadata)
-                    .execute(&state.db)
-                    .await?;
+                // Картинка сменилась — прежние размеры обложки уже не её: стираем.
+                sqlx::query(
+                    "UPDATE entities SET cover_url = $2, metadata = $3,
+                         cover_width = CASE WHEN cover_url IS DISTINCT FROM $2
+                                            THEN NULL ELSE cover_width END,
+                         cover_height = CASE WHEN cover_url IS DISTINCT FROM $2
+                                             THEN NULL ELSE cover_height END
+                     WHERE id = $1",
+                )
+                .bind(row.id)
+                .bind(&cover_url)
+                .bind(&metadata)
+                .execute(&state.db)
+                .await?;
                 touched.push(row.id);
             }
         }

@@ -15,6 +15,9 @@ Commons — всё под свободной лицензией и с русск
     cover_url       ← изображение P18 через Commons `Special:FilePath/<файл>?width=1000`
                       (как логотипы премий, awards_logos.py: стабильный адрес, сам отдаёт копию
                       нужной ширины; у нас картинки не хранятся)
+    cover_width,    ← размеры той самой копии (`imageinfo` Commons с `iiurlwidth`): карточка
+    cover_height      получает точное `aspect-ratio` до загрузки файла, и стена картин не
+                      перестраивается на лету
     metadata        ← {"technique", "museum", "city", "height_cm", "width_cm"}
                       (схема `PaintingMetadata` в `catalog::metadata`)
     external_ids    ← {"wikidata": "Q12418"}; индекс `entities_external_wikidata_uq`
@@ -60,6 +63,7 @@ WDQS = "https://query.wikidata.org/sparql"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
 RUWIKI_API = "https://ru.wikipedia.org/w/api.php"
 COMMONS_FILEPATH = "https://commons.wikimedia.org/wiki/Special:FilePath/"
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 COVER_WIDTH = 1000
 USER_AGENT = "nexus-catalog-import/1.0 (Nexus dev data import{}) python-requests".format(
     f"; {c}" if (c := os.environ.get("WIKIMEDIA_CONTACT")) else "")
@@ -234,13 +238,42 @@ def size_cm(entity: dict, prop: str) -> float | None:
     return None
 
 
-def cover_of(entity: dict) -> str | None:
-    """Изображение P18 → адрес файла Commons нужной ширины."""
+def cover_file(entity: dict) -> str | None:
+    """Имя файла изображения P18 в Commons."""
     for claim in claims(entity, P_IMAGE):
         name = value_of(claim)
         if isinstance(name, str) and name.strip():
-            return f"{COMMONS_FILEPATH}{quote(name.strip().replace(' ', '_'))}?width={COVER_WIDTH}"
+            return name.strip().replace(" ", "_")
     return None
+
+
+def cover_of(name: str) -> str:
+    """Имя файла Commons → адрес копии нужной ширины."""
+    return f"{COMMONS_FILEPATH}{quote(name)}?width={COVER_WIDTH}"
+
+
+def cover_sizes(session: requests.Session, names: list[str],
+                delay: float = DELAY) -> dict[str, tuple[int, int]]:
+    """Размеры тех самых копий шириной COVER_WIDTH, пачками по 50: `imageinfo` с `iiurlwidth`
+    возвращает `thumbwidth`/`thumbheight` — ровно то, что получит браузер. У файла уже этой
+    ширины или уже её (панорамы) миниатюры нет, тогда берём размеры оригинала."""
+    sizes = {}
+    for start in range(0, len(names), BATCH):
+        chunk = names[start:start + BATCH]
+        data = http(session, "GET", COMMONS_API, delay=delay, params={
+            "action": "query", "prop": "imageinfo", "iiprop": "size",
+            "iiurlwidth": COVER_WIDTH, "redirects": 1,
+            "titles": "|".join(f"File:{name}" for name in chunk), "format": "json",
+        })
+        for page in ((data.get("query") or {}).get("pages") or {}).values():
+            info = (page.get("imageinfo") or [{}])[0]
+            width = info.get("thumbwidth") or info.get("width")
+            height = info.get("thumbheight") or info.get("height")
+            title = (page.get("title") or "").removeprefix("File:").replace(" ", "_")
+            if title and isinstance(width, int) and isinstance(height, int) \
+                    and width > 0 and height > 0:
+                sizes[title] = (width, height)
+    return sizes
 
 
 def ruwiki_titles(entities_by_id: dict) -> dict[str, str]:
@@ -271,13 +304,16 @@ def extracts(session: requests.Session, titles: dict[str, str],
     return {qid: by_title[title] for qid, title in titles.items() if title in by_title}
 
 
-def row_of(qid: str, entity: dict, names: dict[str, str], description: str | None) -> dict | None:
+def row_of(qid: str, entity: dict, names: dict[str, str], description: str | None,
+           sizes: dict[str, tuple[int, int]]) -> dict | None:
     """Строка каталога из записи Wikidata; `None` — нечего показывать."""
     title_ru, title_en = label(entity, "ru"), label(entity, "en")
     title = clean(title_ru or title_en, MAX_TITLE)
-    cover = cover_of(entity)
-    if not title or not cover:
+    file_name = cover_file(entity)
+    if not title or not file_name:
         return None
+    cover = cover_of(file_name)
+    width, height = sizes.get(file_name, (None, None))
     original = clean(title_en, MAX_TITLE)
     year = year_of(entity)
     museum = next((names[q] for q in ref_current(entity, P_COLLECTION) if q in names), None)
@@ -310,6 +346,8 @@ def row_of(qid: str, entity: dict, names: dict[str, str], description: str | Non
         "description": clean(description, MAX_DESCRIPTION),
         "release_date": f"{year:04d}-01-01" if year else None,
         "cover_url": cover,
+        "cover_width": width,
+        "cover_height": height,
         "metadata": {k: v for k, v in metadata.items() if v is not None},
         "tags": tags,
         "artists": artists,
@@ -380,12 +418,12 @@ def save(conn, row: dict) -> str:
             return "duplicate"
         cur.execute(
             """INSERT INTO entities (kind, slug, title, original_title, description, release_date,
-                                     cover_url, metadata, external_ids)
-               VALUES ('painting', %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                                     cover_url, cover_width, cover_height, metadata, external_ids)
+               VALUES ('painting', %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
                ON CONFLICT DO NOTHING RETURNING id""",
             (
                 slug, row["title"], row["original_title"], row["description"],
-                row["release_date"], row["cover_url"],
+                row["release_date"], row["cover_url"], row["cover_width"], row["cover_height"],
                 json.dumps(row["metadata"], ensure_ascii=False),
                 json.dumps({"wikidata": row["wikidata"]}),
             ),
@@ -458,11 +496,14 @@ def main() -> int:
                  for qid, e in entities(session, linked, "labels", args.delay).items()}
         names = {qid: name for qid, name in names.items() if name}
         descriptions = extracts(session, ruwiki_titles(found), args.delay)
+        # Размеры превью Commons — одной пачкой на весь прогон, как и названия.
+        sizes = cover_sizes(session, sorted({name for entity in found.values()
+                                             if (name := cover_file(entity))}), args.delay)
         for qid in fresh:
             if stats["written"] >= args.limit:
                 break
             entity = found.get(qid)
-            row = row_of(qid, entity, names, descriptions.get(qid)) if entity else None
+            row = row_of(qid, entity, names, descriptions.get(qid), sizes) if entity else None
             if not row:
                 stats["skipped"] += 1
                 continue

@@ -121,6 +121,14 @@ pub struct EntitySummary {
     pub original_title: Option<String>,
     pub release_date: Option<NaiveDate>,
     pub cover_url: Option<String>,
+    /// Размеры файла обложки в пикселях: карточка получает точное `aspect-ratio` ещё до
+    /// загрузки картинки (важно для картин — у них пропорции свои у каждой). Неизвестны — `null`.
+    #[serde(default)]
+    #[schema(example = 1000)]
+    pub cover_width: Option<i32>,
+    #[serde(default)]
+    #[schema(example = 1493)]
+    pub cover_height: Option<i32>,
     /// По сегодняшней дате: `soon` — бейдж «Скоро премьера».
     #[serde(default)]
     #[sqlx(try_from = "String")]
@@ -135,7 +143,8 @@ pub struct EntitySummary {
 }
 
 pub const ENTITY_SUMMARY_COLUMNS: &str = concat!(
-    "e.id, e.kind, e.slug, e.title, e.original_title, e.release_date, e.cover_url, ",
+    "e.id, e.kind, e.slug, e.title, e.original_title, e.release_date, e.cover_url, \
+     e.cover_width, e.cover_height, ",
     release_status_sql!(),
     " AS release_status, \
      (SELECT es.imdb_rating FROM entity_stats es WHERE es.entity_id = e.id) AS imdb_rating, \
@@ -156,6 +165,9 @@ pub struct Entity {
     pub description: Option<String>,
     pub release_date: Option<NaiveDate>,
     pub cover_url: Option<String>,
+    /// Размеры файла обложки в пикселях; неизвестны — `null`. См. [`EntitySummary`].
+    pub cover_width: Option<i32>,
+    pub cover_height: Option<i32>,
     /// Поля, специфичные для `kind`.
     #[schema(value_type = crate::metadata::Metadata)]
     pub metadata: Value,
@@ -183,7 +195,7 @@ pub struct Entity {
 
 pub const ENTITY_COLUMNS: &str = concat!(
     "e.id, e.kind, e.slug, e.title, e.original_title, e.description, \
-     e.release_date, e.cover_url, e.metadata, e.active, ",
+     e.release_date, e.cover_url, e.cover_width, e.cover_height, e.metadata, e.active, ",
     visible_sql!(),
     " AS visible, ",
     release_status_sql!(),
@@ -469,6 +481,10 @@ pub enum SearchSort {
     Rating,
     /// Больше наград (`award_wins`).
     Awarded,
+    /// Наугад: случайное окно выдачи. Нужен для «ещё одной работы», когда ряд и похожие
+    /// кончились; порядок у каждого запроса свой, поэтому для листания не годится
+    /// (`GET /entities/{slug}/neighbors` отвечает на него 400).
+    Random,
 }
 
 /// Сущность в админском списке: как в публичном, плюс флаг активности.
@@ -818,6 +834,13 @@ pub struct SearchQuery {
     pub offset: Option<i64>,
 }
 
+/// Соседи работы в той же выдаче (`GET /entities/{slug}/neighbors`). Края ряда — `null`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Neighbors {
+    pub prev: Option<EntitySummary>,
+    pub next: Option<EntitySummary>,
+}
+
 // ------------------------------------------------------------------ admin
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -835,6 +858,10 @@ pub struct CreateEntity {
     pub release_date: Option<NaiveDate>,
     /// `http(s)://...`
     pub cover_url: Option<String>,
+    /// Размеры файла обложки в пикселях, 1–100000. Принимаются только вместе с `cover_url`
+    /// (без него — 400): размеры от прежней картинки хуже, чем их отсутствие.
+    pub cover_width: Option<i32>,
+    pub cover_height: Option<i32>,
     /// Поля для `kind`. По умолчанию `{}`.
     #[schema(value_type = Option<crate::metadata::Metadata>)]
     pub metadata: Option<Value>,
@@ -865,6 +892,10 @@ pub struct UpdateEntity {
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<String>)]
     pub cover_url: Option<Option<String>>,
+    /// Размеры новой обложки в пикселях, 1–100000. Только вместе с `cover_url` (иначе 400);
+    /// `cover_url` без них стирает прежние — от другой картинки они всё равно неверны.
+    pub cover_width: Option<i32>,
+    pub cover_height: Option<i32>,
     #[schema(value_type = Option<crate::metadata::Metadata>)]
     pub metadata: Option<Value>,
     /// Включить (`true`) или скрыть с сайта (`false`). Помечает `active_manual`: «пересобрать

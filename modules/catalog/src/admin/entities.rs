@@ -78,14 +78,16 @@ pub async fn create(
     let original_title = validate::optional("original_title", req.original_title, MAX_TITLE)?;
     let description = validate::optional("description", req.description, MAX_LONG_TEXT)?;
     let cover_url = validate::url("cover_url", req.cover_url)?;
+    let (cover_width, cover_height) =
+        validate::cover_size(cover_url.is_some(), req.cover_width, req.cover_height)?;
     let metadata = metadata::validate(req.kind, req.metadata.unwrap_or_else(|| json!({})))?;
 
     let mut tx = state.db.begin().await?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO entities
-             (kind, slug, title, original_title, description, release_date, cover_url, metadata,
-              active, active_manual)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+             (kind, slug, title, original_title, description, release_date, cover_url,
+              cover_width, cover_height, metadata, active, active_manual)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
     )
     .bind(req.kind)
     .bind(&req.slug)
@@ -94,6 +96,8 @@ pub async fn create(
     .bind(description)
     .bind(req.release_date)
     .bind(cover_url)
+    .bind(cover_width)
+    .bind(cover_height)
     .bind(metadata)
     .bind(req.active.unwrap_or(true))
     .bind(req.active.is_some())
@@ -210,6 +214,10 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
             .map(|v| validate::url("cover_url", v))
             .transpose()?,
     );
+    // Размеры идут за картинкой: `cover_url` без них стирает прежние (от другого файла они
+    // всё равно неверны), а без `cover_url` они и вовсе не принимаются.
+    let (cover_width, cover_height) =
+        validate::cover_size(cover_url.1.is_some(), req.cover_width, req.cover_height)?;
     let metadata = req
         .metadata
         .map(|value| metadata::validate(kind, value))
@@ -225,9 +233,11 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
              description = CASE WHEN $6 THEN $7 ELSE description END,
              release_date = CASE WHEN $8 THEN $9 ELSE release_date END,
              cover_url = CASE WHEN $10 THEN $11 ELSE cover_url END,
-             metadata = COALESCE($12, metadata),
-             active = COALESCE($13, active),
-             active_manual = active_manual OR $13 IS NOT NULL
+             cover_width = CASE WHEN $10 THEN $12 ELSE cover_width END,
+             cover_height = CASE WHEN $10 THEN $13 ELSE cover_height END,
+             metadata = COALESCE($14, metadata),
+             active = COALESCE($15, active),
+             active_manual = active_manual OR $15 IS NOT NULL
          WHERE id = $1",
     )
     .bind(id)
@@ -241,6 +251,8 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
     .bind(release_date.1)
     .bind(cover_url.0)
     .bind(cover_url.1)
+    .bind(cover_width)
+    .bind(cover_height)
     .bind(metadata)
     .bind(req.active)
     .execute(&state.db)

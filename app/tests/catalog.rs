@@ -1290,6 +1290,133 @@ async fn search_filters_and_sorts(pool: PgPool) {
     }
 }
 
+/// Листание на карточке: соседи в той же выдаче, случайная работа и размеры обложки, по которым
+/// карточка получает `aspect-ratio` до загрузки файла.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn entity_neighbors_random_and_cover_size(pool: PgPool) {
+    let ctx = Ctx::unindexed(pool);
+    sqlx::raw_sql(
+        "UPDATE entities SET cover_url = 'https://img.test/dune.jpg',
+                             cover_width = 1000, cover_height = 1493
+         WHERE slug = 'dune-2021';",
+    )
+    .execute(&ctx.state.db)
+    .await
+    .unwrap();
+    let (status, body) = ctx
+        .admin_send(Method::POST, "/admin/search/reindex", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Ряд `sort=new`: dune-part-two-2024, dune-2021, witcher-3, dune-novel.
+    let row = ctx.get_ok("/entities/dune-2021/neighbors?sort=new").await;
+    assert_eq!(row["prev"]["slug"], "dune-part-two-2024", "{row}");
+    assert_eq!(row["next"]["slug"], "witcher-3", "{row}");
+    // Края ряда — null, а не 404.
+    let first = ctx
+        .get_ok("/entities/dune-part-two-2024/neighbors?sort=new")
+        .await;
+    assert!(first["prev"].is_null(), "{first}");
+    assert_eq!(first["next"]["slug"], "dune-2021");
+    let last = ctx.get_ok("/entities/dune-novel/neighbors?sort=new").await;
+    assert_eq!(last["prev"]["slug"], "witcher-3", "{last}");
+    assert!(last["next"].is_null(), "{last}");
+
+    // Фильтры те же, что у `/search`: ряд сужается до фильмов.
+    let movies = ctx
+        .get_ok("/entities/dune-2021/neighbors?sort=new&kind=movie")
+        .await;
+    assert_eq!(movies["prev"]["slug"], "dune-part-two-2024", "{movies}");
+    assert!(movies["next"].is_null(), "{movies}");
+    // Работы нет в этой выдаче — оба края пустые (фронт покажет похожие).
+    let outside = ctx
+        .get_ok("/entities/witcher-3/neighbors?sort=new&kind=movie")
+        .await;
+    assert!(outside["prev"].is_null() && outside["next"].is_null());
+    let unknown = ctx.get_ok("/entities/no-such-slug/neighbors").await;
+    assert!(unknown["prev"].is_null() && unknown["next"].is_null());
+    // У случайного порядка соседей нет; неверный фильтр — как в поиске.
+    for bad in [
+        "/entities/dune-2021/neighbors?sort=random",
+        "/entities/dune-2021/neighbors?tag=Bad%20Slug",
+    ] {
+        assert_eq!(ctx.get(bad).await.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    // Размеры обложки — и в выдаче поиска (документ Meilisearch), и в соседях, и на карточке.
+    assert_eq!(first["next"]["cover_width"], 1000, "{first}");
+    assert_eq!(first["next"]["cover_height"], 1493);
+    let page = ctx.get_ok("/search?q=dune&kind=movie&sort=new").await;
+    let found = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["slug"] == "dune-2021")
+        .expect("dune-2021 in search");
+    assert_eq!(found["cover_width"], 1000, "{page}");
+    let card = ctx.get_ok("/entities/dune-2021").await;
+    assert_eq!(card["cover_width"], 1000, "{card}");
+    assert_eq!(card["cover_height"], 1493);
+    assert!(card["cover_width"].is_number());
+    let without = ctx.get_ok("/entities/witcher-3").await;
+    assert!(without["cover_width"].is_null(), "{without}");
+
+    // `sort=random`: одна работа под теми же фильтрами, `total` — как у обычной выдачи.
+    let random = ctx.get_ok("/search?sort=random&limit=1&kind=movie").await;
+    assert_eq!(random["total"], 2, "{random}");
+    assert_eq!(random["items"].as_array().unwrap().len(), 1, "{random}");
+    assert!(
+        ["dune-2021", "dune-part-two-2024"].contains(&random["items"][0]["slug"].as_str().unwrap()),
+        "{random}"
+    );
+    // Фильтр без единой работы — пустая выдача, а не ошибка.
+    let none = ctx.get_ok("/search?sort=random&limit=1&year=1800").await;
+    assert_eq!(none["total"], 0, "{none}");
+    assert_eq!(none["items"], json!([]));
+
+    // Размеры обложки принимаются только вместе с картинкой.
+    let id = ctx.entity_id("witcher-3").await;
+    let (status, body) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}"),
+            Some(json!({ "cover_width": 800, "cover_height": 600 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}"),
+            Some(json!({ "cover_url": "https://img.test/w3.jpg", "cover_width": 800 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}"),
+            Some(json!({
+                "cover_url": "https://img.test/w3.jpg",
+                "cover_width": 800,
+                "cover_height": 600,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cover_width"], 800, "{body}");
+    // Новая картинка без размеров стирает прежние: от другого файла они уже неверны.
+    let (status, body) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}"),
+            Some(json!({ "cover_url": "https://img.test/w3-new.jpg" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["cover_width"].is_null(), "{body}");
+}
+
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn search_follows_admin_changes(pool: PgPool) {
     let ctx = Ctx::new(pool).await;

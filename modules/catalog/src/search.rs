@@ -29,9 +29,9 @@
 use crate::entities::check_year;
 use crate::jobs::{self, DoneEvent, JobEvent, Reporter, Step, StepStatus};
 use crate::models::{
-    page_bounds, Entity, EntityKind, EntitySummary, FacetQuery, IndexEntities, IndexResult, Page,
-    PublisherHit, ReindexQuery, ReindexResult, ReleaseStatus, SearchQuery, SearchSort, StudioHit,
-    StudiosQuery, TagHit, ENTITY_COLUMNS, ENTITY_STATS_JOIN, VISIBLE,
+    page_bounds, Entity, EntityKind, EntitySummary, FacetQuery, IndexEntities, IndexResult,
+    Neighbors, Page, PublisherHit, ReindexQuery, ReindexResult, ReleaseStatus, SearchQuery,
+    SearchSort, StudioHit, StudiosQuery, TagHit, ENTITY_COLUMNS, ENTITY_STATS_JOIN, VISIBLE,
 };
 use crate::people_search;
 use crate::publish::Touched;
@@ -45,7 +45,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use shared::directory::RatingStats;
 use shared::error::ErrorBody;
-use shared::extract::{JsonBody, Query, Repeated};
+use shared::extract::{JsonBody, Path, Query, Repeated};
 use shared::search::{Search, SearchError};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use std::collections::{HashMap, HashSet};
@@ -91,6 +91,9 @@ struct SearchDoc {
     original_title: Option<String>,
     release_date: Option<NaiveDate>,
     cover_url: Option<String>,
+    /// Размеры файла обложки: выдача ставит карточке `aspect-ratio` до загрузки картинки.
+    cover_width: Option<i32>,
+    cover_height: Option<i32>,
     /// Для фильтров `year = 2021`, `year 2000 TO 2010`.
     year: Option<i32>,
     /// `release_date` в unix-секундах (полночь UTC): сортировки `new` / `soon` и их фильтр
@@ -179,6 +182,8 @@ impl SearchDoc {
             original_title: entity.original_title,
             release_date: entity.release_date,
             cover_url: entity.cover_url,
+            cover_width: entity.cover_width,
+            cover_height: entity.cover_height,
             studios,
             publishers,
             museums,
@@ -981,7 +986,10 @@ pub async fn sync_ratings(
 /// Сортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу
 /// «Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только
 /// вышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;
-/// `awarded` — больше наград сверху.
+/// `awarded` — больше наград сверху; `random` — случайное окно выдачи (`limit=1` — одна случайная
+/// работа под те же фильтры: ею заканчивается листание, когда ряд и похожие кончились).
+///
+/// Соседей работы в этой же выдаче отдаёт `GET /entities/{slug}/neighbors`.
 ///
 /// Индекс обновляется после изменений в админке с задержкой в доли секунды.
 #[utoipa::path(
@@ -1005,53 +1013,27 @@ pub async fn search(
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Json<Page<EntitySummary>>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
-    let kinds = kinds_of(&repeated)?;
-    let mut filters = filters_of(&query, &kinds)?;
-    if let Some(person) = &query.person {
-        match person_filter(&state.db, person, query.role.as_deref()).await? {
-            Some(filter) => filters.push(filter),
-            // Ни одной работы (или нет такого человека) — искать нечего.
-            None => {
-                return Ok(Json(Page {
-                    items: Vec::new(),
-                    total: 0,
-                    limit,
-                    offset,
-                }))
-            }
-        }
-    }
-    let sort = match query.sort {
-        Some(SearchSort::Recommended) => Some("rank_score:desc"),
-        Some(SearchSort::Trending) => Some("popularity:desc"),
-        Some(SearchSort::TopRated) => Some("quality:desc"),
-        Some(SearchSort::New) => {
-            filters.push(format!("release_ts <= {}", day_ts(Utc::now().date_naive())));
-            Some("release_ts:desc")
-        }
-        Some(SearchSort::Soon) => {
-            filters.push(format!("release_ts > {}", day_ts(Utc::now().date_naive())));
-            Some("release_ts:asc")
-        }
-        Some(SearchSort::Title) => Some("title:asc"),
-        Some(SearchSort::Popular) => Some("nexus_ratings_count:desc"),
-        Some(SearchSort::Rating) => Some("nexus_rating_avg:desc"),
-        Some(SearchSort::Awarded) => Some("award_wins:desc"),
-        None => None,
+    let empty = |limit, offset| {
+        Json(Page {
+            items: Vec::new(),
+            total: 0,
+            limit,
+            offset,
+        })
     };
-    let mut body = json!({
-        "q": query.q.as_deref().unwrap_or_default().trim(),
-        "filter": if filters.is_empty() { Value::Null } else { filters.join(" AND ").into() },
-        "attributesToRetrieve": SUMMARY_FIELDS,
-    });
-    if let Some(sort) = sort {
-        // Как в `GET /entities`: при равной средней — больше оценок, затем новее.
-        body["sort"] = match query.sort {
-            Some(SearchSort::Popular) => json!([sort, "release_ts:desc"]),
-            Some(SearchSort::Rating) => {
-                json!([sort, "nexus_ratings_count:desc", "release_ts:desc"])
-            }
-            _ => json!([sort]),
+    // Ни одной работы (или нет такого человека) — искать нечего.
+    let Some(body) = request_body(&state, &repeated, &query).await? else {
+        return Ok(empty(limit, offset));
+    };
+    if matches!(query.sort, Some(SearchSort::Random)) {
+        return match random_window(&state, body, limit).await? {
+            Some((items, total, offset)) => Ok(Json(Page {
+                items,
+                total,
+                limit,
+                offset,
+            })),
+            None => Ok(empty(limit, 0)),
         };
     }
 
@@ -1077,8 +1059,243 @@ pub async fn search(
     }))
 }
 
+/// Тело запроса к индексу по фильтрам и сортировке `GET /search`, без `limit` и `offset`:
+/// общее для самого поиска, соседей и случайной работы — ряд должен совпадать с тем, который
+/// человек видел в списке. `None` — под фильтры заведомо ничего не подходит.
+async fn request_body(
+    state: &AppState,
+    repeated: &Repeated,
+    query: &SearchQuery,
+) -> AppResult<Option<Value>> {
+    let kinds = kinds_of(repeated)?;
+    let mut filters = filters_of(query, &kinds)?;
+    if let Some(person) = &query.person {
+        match person_filter(&state.db, person, query.role.as_deref()).await? {
+            Some(filter) => filters.push(filter),
+            None => return Ok(None),
+        }
+    }
+    // `random` — порядок релевантности, случайно только смещение окна (см. `random_window`).
+    let sort = match query.sort {
+        Some(SearchSort::Recommended) => Some("rank_score:desc"),
+        Some(SearchSort::Trending) => Some("popularity:desc"),
+        Some(SearchSort::TopRated) => Some("quality:desc"),
+        Some(SearchSort::New) => {
+            filters.push(format!("release_ts <= {}", day_ts(Utc::now().date_naive())));
+            Some("release_ts:desc")
+        }
+        Some(SearchSort::Soon) => {
+            filters.push(format!("release_ts > {}", day_ts(Utc::now().date_naive())));
+            Some("release_ts:asc")
+        }
+        Some(SearchSort::Title) => Some("title:asc"),
+        Some(SearchSort::Popular) => Some("nexus_ratings_count:desc"),
+        Some(SearchSort::Rating) => Some("nexus_rating_avg:desc"),
+        Some(SearchSort::Awarded) => Some("award_wins:desc"),
+        Some(SearchSort::Random) | None => None,
+    };
+    let mut body = json!({
+        "q": query.q.as_deref().unwrap_or_default().trim(),
+        "filter": if filters.is_empty() { Value::Null } else { filters.join(" AND ").into() },
+        "attributesToRetrieve": SUMMARY_FIELDS,
+    });
+    if let Some(sort) = sort {
+        // Как в `GET /entities`: при равной средней — больше оценок, затем новее.
+        body["sort"] = match query.sort {
+            Some(SearchSort::Popular) => json!([sort, "release_ts:desc"]),
+            Some(SearchSort::Rating) => {
+                json!([sort, "nexus_ratings_count:desc", "release_ts:desc"])
+            }
+            _ => json!([sort]),
+        };
+    }
+    Ok(Some(body))
+}
+
+/// Запрос к индексу сущностей: индекса ещё нет — пустая выдача, Meilisearch недоступен — 503.
+async fn ask(state: &AppState, body: &Value) -> AppResult<Value> {
+    let path = format!("/indexes/{}/search", state.search.index(INDEX));
+    match state.search.call(Method::POST, &path, Some(body)).await {
+        Ok(response) => Ok(response),
+        Err(error) if error.code() == Some("index_not_found") => {
+            Ok(json!({ "hits": [], "totalHits": 0 }))
+        }
+        Err(SearchError::Disabled) => Err(unavailable()),
+        Err(error) => {
+            tracing::warn!(%error, "search request failed");
+            Err(unavailable())
+        }
+    }
+}
+
+fn hits<T: serde::de::DeserializeOwned>(response: &Value) -> AppResult<Vec<T>> {
+    serde_json::from_value(response["hits"].clone())
+        .map_err(|e| AppError::Internal(format!("unexpected search hits: {e}")))
+}
+
+/// `sort=random`: случайное окно выдачи — сколько всего нашлось, затем `limit` подряд со
+/// случайного смещения. Два запроса к Meilisearch вместо двух обходов с фронта. `None` — пусто.
+async fn random_window(
+    state: &AppState,
+    mut body: Value,
+    limit: i64,
+) -> AppResult<Option<(Vec<EntitySummary>, i64, i64)>> {
+    let mut count = body.clone();
+    count["page"] = json!(1);
+    count["hitsPerPage"] = json!(0);
+    count["attributesToRetrieve"] = json!([]);
+    let total = ask(state, &count).await?["totalHits"].as_i64().unwrap_or(0);
+    if total == 0 {
+        return Ok(None);
+    }
+    let offset = random_below(total - total.min(limit) + 1);
+    body["offset"] = json!(offset);
+    body["limit"] = json!(limit);
+    Ok(Some((hits(&ask(state, &body).await?)?, total, offset)))
+}
+
+/// Случайное число 0..`n` (`n` > 0). Отдельной зависимости ради выбора одной карточки не нужно:
+/// наносекунды часов, перемешанные splitmix64, — этого хватает.
+fn random_below(n: i64) -> i64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut x = nanos.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    (x % n.max(1) as u64) as i64
+}
+
+/// Сколько документов выдачи просматриваем за раз, разыскивая работу (`neighbors`).
+const NEIGHBORS_PAGE: i64 = 1000;
+/// И сколько всего: дальше ряд считается слишком длинным — края `null`, фронт покажет похожие.
+/// Ряды листания (художник, музей, тег, запрос) короче на порядки.
+const NEIGHBORS_SCAN: i64 = 5000;
+
+/// Предыдущая и следующая работа в той же выдаче, что отдаёт `GET /search`: листание на карточке
+/// идёт по тому списку, откуда человек пришёл (художник, тег, музей, поиск).
+///
+/// Фильтры, запрос и сортировка — ровно как у `GET /search` (`limit` и `offset` не нужны и
+/// игнорируются), поэтому порядок совпадает со списком. `sort=random` — 400: у случайного
+/// порядка соседей нет.
+///
+/// Работы нет в выдаче (фильтры ей не подходят, слишком длинный ряд) — `{"prev": null,
+/// "next": null}`, а не 404: фронт в этом случае показывает похожие.
+///
+/// Позиции и длины ряда здесь нет намеренно: Meilisearch не умеет «дай номер документа в
+/// выдаче», а счётчика «14 из 142» в интерфейсе нет.
+#[utoipa::path(
+    get, path = "/entities/{slug}/neighbors", tag = "catalog",
+    operation_id = "entity_neighbors",
+    params(
+        ("slug" = String, Path, description = "Slug работы"),
+        SearchQuery,
+        ("kind" = Option<Vec<EntityKind>>, Query,
+         description = "Типы работ, как в `GET /search`", explode = true),
+    ),
+    responses(
+        (status = 200, description = "Соседи; на краях ряда — `null`", body = Neighbors),
+        (status = 400, description = "Неверный фильтр или `sort=random`", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+    )
+)]
+pub async fn neighbors(
+    State(state): State<AppState>,
+    repeated: Repeated,
+    Path(slug): Path<String>,
+    Query(query): Query<SearchQuery>,
+) -> AppResult<Json<Neighbors>> {
+    if matches!(query.sort, Some(SearchSort::Random)) {
+        return Err(AppError::BadRequest(
+            "sort=random has no neighbors".to_owned(),
+        ));
+    }
+    let none = Json(Neighbors {
+        prev: None,
+        next: None,
+    });
+    let Some(mut body) = request_body(&state, &repeated, &query).await? else {
+        return Ok(none);
+    };
+    // Ряд ищем по slug'ам: тысяча коротких строк дешевле тысячи карточек, а порядок тот же.
+    body["attributesToRetrieve"] = json!(["slug"]);
+    body["hitsPerPage"] = json!(NEIGHBORS_PAGE);
+
+    #[derive(serde::Deserialize)]
+    struct SlugHit {
+        slug: String,
+    }
+
+    let (mut prev, mut next) = (None, None);
+    let mut found = false;
+    for page in 1..=NEIGHBORS_SCAN / NEIGHBORS_PAGE {
+        body["page"] = json!(page);
+        let row: Vec<SlugHit> = hits(&ask(&state, &body).await?)?;
+        let full = row.len() as i64 == NEIGHBORS_PAGE;
+        if found {
+            // Работа была последней на прошлой странице — следующая открывает эту.
+            next = row.into_iter().next().map(|hit| hit.slug);
+            break;
+        }
+        match row.iter().position(|hit| hit.slug == slug) {
+            Some(at) => {
+                found = true;
+                if at > 0 {
+                    prev = Some(row[at - 1].slug.clone());
+                }
+                if at + 1 < row.len() {
+                    next = Some(row[at + 1].slug.clone());
+                    break;
+                }
+                if !full {
+                    break; // Конец выдачи: следующей нет.
+                }
+            }
+            // Последняя работа страницы — кандидат в `prev` для первой работы следующей.
+            None => {
+                if !full {
+                    break; // Вся выдача просмотрена, работы в ней нет.
+                }
+                prev = row.last().map(|hit| hit.slug.clone());
+            }
+        }
+    }
+    if !found {
+        return Ok(none);
+    }
+
+    let wanted: Vec<&String> = [prev.as_ref(), next.as_ref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    if wanted.is_empty() {
+        return Ok(none);
+    }
+    let by_slug = json!({
+        "q": "",
+        "filter": format!(
+            "slug IN [{}]",
+            wanted.iter().map(|s| filter_string(s)).collect::<Vec<_>>().join(", ")
+        ),
+        "limit": wanted.len(),
+        "attributesToRetrieve": SUMMARY_FIELDS,
+    });
+    let found: Vec<EntitySummary> = hits(&ask(&state, &by_slug).await?)?;
+    let pick = |slug: &Option<String>| {
+        slug.as_ref()
+            .and_then(|slug| found.iter().find(|item| &item.slug == slug))
+            .cloned()
+    };
+    Ok(Json(Neighbors {
+        prev: pick(&prev),
+        next: pick(&next),
+    }))
+}
+
 /// Поля выдачи (`EntitySummary`) из документа индекса.
-const SUMMARY_FIELDS: [&str; 10] = [
+const SUMMARY_FIELDS: [&str; 12] = [
     "id",
     "kind",
     "slug",
@@ -1086,6 +1303,8 @@ const SUMMARY_FIELDS: [&str; 10] = [
     "original_title",
     "release_date",
     "cover_url",
+    "cover_width",
+    "cover_height",
     "release_status",
     "imdb_rating",
     "imdb_votes",

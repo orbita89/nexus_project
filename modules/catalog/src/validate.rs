@@ -68,6 +68,38 @@ pub fn url(field: &str, value: Option<String>) -> Result<Option<String>, AppErro
     Ok(value)
 }
 
+/// Наибольший размер файла обложки в пикселях.
+pub const MAX_COVER_PX: i32 = 100_000;
+
+/// Размеры обложки в пикселях: только вдвоём и только вместе с самой картинкой. Размеры от
+/// прежнего файла дали бы карточке чужое `aspect-ratio` — это хуже, чем их отсутствие.
+pub fn cover_size(
+    has_cover: bool,
+    width: Option<i32>,
+    height: Option<i32>,
+) -> Result<(Option<i32>, Option<i32>), AppError> {
+    let (width, height) = match (width, height) {
+        (None, None) => return Ok((None, None)),
+        (Some(width), Some(height)) => (width, height),
+        _ => {
+            return Err(bad(
+                "cover_width and cover_height must be given together".into()
+            ))
+        }
+    };
+    if !has_cover {
+        return Err(bad(
+            "cover_width and cover_height are only accepted with cover_url".into(),
+        ));
+    }
+    for (field, value) in [("cover_width", width), ("cover_height", height)] {
+        if !(1..=MAX_COVER_PX).contains(&value) {
+            return Err(bad(format!("{field} must be 1-{MAX_COVER_PX}")));
+        }
+    }
+    Ok((Some(width), Some(height)))
+}
+
 /// Роль в титрах: `actor`, `voice_actor`, ...
 pub fn role(value: &str) -> Result<String, AppError> {
     let value = value.trim();

@@ -4187,6 +4187,243 @@
         ]
       }
     },
+    "/api/v1/catalog/entities/{slug}/neighbors": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Предыдущая и следующая работа в той же выдаче, что отдаёт `GET /search`: листание на карточке\nидёт по тому списку, откуда человек пришёл (художник, тег, музей, поиск).",
+        "description": "Фильтры, запрос и сортировка — ровно как у `GET /search` (`limit` и `offset` не нужны и\nигнорируются), поэтому порядок совпадает со списком. `sort=random` — 400: у случайного\nпорядка соседей нет.\n\nРаботы нет в выдаче (фильтры ей не подходят, слишком длинный ряд) — `{\"prev\": null,\n\"next\": null}`, а не 404: фронт в этом случае показывает похожие.\n\nПозиции и длины ряда здесь нет намеренно: Meilisearch не умеет «дай номер документа в\nвыдаче», а счётчика «14 из 142» в интерфейсе нет.",
+        "operationId": "entity_neighbors",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Slug работы",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Поисковый запрос: название, оригинальное название, студии. Опечатки допустимы. Пустой —\nвсе, кто подходит под фильтры.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "дюан"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Не передан — по релевантности.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SearchSort"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Slug тега.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "description": "Ровно этот год выхода. Вместе с `year_from` / `year_to` — 400.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2001
+          },
+          {
+            "name": "year_from",
+            "in": "query",
+            "description": "Год выхода от (включительно).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2000
+          },
+          {
+            "name": "year_to",
+            "in": "query",
+            "description": "Год выхода до (включительно).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2010
+          },
+          {
+            "name": "studio",
+            "in": "query",
+            "description": "Студия — точное название (без учёта регистра); подсказки — `GET /search/studios`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "Warner Bros. Pictures"
+          },
+          {
+            "name": "studio_slug",
+            "in": "query",
+            "description": "Slug студии (`GET /studios/{slug}`): её фильмы, без запроса названия. Неизвестный slug —\nпустая выдача.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "warner-bros-pictures"
+          },
+          {
+            "name": "publisher",
+            "in": "query",
+            "description": "Издатель — точное название (без учёта регистра): издательство книги, издатель или\nразработчик игры. Подсказки — `GET /search/publishers`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "АСТ"
+          },
+          {
+            "name": "museum",
+            "in": "query",
+            "description": "Музей или собрание картины — точное название (без учёта регистра). Подсказки —\n`GET /search/museums`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "Лувр"
+          },
+          {
+            "name": "person",
+            "in": "query",
+            "description": "Slug человека: сущности с его участием (в любой роли).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "christopher-nolan"
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "description": "Роль человека из `person` в этой сущности: `actor`, `director`, `producer`, `writer`, ...\nБез `person` — 400.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "director"
+          },
+          {
+            "name": "award",
+            "in": "query",
+            "description": "Slug премии (`GET /awards/{slug}`): работы с её наградой или номинацией.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          },
+          {
+            "name": "award_year",
+            "in": "query",
+            "description": "Год церемонии: вместе с `award` — «лауреаты и номинанты „Оскара“ 2024».",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2024
+          },
+          {
+            "name": "awarded",
+            "in": "query",
+            "description": "`true` — только полученные награды (у работы есть хотя бы одна победа).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Типы работ, как в `GET /search`",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/EntityKind"
+              }
+            },
+            "explode": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Соседи; на краях ряда — `null`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Neighbors"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный фильтр или `sort=random`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/catalog/entities/{slug}/similar": {
       "get": {
         "tags": [
@@ -4379,7 +4616,7 @@
           "catalog"
         ],
         "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры. Весь\nпоиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).",
-        "description": "Фильтры (через AND): `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `publisher` (издательство книги,\nиздатель или разработчик игры — тоже точное название), `museum` (музей картины),\n`person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`\n(год церемонии) и `awarded` (только с наградой).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;\n`awarded` — больше наград сверху.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
+        "description": "Фильтры (через AND): `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `publisher` (издательство книги,\nиздатель или разработчик игры — тоже точное название), `museum` (музей картины),\n`person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`\n(год церемонии) и `awarded` (только с наградой).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;\n`awarded` — больше наград сверху; `random` — случайное окно выдачи (`limit=1` — одна случайная\nработа под те же фильтры: ею заканчивается листание, когда ряд и похожие кончились).\n\nСоседей работы в этой же выдаче отдаёт `GET /entities/{slug}/neighbors`.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
         "operationId": "search",
         "parameters": [
           {
@@ -6325,12 +6562,27 @@
             ],
             "description": "Видна на сайте. По умолчанию `true`."
           },
+          "cover_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "cover_url": {
             "type": [
               "string",
               "null"
             ],
             "description": "`http(s)://...`"
+          },
+          "cover_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Размеры файла обложки в пикселях, 1–100000. Принимаются только вместе с `cover_url`\n(без него — 400): размеры от прежней картинки хуже, чем их отсутствие."
           },
           "description": {
             "type": [
@@ -6597,11 +6849,26 @@
             "type": "boolean",
             "description": "Включена. Скрытая хранится в БД, но её нет в списках, поиске, похожих и фильмографиях, а\nкарточка — 404 для всех, кроме админа."
           },
+          "cover_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "cover_url": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "cover_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Размеры файла обложки в пикселях; неизвестны — `null`. См. [`EntitySummary`]."
           },
           "created_at": {
             "type": "string",
@@ -6870,11 +7137,28 @@
           "title"
         ],
         "properties": {
+          "cover_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 1493
+          },
           "cover_url": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "cover_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Размеры файла обложки в пикселях: карточка получает точное `aspect-ratio` ещё до\nзагрузки картинки (важно для картин — у них пропорции свои у каждой). Неизвестны — `null`.",
+            "example": 1000
           },
           "id": {
             "type": "string",
@@ -7410,6 +7694,32 @@
         },
         "additionalProperties": false
       },
+      "Neighbors": {
+        "type": "object",
+        "description": "Соседи работы в той же выдаче (`GET /entities/{slug}/neighbors`). Края ряда — `null`.",
+        "properties": {
+          "next": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EntitySummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prev": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EntitySummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "Nomination": {
         "type": "object",
         "description": "Номинация: работа и человек сразу (актёрская категория), либо просто имя.",
@@ -7943,11 +8253,28 @@
                 "title"
               ],
               "properties": {
+                "cover_height": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "example": 1493
+                },
                 "cover_url": {
                   "type": [
                     "string",
                     "null"
                   ]
+                },
+                "cover_width": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "Размеры файла обложки в пикселях: карточка получает точное `aspect-ratio` ещё до\nзагрузки картинки (важно для картин — у них пропорции свои у каждой). Неизвестны — `null`.",
+                  "example": 1000
                 },
                 "id": {
                   "type": "string",
@@ -8821,7 +9148,8 @@
           "title",
           "popular",
           "rating",
-          "awarded"
+          "awarded",
+          "random"
         ]
       },
       "SeriesMetadata": {
@@ -9580,11 +9908,26 @@
             ],
             "description": "Включить (`true`) или скрыть с сайта (`false`). Помечает `active_manual`: «пересобрать\nактивные» эту сущность больше не трогает."
           },
+          "cover_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "cover_url": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "cover_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Размеры новой обложки в пикселях, 1–100000. Только вместе с `cover_url` (иначе 400);\n`cover_url` без них стирает прежние — от другой картинки они всё равно неверны."
           },
           "description": {
             "type": [
