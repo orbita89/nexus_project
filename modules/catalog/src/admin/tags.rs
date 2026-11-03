@@ -15,6 +15,32 @@ use uuid::Uuid;
 
 const TAG_ENTITIES: &str = "SELECT entity_id FROM entity_tags WHERE tag_id = $1";
 
+/// Переиндексация и ISR сущностей тега — в фоне, ответ уходит сразу.
+///
+/// Работа пропорциональна числу сущностей тега: у «Боевика» это 13 328 фильмов, их участники и
+/// связанные — в обработчике запроса столько не публикуется, шлюз отвечает 504. Slug'и самих
+/// сущностей при правке тега не меняются, поэтому адреса «до» и «после» совпадают и сбор
+/// [`Touched`] тоже уходит в фон. Упавший шаг — в логе: индекс догонит перестройка, статику —
+/// следующая правка.
+fn spawn_publish(state: &AppState, ids: Vec<Uuid>, reason: &'static str) {
+    if ids.is_empty() {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        let entities = ids.len();
+        let touched = match Touched::collect(&state.db, &ids, &[]).await {
+            Ok(touched) => touched,
+            Err(error) => {
+                tracing::warn!(%error, reason, "tag publish: collecting touched pages failed");
+                return;
+            }
+        };
+        let ok = publish::run(&state, touched, &Reporter::silent()).await;
+        tracing::info!(reason, entities, ok, "tag publish finished");
+    });
+}
+
 /// Создать тег.
 #[utoipa::path(
     post, operation_id = "create_tag", path = "/admin/tags", tag = "catalog-admin",
@@ -87,11 +113,25 @@ pub async fn update(
             .transpose()?,
     );
 
-    let tag: Option<Tag> = sqlx::query_as(
-        "UPDATE tags SET slug = COALESCE($2, slug), name = COALESCE($3, name),
-                         kind = COALESCE($4, kind),
-                         description = CASE WHEN $5 THEN $6 ELSE description END
-         WHERE id = $1 RETURNING id, slug, name, kind, description",
+    // Задеты ли карточки и индекс: slug тега — фильтр в поисковых документах сущностей, название
+    // и вид (жанры в шапке) — на их страницах. Правка одного описания не меняет ни того, ни
+    // другого: тег показывает его только на своей странице.
+    #[derive(sqlx::FromRow)]
+    struct Updated {
+        #[sqlx(flatten)]
+        tag: Tag,
+        republish: bool,
+    }
+
+    let updated: Option<Updated> = sqlx::query_as(
+        "WITH before AS (SELECT id, slug, name, kind FROM tags WHERE id = $1)
+         UPDATE tags SET slug = COALESCE($2, tags.slug), name = COALESCE($3, tags.name),
+                         kind = COALESCE($4, tags.kind),
+                         description = CASE WHEN $5 THEN $6 ELSE tags.description END
+         FROM before WHERE tags.id = before.id
+         RETURNING tags.id, tags.slug, tags.name, tags.kind, tags.description,
+                   (tags.slug, tags.name, tags.kind)
+                       IS DISTINCT FROM (before.slug, before.name, before.kind) AS republish",
     )
     .bind(id)
     .bind(&req.slug)
@@ -102,13 +142,13 @@ pub async fn update(
     .fetch_optional(&state.db)
     .await
     .map_err(validate::conflict("slug is already taken"))?;
-    let tag = tag.ok_or(AppError::NotFound)?;
+    let Updated { tag, republish } = updated.ok_or(AppError::NotFound)?;
 
-    // slug и название тега есть в поисковых документах сущностей, вид — в карточках (жанры в шапке).
-    let ids = affected_entities(&state.db, TAG_ENTITIES, id).await?;
-    let touched = Touched::collect(&state.db, &ids, &[]).await?;
-    publish::run(&state, touched, &Reporter::silent()).await;
-    tracing::info!(admin_id = %admin.id, tag_id = %id, "tag updated");
+    if republish {
+        let ids = affected_entities(&state.db, TAG_ENTITIES, id).await?;
+        spawn_publish(&state, ids, "tag updated");
+    }
+    tracing::info!(admin_id = %admin.id, tag_id = %id, republish, "tag updated");
     Ok(Json(tag))
 }
 
@@ -129,8 +169,9 @@ pub async fn delete(
     AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
+    // Сущности запоминаются до удаления: каскад снимает тег со всех, а переотправить их документы
+    // (slug тега — фильтр) и пересобрать страницы нужно уже без него.
     let ids = affected_entities(&state.db, TAG_ENTITIES, id).await?;
-    let touched = Touched::collect(&state.db, &ids, &[]).await?;
     let deleted = sqlx::query("DELETE FROM tags WHERE id = $1")
         .bind(id)
         .execute(&state.db)
@@ -138,7 +179,7 @@ pub async fn delete(
     if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    publish::run(&state, touched, &Reporter::silent()).await;
+    spawn_publish(&state, ids, "tag deleted");
     tracing::info!(admin_id = %admin.id, tag_id = %id, "tag deleted");
     Ok(StatusCode::NO_CONTENT)
 }

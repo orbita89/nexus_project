@@ -444,6 +444,56 @@ async fn tags_list_filtered_by_entity_kind(pool: PgPool) {
     assert_eq!(ctx.get_ok("/tags/fantasy").await["by_kind"], json!({}));
 }
 
+/// Правка одного описания не трогает ни карточки, ни индекс: описание тег показывает только на
+/// своей странице. Переименование — трогает, но в фоне, ответ не ждёт 13 тысяч документов.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn tag_description_edit_skips_republish(pool: PgPool) {
+    let mut ctx = Ctx::without_search(pool);
+    let isr = FakeIsr::start(StatusCode::OK).await;
+    isr.attach(&mut ctx);
+    let sci_fi = ctx.tag_id("sci-fi").await;
+
+    let (status, tag) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/tags/{sci_fi}"),
+            Some(json!({ "description": "Мир, перестроенный наукой." })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{tag}");
+    assert_eq!(tag["description"], "Мир, перестроенный наукой.");
+    // Фоновой публикации дали бы время добежать — её просто нет.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(isr.paths().is_empty(), "{:?}", isr.paths());
+
+    // Название прислали прежнее — менять нечего, пересобирать тоже.
+    let (status, _) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/tags/{sci_fi}"),
+            Some(json!({ "name": "Научная фантастика" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(isr.paths().is_empty(), "{:?}", isr.paths());
+
+    // А переименование карточки пересобирает — в фоне.
+    let (status, _) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/tags/{sci_fi}"),
+            Some(json!({ "name": "Фантастика" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let paths = wait_for_isr(&isr, 0, "/films/dune-2021").await;
+    assert!(
+        paths.contains(&"/books/dune-novel".to_string()),
+        "{paths:?}"
+    );
+}
+
 /// Описание тега правится в админке и видно в публичном чтении.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn admin_edits_tag_description(pool: PgPool) {
@@ -1032,7 +1082,7 @@ async fn genres_are_tags_with_kind(pool: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(tag["kind"], "genre");
     assert_eq!(tag["name"], "Научная фантастика");
-    let paths = isr.paths()[before..].to_vec();
+    let paths = wait_for_isr(&isr, before, "/films/dune-2021").await;
     for path in [
         "/films/dune-2021",
         "/films/dune-part-two-2024",
@@ -2241,6 +2291,19 @@ async fn reindex_while_running_is_409(pool: PgPool) {
 // ---------------------------------------------------------------- публикация: поток и ISR
 
 /// Запросы к [`FakeIsr`]: заголовок `Authorization` и тело.
+/// Публикация правки тега идёт в фоне (её работа пропорциональна числу сущностей тега), поэтому
+/// ISR приходит уже после ответа: ждём путь до секунды.
+async fn wait_for_isr(isr: &FakeIsr, before: usize, path: &str) -> Vec<String> {
+    for _ in 0..100 {
+        let paths = isr.paths()[before..].to_vec();
+        if paths.iter().any(|seen| seen == path) {
+            return paths;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{path} не пересобран: {:?}", isr.paths()[before..].to_vec());
+}
+
 type IsrRequests = Arc<Mutex<Vec<(Option<String>, Value)>>>;
 
 /// Фронтенд для ревалидации: принимает `POST /_isr/revalidate` и запоминает запросы.
