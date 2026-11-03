@@ -131,8 +131,15 @@ pub struct RatingSummary {
     /// Число оценок 1, 2, ..., 10: всегда 10 элементов.
     #[schema(example = json!([0, 0, 0, 0, 1, 0, 2, 3, 4, 2]))]
     pub distribution: Vec<i64>,
-    /// Реакции зрителей. Своя — `GET /entities/{slug}/reaction`.
+    /// Реакции зрителей четырьмя старыми видами. Устарело: это те же 🔥 😢 🤔 😴 из
+    /// `reaction_items`. Своя — `GET /entities/{slug}/reactions` (поле `mine`).
     pub reactions: Reactions,
+    /// Все реакции произведения, по убыванию числа; при равенстве раньше та, что появилась
+    /// первой. Своя отметка — `GET /entities/{slug}/reactions`: сводка одинакова для всех.
+    pub reaction_items: Vec<ReactionCount>,
+    /// Сколько раз произведению поставили «нравится» (`PUT /entities/{slug}/like`).
+    #[schema(example = 128)]
+    pub likes_count: i64,
 }
 
 /// Сколько зрителей выбрали каждую реакцию: всегда все четыре ключа.
@@ -152,6 +159,59 @@ pub struct Reactions {
     pub bored: i64,
 }
 
+/// Сколько зрителей поставили это эмодзи.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct ReactionCount {
+    #[schema(example = "🔥")]
+    pub emoji: String,
+    #[schema(example = 128)]
+    pub count: i64,
+}
+
+/// Реакция произведения с отметкой «моя»: строка реакций на карточке.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct ReactionItem {
+    #[schema(example = "🔥")]
+    pub emoji: String,
+    #[schema(example = 128)]
+    pub count: i64,
+    /// Поставил ли её текущий пользователь; у гостя всегда `false`.
+    pub mine: bool,
+}
+
+/// Реакции произведения: по убыванию числа, при равенстве — кто появился раньше.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EntityReactions {
+    pub items: Vec<ReactionItem>,
+}
+
+/// Какую реакцию ставят или снимают: любое эмодзи.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EmojiReaction {
+    /// Одно эмодзи: 🔥, ❤️, 👍🏽, 👩‍👩‍👧. Не эмодзи — 400 `bad_emoji`.
+    #[schema(example = "❤️")]
+    pub emoji: String,
+}
+
+/// Тело `DELETE /entities/{slug}/reaction`: какую снять. Пустое тело снимает все свои.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteReaction {
+    /// Эмодзи; не передано — снимаются все свои реакции на это произведение.
+    #[schema(example = "❤️")]
+    pub emoji: Option<String>,
+}
+
+/// Лайки произведения: сколько всего и свой.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EntityLikes {
+    #[schema(example = 128)]
+    pub likes: i64,
+    /// Лайкнул ли текущий пользователь; у гостя `false`.
+    pub mine: bool,
+}
+
 /// Реакция на произведение: 🔥 `fire`, 😢 `sad`, 🤔 `think`, 😴 `bored`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
@@ -161,6 +221,26 @@ pub enum ReactionKind {
     Sad,
     Think,
     Bored,
+}
+
+impl ReactionKind {
+    /// Эмодзи, которым этот вид хранится у произведения: после перехода на свободные реакции
+    /// старые четыре — обычные значения `entity_reactions.emoji`.
+    pub fn emoji(self) -> &'static str {
+        match self {
+            Self::Fire => "🔥",
+            Self::Sad => "😢",
+            Self::Think => "🤔",
+            Self::Bored => "😴",
+        }
+    }
+
+    /// Обратное соответствие: эмодзи → старый вид, если он один из четырёх.
+    pub fn from_emoji(emoji: &str) -> Option<Self> {
+        [Self::Fire, Self::Sad, Self::Think, Self::Bored]
+            .into_iter()
+            .find(|kind| kind.emoji() == emoji)
+    }
 }
 
 /// Своя реакция.
@@ -1088,12 +1168,13 @@ pub struct GivenLike {
     pub created_at: DateTime<Utc>,
 }
 
-/// Цель лайка. `kind` — `collection` или `person`; остальные поля зависят от него.
+/// Цель лайка. `kind` — `collection`, `person` или `entity`; остальные поля зависят от него.
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum LikeTarget {
     Collection { collection_id: Uuid, title: String },
     Person { person: PersonRef },
+    Entity { entity: EntityRef },
 }
 
 /// Вид цели в `?target=` у `/users/{username}/likes/given`.
@@ -1102,8 +1183,6 @@ pub enum LikeTarget {
 pub enum LikeTargetKind {
     Collection,
     Person,
-    /// Лайков у произведений нет (у них оценки, отметки и реакции) — фильтр принимается
-    /// ради единообразия и всегда отдаёт пустую страницу.
     Entity,
 }
 
@@ -1135,8 +1214,7 @@ pub struct LikesGiven {
     pub collections: i64,
     #[schema(example = 3)]
     pub people: i64,
-    /// Лайков у произведений нет — всегда `0`.
-    #[schema(example = 0)]
+    #[schema(example = 8)]
     pub entities: i64,
 }
 

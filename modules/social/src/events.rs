@@ -10,6 +10,7 @@
 //! | `reply.created` | автор родителя (если отвечает не он сам) | `thread_id`, `post_id`, `parent_id`, `author_id` |
 //! | `review.created`, `review.updated`, `review.deleted` | сущность | `review_id`, `entity_id`, `author_id` |
 //! | `review.commented`, `review.comment_deleted` | сущность | `review_id`, `comment_id`, `entity_id`, `author_id` |
+//! | `entity.reacted` | сущность | `entity_id`, `user_id` — счётчики карточка перечитывает сама (`GET /entities/{slug}/reactions`) |
 //! | `interest.added`, `interest.removed` | пользователь | `entity_id`, `person_id`, `tag_id` или `room_id` (вступил в свою комнату / вышел) |
 //! | `chat.message.created` | комната (сущность, человек или тег) | `kind`, `target_id`, `message` — само сообщение (исключение: иначе каждое сообщение — запрос каждого клиента) |
 //! | `chat.message.updated`, `chat.message.deleted` | комната | `kind`, `target_id`, `message_id` |
@@ -105,6 +106,16 @@ pub fn review(kind: &'static str, review_id: Uuid, entity_id: Uuid, author_id: U
         kind,
         vec![Channel::Entity(entity_id)],
         json!({ "review_id": review_id, "entity_id": entity_id, "author_id": author_id }),
+    )
+}
+
+/// Реакции произведения изменились: карточка перечитывает `GET /entities/{slug}/reactions`.
+/// Самого эмодзи в данных нет — по правилу «в событии только id».
+pub fn entity_reacted(entity_id: Uuid, user_id: Uuid) -> Event {
+    Event::new(
+        "entity.reacted",
+        vec![Channel::Entity(entity_id)],
+        json!({ "entity_id": entity_id, "user_id": user_id }),
     )
 }
 

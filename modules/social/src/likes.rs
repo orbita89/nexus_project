@@ -5,8 +5,8 @@
 //! запроса под кнопку не нужно. Список лайкнувших открыт всем.
 
 use crate::models::{
-    CollectionLike, CollectionLikes, GivenLike, GivenLikeRow, GivenLikesQuery, Like, LikeTarget,
-    LikeTargetKind, PageQuery,
+    CollectionLike, CollectionLikes, EntityLikes, GivenLike, GivenLikeRow, GivenLikesQuery, Like,
+    LikeTarget, LikeTargetKind, PageQuery,
 };
 use crate::refs;
 use axum::extract::State;
@@ -368,15 +368,104 @@ pub async fn person_likes(
     }))
 }
 
+// ---------------------------------------------------------------- произведения
+
+/// Лайкнуть произведение. Повторный лайк ничего не меняет. Дизлайка нет — как у людей.
+///
+/// 409 `not_released` здесь не нужен (в отличие от оценок и реакций): понравиться может и
+/// трейлер ещё не вышедшего фильма.
+#[utoipa::path(
+    put, operation_id = "like_entity", path = "/entities/{slug}/like", tag = "reviews",
+    security(("bearer" = [])),
+    params(("slug" = String, Path, description = "slug сущности", example = "dune-2021")),
+    responses(
+        (status = 204, description = "Лайкнуто"),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 404, description = "Сущность не найдена", body = ErrorBody),
+    )
+)]
+pub async fn like_entity(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(slug): Path<String>,
+) -> AppResult<StatusCode> {
+    let entity = refs::entity(&state, &slug).await?;
+    sqlx::query(
+        "INSERT INTO entity_likes (entity_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(entity.id)
+    .bind(user.id)
+    .execute(&state.db)
+    .await
+    .map_err(crate::validate::missing_reference)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Снять свой лайк с произведения → 204 (даже если его не было).
+#[utoipa::path(
+    delete, operation_id = "unlike_entity", path = "/entities/{slug}/like", tag = "reviews",
+    security(("bearer" = [])),
+    params(("slug" = String, Path, description = "slug сущности", example = "dune-2021")),
+    responses(
+        (status = 204, description = "Лайка нет"),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 404, description = "Сущность не найдена", body = ErrorBody),
+    )
+)]
+pub async fn unlike_entity(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(slug): Path<String>,
+) -> AppResult<StatusCode> {
+    let entity = refs::entity(&state, &slug).await?;
+    sqlx::query("DELETE FROM entity_likes WHERE entity_id = $1 AND user_id = $2")
+        .bind(entity.id)
+        .bind(user.id)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Сколько лайков у произведения и свой. То же число — в сводке оценок (`likes_count`),
+/// чтобы карточке хватало одного запроса.
+#[utoipa::path(
+    get, operation_id = "get_entity_likes", path = "/entities/{slug}/likes", tag = "reviews",
+    security((), ("bearer" = [])),
+    params(("slug" = String, Path, description = "slug сущности", example = "dune-2021")),
+    responses(
+        (status = 200, description = "Лайки", body = EntityLikes),
+        (status = 401, description = "Неверный токен", body = ErrorBody),
+        (status = 404, description = "Сущность не найдена", body = ErrorBody),
+    )
+)]
+pub async fn entity_summary(
+    State(state): State<AppState>,
+    viewer: Option<AuthUser>,
+    Path(slug): Path<String>,
+) -> AppResult<Json<EntityLikes>> {
+    let entity = refs::entity(&state, &slug).await?;
+    let (likes, mine): (i64, bool) = sqlx::query_as(
+        "SELECT count(*), bool_or(user_id = $2) IS TRUE FROM entity_likes WHERE entity_id = $1",
+    )
+    .bind(entity.id)
+    .bind(viewer.map(|user| user.id))
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(EntityLikes { likes, mine }))
+}
+
 // ---------------------------------------------------------------- «Что нравится»
 
-/// Два источника одной лентой: лайки подборок и лайки людей.
+/// Три источника одной лентой: лайки подборок, людей и произведений.
 const GIVEN: &str = "
     SELECT 'collection' AS source, collection_id AS target_id, value, created_at
       FROM collection_likes WHERE user_id = $1
     UNION ALL
     SELECT 'person', person_id, 1::smallint, created_at
-      FROM person_likes WHERE user_id = $1";
+      FROM person_likes WHERE user_id = $1
+    UNION ALL
+    SELECT 'entity', entity_id, 1::smallint, created_at
+      FROM entity_likes WHERE user_id = $1";
 
 /// Что пользователь лайкнул: раздел «Что нравится» в аналитике профиля.
 ///
@@ -406,19 +495,11 @@ pub async fn given(
     let user = crate::stats::visible(&state, &username, viewer.as_ref()).await?;
     let (limit, offset) = page_bounds(query.limit, query.offset);
 
-    // Лайков у произведений нет: фильтр принимаем, но отдавать нечего.
     let source = match query.target {
         None => None,
         Some(LikeTargetKind::Collection) => Some("collection"),
         Some(LikeTargetKind::Person) => Some("person"),
-        Some(LikeTargetKind::Entity) => {
-            return Ok(Json(Page {
-                items: Vec::new(),
-                total: 0,
-                limit,
-                offset,
-            }))
-        }
+        Some(LikeTargetKind::Entity) => Some("entity"),
     };
     let filter = "FROM (".to_string() + GIVEN + ") AS feed WHERE ($2::text IS NULL OR source = $2)";
 
@@ -465,6 +546,7 @@ async fn with_targets(state: &AppState, rows: Vec<GivenLikeRow>) -> AppResult<Ve
             .collect()
     };
     let people = refs::people(state, ids("person")).await?;
+    let entities = refs::entities(state, ids("entity")).await?;
 
     Ok(rows
         .into_iter()
@@ -476,6 +558,9 @@ async fn with_targets(state: &AppState, rows: Vec<GivenLikeRow>) -> AppResult<Ve
                 },
                 "person" => LikeTarget::Person {
                     person: people.get(&row.target_id)?.clone(),
+                },
+                "entity" => LikeTarget::Entity {
+                    entity: entities.get(&row.target_id)?.clone(),
                 },
                 _ => return None,
             };

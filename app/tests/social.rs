@@ -501,6 +501,7 @@ async fn rating_summary(pool: PgPool) {
         json!({
             "average": null, "count": 0, "distribution": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             "reactions": { "fire": 0, "sad": 0, "think": 0, "bored": 0 },
+            "reaction_items": [], "likes_count": 0,
         })
     );
 
@@ -521,6 +522,7 @@ async fn rating_summary(pool: PgPool) {
         json!({
             "average": 8.7, "count": 3, "distribution": [0, 0, 0, 0, 0, 0, 0, 2, 0, 1],
             "reactions": { "fire": 0, "sad": 0, "think": 0, "bored": 0 },
+            "reaction_items": [], "likes_count": 0,
         })
     );
 
@@ -1126,7 +1128,7 @@ async fn review_comments_errors(pool: PgPool) {
 // ---------------------------------------------------------------- реакции
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn reactions_count_one_per_viewer(pool: PgPool) {
+async fn reactions_any_emoji_several_per_viewer(pool: PgPool) {
     let ctx = Ctx::new(pool);
     let (alice, bob, carol) = (
         ctx.user("alice").await,
@@ -1134,51 +1136,86 @@ async fn reactions_count_one_per_viewer(pool: PgPool) {
         ctx.user("carol").await,
     );
     let path = "/entities/dune-2021/reaction";
-    let react = |user, kind: &str| {
+    let list = "/entities/dune-2021/reactions";
+    let react = |user, emoji: &str| {
         ctx.expect(
-            StatusCode::OK,
+            StatusCode::NO_CONTENT,
             Method::PUT,
             path,
-            Some(json!({ "kind": kind })),
+            Some(json!({ "emoji": emoji })),
             Some(user),
         )
     };
 
-    ctx.expect(StatusCode::NOT_FOUND, Method::GET, path, None, Some(&alice))
-        .await;
-    assert_eq!(react(&alice, "fire").await, json!({ "kind": "fire" }));
-    react(&bob, "fire").await;
-    react(&carol, "sad").await;
-    // Другая реакция заменяет прежнюю: у зрителя одна.
-    react(&carol, "think").await;
+    assert_eq!(ctx.get_ok(list, None).await, json!({ "items": [] }));
+    react(&alice, "🔥").await;
+    react(&bob, "🔥").await;
+    react(&carol, "❤️").await;
+    // Несколько разных реакций от одного зрителя — можно, повторная та же ничего не меняет.
+    react(&carol, "😂").await;
+    react(&carol, "😂").await;
+
+    // Порядок: по убыванию числа, при равенстве раньше та, что появилась первой.
     assert_eq!(
-        ctx.get_ok(path, Some(&carol)).await,
-        json!({ "kind": "think" })
+        ctx.get_ok(list, Some(&carol)).await,
+        json!({ "items": [
+            { "emoji": "🔥", "count": 2, "mine": false },
+            { "emoji": "❤️", "count": 1, "mine": true },
+            { "emoji": "😂", "count": 1, "mine": true },
+        ] })
     );
+    // Гостю своих реакций нет.
+    assert_eq!(ctx.get_ok(list, None).await["items"][0]["mine"], false);
+
     let summary = ctx.get_ok("/entities/dune-2021/rating", None).await;
+    assert_eq!(
+        summary["reaction_items"],
+        json!([
+            { "emoji": "🔥", "count": 2 },
+            { "emoji": "❤️", "count": 1 },
+            { "emoji": "😂", "count": 1 },
+        ])
+    );
+    // Старый объект `reactions` — те же строки по четырём известным эмодзи.
     assert_eq!(
         summary["reactions"],
-        json!({ "fire": 2, "sad": 0, "think": 1, "bored": 0 })
+        json!({ "fire": 2, "sad": 0, "think": 0, "bored": 0 })
     );
 
-    ctx.expect(
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-        path,
-        None,
-        Some(&bob),
-    )
-    .await;
-    ctx.expect(
-        StatusCode::NO_CONTENT,
-        Method::DELETE,
-        path,
-        None,
-        Some(&bob),
-    )
-    .await;
-    let summary = ctx.get_ok("/entities/dune-2021/rating", None).await;
-    assert_eq!(summary["reactions"]["fire"], 1);
+    // DELETE с телом снимает одну реакцию, без тела — все свои.
+    let drop_one = |user, body: Option<serde_json::Value>| {
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            path,
+            body,
+            Some(user),
+        )
+    };
+    drop_one(&carol, Some(json!({ "emoji": "😂" }))).await;
+    drop_one(&carol, Some(json!({ "emoji": "😂" }))).await;
+    assert_eq!(
+        ctx.get_ok(list, Some(&carol)).await,
+        json!({ "items": [
+            { "emoji": "🔥", "count": 2, "mine": false },
+            { "emoji": "❤️", "count": 1, "mine": true },
+        ] })
+    );
+    drop_one(&carol, None).await;
+    drop_one(&bob, None).await;
+    assert_eq!(
+        ctx.get_ok(list, None).await,
+        json!({ "items": [{ "emoji": "🔥", "count": 1, "mine": false }] })
+    );
+
+    // Старый GET своей реакции отдаёт её, пока это один из четырёх видов.
+    assert_eq!(
+        ctx.get_ok(path, Some(&alice)).await,
+        json!({ "kind": "fire" })
+    );
+    react(&bob, "🤯").await;
+    ctx.expect(StatusCode::NOT_FOUND, Method::GET, path, None, Some(&bob))
+        .await;
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
@@ -1188,7 +1225,26 @@ async fn reactions_errors(pool: PgPool) {
     let alice = ctx.user("alice").await;
     let path = "/entities/dune-2021/reaction";
 
-    for body in [json!({ "kind": "love" }), json!({}), json!({ "kind": 1 })] {
+    // Не эмодзи — 400 `bad_emoji`; поле не должно стать свалкой текста.
+    for body in [
+        json!({ "emoji": "love" }),
+        json!({ "emoji": "" }),
+        json!({ "emoji": "🔥🔥" }),
+        json!({ "emoji": "<b>" }),
+        json!({ "emoji": "1" }),
+    ] {
+        let error = ctx
+            .expect(
+                StatusCode::BAD_REQUEST,
+                Method::PUT,
+                path,
+                Some(body),
+                Some(&alice),
+            )
+            .await;
+        assert_eq!(error["code"], "bad_emoji");
+    }
+    for body in [json!({}), json!({ "emoji": 1 }), json!({ "kind": "fire" })] {
         ctx.expect(
             StatusCode::BAD_REQUEST,
             Method::PUT,
@@ -1199,7 +1255,7 @@ async fn reactions_errors(pool: PgPool) {
         .await;
     }
     for method in [Method::GET, Method::PUT, Method::DELETE] {
-        let body = (method == Method::PUT).then(|| json!({ "kind": "fire" }));
+        let body = (method == Method::PUT).then(|| json!({ "emoji": "🔥" }));
         ctx.expect(
             StatusCode::UNAUTHORIZED,
             method.clone(),
@@ -1217,16 +1273,155 @@ async fn reactions_errors(pool: PgPool) {
         )
         .await;
     }
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/entities/no-such/reactions",
+        None,
+        None,
+    )
+    .await;
     let error = ctx
         .expect(
             StatusCode::CONFLICT,
             Method::PUT,
             "/entities/next-year/reaction",
-            Some(json!({ "kind": "fire" })),
+            Some(json!({ "emoji": "🔥" })),
             Some(&alice),
         )
         .await;
     assert_eq!(error["code"], "not_released");
+}
+
+/// Разных эмодзи у произведения не больше 30: дальше принимаются только уже знакомые.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn reactions_limit_distinct_emoji(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+    let path = "/entities/dune-2021/reaction";
+    // 30 разных эмодзи: 😀 (U+1F600) и дальше подряд.
+    for code in 0x1F600..0x1F600 + 30u32 {
+        let emoji = char::from_u32(code).unwrap().to_string();
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::PUT,
+            path,
+            Some(json!({ "emoji": emoji })),
+            Some(&alice),
+        )
+        .await;
+    }
+    let error = ctx
+        .expect(
+            StatusCode::CONFLICT,
+            Method::PUT,
+            path,
+            Some(json!({ "emoji": "🔥" })),
+            Some(&bob),
+        )
+        .await;
+    assert_eq!(error["code"], "reaction_limit");
+    // Уже существующее — можно: предел на разные эмодзи, а не на людей.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        path,
+        Some(json!({ "emoji": "😀" })),
+        Some(&bob),
+    )
+    .await;
+    assert_eq!(
+        ctx.get_ok("/entities/dune-2021/reactions", None).await["items"][0],
+        json!({ "emoji": "😀", "count": 2, "mine": false })
+    );
+}
+
+// ---------------------------------------------------------------- «нравится» у произведения
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn entity_likes(pool: PgPool) {
+    entity_released_in(&pool, "next-year", 365).await;
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let bob = ctx.user("bob").await;
+    let like = "/entities/dune-2021/like";
+    let likes = "/entities/dune-2021/likes";
+
+    assert_eq!(
+        ctx.get_ok(likes, None).await,
+        json!({ "likes": 0, "mine": false })
+    );
+    for _ in 0..2 {
+        // Повторный лайк ничего не меняет.
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::PUT,
+            like,
+            None,
+            Some(&alice),
+        )
+        .await;
+    }
+    ctx.expect(StatusCode::NO_CONTENT, Method::PUT, like, None, Some(&bob))
+        .await;
+    assert_eq!(
+        ctx.get_ok(likes, Some(&alice)).await,
+        json!({ "likes": 2, "mine": true })
+    );
+    assert_eq!(ctx.get_ok(likes, None).await["mine"], false);
+    // То же число — в сводке оценок: карточке хватает одного запроса.
+    assert_eq!(
+        ctx.get_ok("/entities/dune-2021/rating", None).await["likes_count"],
+        2
+    );
+
+    // Снятие идемпотентно.
+    for _ in 0..2 {
+        ctx.expect(
+            StatusCode::NO_CONTENT,
+            Method::DELETE,
+            like,
+            None,
+            Some(&alice),
+        )
+        .await;
+    }
+    assert_eq!(
+        ctx.get_ok(likes, Some(&alice)).await,
+        json!({ "likes": 1, "mine": false })
+    );
+
+    // Не вышедшее лайкать можно: это не оценка.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        "/entities/next-year/like",
+        None,
+        Some(&alice),
+    )
+    .await;
+
+    for method in [Method::PUT, Method::DELETE] {
+        ctx.expect(StatusCode::UNAUTHORIZED, method.clone(), like, None, None)
+            .await;
+        ctx.expect(
+            StatusCode::NOT_FOUND,
+            method,
+            "/entities/no-such/like",
+            None,
+            Some(&alice),
+        )
+        .await;
+    }
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/entities/no-such/likes",
+        None,
+        None,
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------- отметки
@@ -3589,10 +3784,10 @@ async fn profile_stats_are_private_until_opened(pool: PgPool) {
         .await;
     }
     ctx.expect(
-        StatusCode::OK,
+        StatusCode::NO_CONTENT,
         Method::PUT,
         "/entities/dune-2021/reaction",
-        Some(json!({ "kind": "fire" })),
+        Some(json!({ "emoji": "🔥" })),
         Some(&alice),
     )
     .await;
@@ -4476,18 +4671,29 @@ async fn person_likes_and_given_feed(pool: PgPool) {
     ctx.expect(StatusCode::FORBIDDEN, Method::GET, &given, None, None)
         .await;
 
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::PUT,
+        "/entities/dune-2021/like",
+        None,
+        Some(&alice),
+    )
+    .await;
+
     let feed = ctx.get_ok(&given, Some(&alice)).await;
-    assert_eq!(feed["total"], 2);
-    assert_eq!(feed["items"][0]["target"]["kind"], "collection");
-    assert_eq!(feed["items"][0]["target"]["title"], "Подборка");
-    assert_eq!(feed["items"][0]["value"], 1);
-    assert_eq!(feed["items"][1]["target"]["kind"], "person");
+    assert_eq!(feed["total"], 3);
+    assert_eq!(feed["items"][0]["target"]["kind"], "entity");
+    assert_eq!(feed["items"][0]["target"]["entity"]["slug"], "dune-2021");
+    assert_eq!(feed["items"][1]["target"]["kind"], "collection");
+    assert_eq!(feed["items"][1]["target"]["title"], "Подборка");
+    assert_eq!(feed["items"][1]["value"], 1);
+    assert_eq!(feed["items"][2]["target"]["kind"], "person");
     assert_eq!(
-        feed["items"][1]["target"]["person"]["slug"],
+        feed["items"][2]["target"]["person"]["slug"],
         "denis-villeneuve"
     );
 
-    // Фильтр по виду; entity принимается, но лайков у произведений нет.
+    // Фильтр по виду — в том числе «Произведения».
     let only_people = ctx
         .get_ok(&format!("{given}?target=person"), Some(&alice))
         .await;
@@ -4496,7 +4702,11 @@ async fn person_likes_and_given_feed(pool: PgPool) {
     let entities = ctx
         .get_ok(&format!("{given}?target=entity"), Some(&alice))
         .await;
-    assert_eq!(entities["total"], 0);
+    assert_eq!(entities["total"], 1);
+    assert_eq!(
+        entities["items"][0]["target"]["entity"]["slug"],
+        "dune-2021"
+    );
 
     // Счётчики в сводке статистики.
     let stats = ctx
@@ -4504,7 +4714,7 @@ async fn person_likes_and_given_feed(pool: PgPool) {
         .await;
     assert_eq!(
         stats["likes_given"],
-        json!({ "collections": 1, "people": 1, "entities": 0 })
+        json!({ "collections": 1, "people": 1, "entities": 1 })
     );
 
     ctx.expect(

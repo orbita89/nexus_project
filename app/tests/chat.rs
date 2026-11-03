@@ -954,6 +954,10 @@ async fn room_info_for_viewer(pool: PgPool) {
     assert_eq!(guest["entity"]["slug"], "dune-2021");
     assert_eq!(guest["last_message"], Value::Null);
     assert_eq!(guest["me"], Value::Null);
+    // Счётчики кнопки «Открыть чат»: комнаты ещё нет — нули, и это видно гостю.
+    assert_eq!(guest["messages_count"], 0);
+    assert_eq!(guest["messages_24h"], 0);
+    assert_eq!(guest["members_count"], 0);
     let fresh = ctx
         .api(StatusCode::OK, Method::GET, path, None, Some(&bob))
         .await;
@@ -980,6 +984,13 @@ async fn room_info_for_viewer(pool: PgPool) {
         info["me"],
         json!({ "member": false, "muted": true, "unread": 1, "last_read_id": null })
     );
+    assert_eq!(info["messages_count"], 1);
+    assert_eq!(info["messages_24h"], 1);
+    // Участник комнаты произведения — тот, у кого оно в интересах. Интерес заводит alice:
+    // у bob ниже проверяется состав «моих чатов», а интерес добавил бы туда эту комнату.
+    ctx.interest(&alice, "dune-2021").await;
+    let joined = ctx.api(StatusCode::OK, Method::GET, path, None, None).await;
+    assert_eq!(joined["members_count"], 1);
     let own = ctx
         .api(StatusCode::OK, Method::GET, path, None, Some(&alice))
         .await;

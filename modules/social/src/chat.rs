@@ -207,6 +207,16 @@ pub struct ChatRoomInfo {
     pub custom: Option<CustomRoom>,
     /// Личная переписка (`kind = dm`): id и собеседник.
     pub dm: Option<DmRef>,
+    /// Всего сообщений в комнате, без удалённых насовсем.
+    #[schema(example = 412)]
+    pub messages_count: i64,
+    /// Сообщений за последние сутки — «обсуждают сейчас».
+    #[schema(example = 37)]
+    pub messages_24h: i64,
+    /// Участников: у сущности, человека и тега — у кого они в интересах, у своей комнаты —
+    /// вступившие (у системной — все пользователи), у переписки — двое.
+    #[schema(example = 58)]
+    pub members_count: i64,
     /// `null` — сообщений ещё нет.
     pub last_message: Option<ChatMessage>,
     /// Состояние текущего пользователя; `null` — гость.
@@ -901,6 +911,37 @@ pub async fn list_own(
     ))
 }
 
+/// Сколько людей в комнате: у сущности, человека и тега участие — интерес, у премии и своей
+/// комнаты — `chat_room_members` (у системной — все пользователи сайта), у переписки — двое.
+async fn members_count(
+    state: &AppState,
+    room: ChatRoom,
+    room_id: Option<Uuid>,
+    custom: Option<&CustomRoom>,
+) -> AppResult<i64> {
+    if let Some(custom) = custom {
+        return Ok(custom.members_count);
+    }
+    if matches!(room, ChatRoom::Dm(_)) {
+        return Ok(2);
+    }
+    let (table, member_column) = membership(room);
+    // У премии и церемонии ключ участия — id комнаты: пока её нет, никто в ней не состоит.
+    let target = match room {
+        ChatRoom::Award(_) | ChatRoom::AwardEdition(_) => match room_id {
+            None => return Ok(0),
+            Some(id) => id,
+        },
+        _ => room_parts(room).1,
+    };
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {table} WHERE {member_column} = $1"
+    ))
+    .bind(target)
+    .fetch_one(&state.db)
+    .await?)
+}
+
 /// Таблица и колонка «в моих чатах» для вида комнаты: интересы или участники своей комнаты.
 fn membership(room: ChatRoom) -> (&'static str, &'static str) {
     match room {
@@ -1016,6 +1057,24 @@ pub(crate) async fn room_info(
         Some((id, last)) => (Some(id), last),
         None => (None, None),
     };
+    // Те же три числа, что у своей комнаты (`CustomRoom`): кнопке «Открыть чат» на карточке
+    // нужно видеть, живёт ли разговор. Публично, без токена. Комнаты ещё нет — нули.
+    let (messages_count, messages_24h) = match room_id {
+        None => (0, 0),
+        Some(room_id) => {
+            sqlx::query_as::<_, (i64, i64)>(
+                // messages_count в таблице — int, в ответе все счётчики i64.
+                "SELECT (SELECT messages_count::bigint FROM chat_rooms WHERE id = $1),
+                        (SELECT count(*) FROM chat_messages m
+                          WHERE m.room_id = $1 AND m.deleted_at IS NULL
+                            AND m.created_at > now() - interval '24 hours')",
+            )
+            .bind(room_id)
+            .fetch_one(&state.db)
+            .await?
+        }
+    };
+    let members_count = members_count(&state, room, room_id, custom.as_ref()).await?;
     let last_message = match last_id {
         Some(id) => {
             let mut db = state.db.acquire().await?;
@@ -1110,6 +1169,9 @@ pub(crate) async fn room_info(
     Ok(ChatRoomInfo {
         room: channel_name(&kind, &slug),
         kind,
+        messages_count,
+        messages_24h,
+        members_count,
         entity,
         person,
         tag,

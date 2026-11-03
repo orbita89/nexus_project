@@ -89,21 +89,30 @@ pub async fn rating(
     .bind(entity.id)
     .fetch_all(&state.db)
     .await?;
-    let reactions: Vec<(ReactionKind, i64)> = sqlx::query_as(
-        "SELECT kind, count(*) FROM entity_reactions WHERE entity_id = $1 GROUP BY kind",
+    let mut summary = summary(&counts);
+    // Реакции — все, какие есть; старый объект `reactions` — те же строки по четырём эмодзи.
+    summary.reaction_items = sqlx::query_as(
+        "SELECT emoji, count(*) AS count FROM entity_reactions WHERE entity_id = $1
+          GROUP BY emoji ORDER BY count(*) DESC, min(created_at), emoji",
     )
     .bind(entity.id)
     .fetch_all(&state.db)
     .await?;
-    let mut summary = summary(&counts);
-    for (kind, n) in reactions {
-        *match kind {
-            ReactionKind::Fire => &mut summary.reactions.fire,
-            ReactionKind::Sad => &mut summary.reactions.sad,
-            ReactionKind::Think => &mut summary.reactions.think,
-            ReactionKind::Bored => &mut summary.reactions.bored,
-        } = n;
+    for item in &summary.reaction_items {
+        if let Some(kind) = ReactionKind::from_emoji(&item.emoji) {
+            *match kind {
+                ReactionKind::Fire => &mut summary.reactions.fire,
+                ReactionKind::Sad => &mut summary.reactions.sad,
+                ReactionKind::Think => &mut summary.reactions.think,
+                ReactionKind::Bored => &mut summary.reactions.bored,
+            } = item.count;
+        }
     }
+    summary.likes_count =
+        sqlx::query_scalar("SELECT count(*) FROM entity_likes WHERE entity_id = $1")
+            .bind(entity.id)
+            .fetch_one(&state.db)
+            .await?;
     Ok(Json(summary))
 }
 
@@ -185,6 +194,8 @@ fn summary(counts: &[(i16, i64)]) -> RatingSummary {
         count,
         distribution,
         reactions: Reactions::default(),
+        reaction_items: Vec::new(),
+        likes_count: 0,
     }
 }
 

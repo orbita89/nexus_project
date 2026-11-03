@@ -86,6 +86,9 @@ pub fn router() -> OpenApiRouter<AppState> {
             reactions::put,
             reactions::delete
         ))
+        .routes(routes!(reactions::list))
+        .routes(routes!(likes::entity_summary))
+        .routes(routes!(likes::like_entity, likes::unlike_entity))
         .routes(routes!(marks::get_own, marks::put, marks::delete))
         .routes(routes!(marks::list_own))
         .routes(routes!(follows::follow, follows::unfollow))

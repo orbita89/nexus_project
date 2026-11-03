@@ -84,7 +84,7 @@ pub async fn get(
     .fetch_all(&state.db)
     .await?;
     let reactions: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT kind, count(*) FROM entity_reactions WHERE user_id = $1 GROUP BY kind",
+        "SELECT emoji, count(*) FROM entity_reactions WHERE user_id = $1 GROUP BY emoji",
     )
     .bind(user.id)
     .fetch_all(&state.db)
@@ -114,11 +114,12 @@ pub async fn get(
     .fetch_all(&state.db)
     .await?;
 
-    // Что пользователь лайкнул сам: раздел «Что нравится». Лайков у произведений нет.
-    let likes_given: (i64, i64) = sqlx::query_as(
+    // Что пользователь лайкнул сам: раздел «Что нравится».
+    let likes_given: (i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM collection_likes WHERE user_id = $1),
-            (SELECT count(*) FROM person_likes WHERE user_id = $1)",
+            (SELECT count(*) FROM person_likes WHERE user_id = $1),
+            (SELECT count(*) FROM entity_likes WHERE user_id = $1)",
     )
     .bind(user.id)
     .fetch_one(&state.db)
@@ -128,7 +129,7 @@ pub async fn get(
         likes_given: LikesGiven {
             collections: likes_given.0,
             people: likes_given.1,
-            entities: 0,
+            entities: likes_given.2,
         },
         ratings: summary(&ratings),
         reviews_with_text,
@@ -283,15 +284,17 @@ fn mark_counts(rows: &[MarkCountsRow]) -> MarkCounts {
     counts
 }
 
+/// Свои реакции по четырём старым видам: свободные эмодзи сюда не идут — в `ProfileStats`
+/// у объекта фиксированные ключи, а разрез «какими эмодзи я реагирую» никто не просил.
 fn reaction_counts(rows: &[(String, i64)]) -> Reactions {
     let mut counts = Reactions::default();
-    for (kind, n) in rows {
-        match kind.as_str() {
-            "fire" => counts.fire = *n,
-            "sad" => counts.sad = *n,
-            "think" => counts.think = *n,
-            "bored" => counts.bored = *n,
-            _ => {}
+    for (emoji, n) in rows {
+        match crate::models::ReactionKind::from_emoji(emoji) {
+            Some(crate::models::ReactionKind::Fire) => counts.fire = *n,
+            Some(crate::models::ReactionKind::Sad) => counts.sad = *n,
+            Some(crate::models::ReactionKind::Think) => counts.think = *n,
+            Some(crate::models::ReactionKind::Bored) => counts.bored = *n,
+            None => {}
         }
     }
     counts
@@ -337,7 +340,8 @@ mod tests {
             },
         ]);
         assert_eq!((marks.later, marks.done), (1, 3));
-        let reactions = reaction_counts(&[("fire".into(), 2), ("unknown".into(), 9)]);
+        // Свободные эмодзи в объект из четырёх ключей не попадают.
+        let reactions = reaction_counts(&[("🔥".into(), 2), ("🤯".into(), 9)]);
         assert_eq!((reactions.fire, reactions.sad), (2, 0));
     }
 }

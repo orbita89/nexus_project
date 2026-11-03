@@ -5268,7 +5268,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Все теги по алфавиту с числом активных сущностей (счётчик держат триггеры); `?kind=genre` —\nтолько жанры. Тегов немного, поэтому\nбез пагинации.",
+        "summary": "Все теги по алфавиту с числом активных сущностей (счётчик держат триггеры); `?kind=genre` —\nтолько жанры, `?entity_kind=painting` — только теги с активными картинами. Тегов немного,\nпоэтому без пагинации.",
         "operationId": "list_tags",
         "parameters": [
           {
@@ -5284,6 +5284,24 @@
                 "tag"
               ]
             }
+          },
+          {
+            "name": "entity_kind",
+            "in": "query",
+            "description": "Только теги, у которых есть активные работы этого типа (`by_kind[entity_kind] > 0`):\nвкладки разделов на `/tags`. `kind` у этого эндпойнта занят видом тега, поэтому тип\nработы — отдельный параметр.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Тип сущности (Postgres enum `entity_kind`).",
+              "enum": [
+                "movie",
+                "series",
+                "book",
+                "game",
+                "painting"
+              ]
+            },
+            "example": "painting"
           }
         ],
         "responses": {
@@ -5301,7 +5319,7 @@
             }
           },
           "400": {
-            "description": "Неверный `kind`",
+            "description": "Неверный `kind` или `entity_kind`",
             "content": {
               "application/json": {
                 "schema": {
@@ -6692,6 +6710,13 @@
           "name"
         ],
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "1–2 предложения, до 20 000 символов; пусто — `null`."
+          },
           "kind": {
             "$ref": "#/components/schemas/TagKind",
             "description": "По умолчанию `tag`."
@@ -9511,6 +9536,14 @@
           "kind"
         ],
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "1–2 предложения о жанре или метке; пишется руками через админку.",
+            "example": "Сцены повседневной жизни: кухни, рынки, мастерские."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -9541,6 +9574,13 @@
           "count": {
             "type": "integer",
             "format": "int64"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Описание из `tags`; у тега, которого уже нет в БД, — `null`."
           },
           "kind": {
             "type": "string",
@@ -9573,13 +9613,33 @@
           "slug",
           "name",
           "kind",
-          "entities_count"
+          "entities_count",
+          "by_kind"
         ],
         "properties": {
+          "by_kind": {
+            "type": "object",
+            "description": "Разбивка по типу работы; типы без активных сущностей не отдаются (`{\"movie\": 10,\n\"book\": 2}`).",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "1–2 предложения о жанре или метке; пишется руками через админку.",
+            "example": "Сцены повседневной жизни: кухни, рынки, мастерские."
+          },
           "entities_count": {
             "type": "integer",
             "format": "int64",
-            "description": "Сколько активных сущностей с этим тегом.",
+            "description": "Сколько активных сущностей с этим тегом — сумма [`TagWithCount::by_kind`].",
             "example": 12
           },
           "id": {
@@ -10020,6 +10080,13 @@
       "UpdateTag": {
         "type": "object",
         "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` стирает описание, пропущенное поле — оставляет как было."
+          },
           "kind": {
             "oneOf": [
               {

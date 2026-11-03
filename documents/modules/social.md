@@ -132,16 +132,38 @@
 
 ### `entity_reactions` ✅ — реакции на произведение
 
-🔥 😢 🤔 😴 под оценкой на карточке. Миграция `20261014130000_entity_reactions.sql`.
+Любое эмодзи под оценкой на карточке, у зрителя их может быть несколько (как в Slack).
+Миграции `20261014130000_entity_reactions.sql` (четыре вида) и
+`20261129100000_social_entity_emoji_reactions.sql` (2026-11-04: `kind` → `emoji`, тройной ключ;
+старые `fire` / `sad` / `think` / `bored` превращены в 🔥 😢 🤔 😴, поэтому ничего не потеряно).
 
 | Колонка | Тип | Ограничения | Описание |
 |---|---|---|---|
 | `entity_id` | `uuid` | PK, FK → `entities`, CASCADE | |
 | `user_id` | `uuid` | PK, FK → `users`, CASCADE | |
-| `kind` | `text` | NOT NULL, `fire` / `sad` / `think` / `bored` | |
-| `created_at` | `timestamptz` | NOT NULL | Когда поставлена (смена реакции — заново) |
+| `emoji` | `text` | PK, NOT NULL, CHECK `octet_length` 1–64 | Одно эмодзи; что это действительно эмодзи, проверяет `social::validate::emoji` |
+| `created_at` | `timestamptz` | NOT NULL | Когда поставлена; по `min(created_at)` сортируются равные по числу |
 
-Одна реакция на зрителя: другая заменяет прежнюю. **Индексы:** PK — подсчёт по сущности; `user_id`.
+Реакций у зрителя сколько угодно, но каждая одна (PK). Разных эмодзи у произведения — не больше
+`MAX_ENTITY_EMOJI` = 30 (`validate.rs`): предел считается в той же транзакции, что и вставка,
+иначе два запроса проскочат разом; при достижении новое эмодзи — 409 `reaction_limit`, уже
+знакомое принимается. **Индексы:** PK (`entity_id`, …) — сводка `GROUP BY emoji`; `user_id`.
+
+### `entity_likes` ✅ — «нравится» у произведения
+
+Миграция `20261129110000_social_entity_likes.sql` (2026-11-04). Сердечко рядом с «Оценить»:
+оценка 1–10 требует решения и ставится редко, реакции — про настроение, отметки — про статус.
+Дизлайка нет, как у `person_likes` и `user_likes`.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `entity_id` | `uuid` | PK, FK → `entities`, CASCADE | |
+| `user_id` | `uuid` | PK, FK → `users`, CASCADE | |
+| `created_at` | `timestamptz` | NOT NULL | |
+
+Повторный лайк ничего не меняет (PK), снятие без лайка — тоже 204. До выхода лайкать можно:
+409 `not_released` здесь нет — понравиться может и трейлер. **Индексы:** PK — счётчик у
+произведения; `entity_likes_user_idx` (`user_id`, `created_at DESC`) — лента «Что нравится».
 
 ### `comments` ✅ — комментарии к произведениям, людям и студиям
 
@@ -751,12 +773,12 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | DELETE | `/collections/{id}/like` | user | Снять голос → 204 (даже если его не было) |
 | PUT / DELETE | `/people/{slug}/like` | user | Лайкнуть человека / снять → 204 (повторно — 204). 404 — человека нет или он скрыт |
 | GET | `/people/{slug}/likes` | все | Кто лайкнул: `Page<{user, since}>`, новые сверху |
-| GET | `/users/{username}/likes/given` | гость / вошедший | «Что нравится»: что пользователь лайкнул, новые сверху. `?target=collection\|person\|entity` (не передан — всё вперемешку), `?limit=1..100&offset=` → `Page<{target, value, created_at}>`; `target` — объединение по `kind`: `{"kind": "collection", "collection_id", "title"}` или `{"kind": "person", "person"}`. Лайков у произведений нет: `target=entity` отдаёт пустую страницу. 403 `stats_private`; 404 — нет пользователя |
+| GET | `/users/{username}/likes/given` | гость / вошедший | «Что нравится»: что пользователь лайкнул, новые сверху. `?target=collection\|person\|entity` (не передан — всё вперемешку), `?limit=1..100&offset=` → `Page<{target, value, created_at}>`; `target` — объединение по `kind`: `{"kind": "collection", "collection_id", "title"}`, `{"kind": "person", "person"}` или `{"kind": "entity", "entity"}` (`EntityRef`). Произведения появились вместе с `entity_likes` (2026-11-04) — раньше `target=entity` всегда отдавал пустую страницу. 403 `stats_private`; 404 — нет пользователя |
 | PUT | `/users/{username}/like` | user | Лайкнуть профиль → 204 (повторно — тоже 204). 400 `like_self` — себе; 404 — нет пользователя |
 | DELETE | `/users/{username}/like` | user | Снять лайк → 204 (даже если его не было) |
 | GET | `/users/{username}/likes` | все | Кто лайкнул: `Page<{user, since}>` (`?limit=1..100&offset=`), новые сверху. 404 — нет пользователя |
 | GET | `/users/{username}/comments` | гость / вошедший | «Мои комментарии»: всё, что пользователь написал — к произведениям, людям и студиям (`comments`), к рецензиям и в обсуждениях коллекций — одной лентой, новые сверху. `Page<UserComment>` (`?limit=1..100&offset=`); `UserComment`: `id`, `body`, `created_at`, `updated_at` и `target` с `kind` — `entity`/`person`/`studio` (рядом `entity`/`person`/`studio`), `review` (`review_id` и `entity`, о котором рецензия) или `collection` (`collection_id`, `title`). Цель удалена — строки в ленте нет. 403 `stats_private`; 404 — нет пользователя |
-| GET | `/users/{username}/stats` | гость / вошедший | Аналитика профиля: `ratings` (`average`, `count`, `distribution` 1–10), `reviews_with_text`, `marks` (`later`, `done`), `reactions` (все четыре ключа), `comments` (`reviews`, `collections`, без удалённых), `likes_given` (`collections`, `people`, `entities` — последнее всегда `0`) и `by_kind` (`rated`, `done` по типам контента — из `EntityDirectory::kind_counts`, ключей без единой сущности нет). 403 `stats_private` — владелец не открыл аналитику; 404 — нет пользователя |
+| GET | `/users/{username}/stats` | гость / вошедший | Аналитика профиля: `ratings` (`average`, `count`, `distribution` 1–10), `reviews_with_text`, `marks` (`later`, `done`), `reactions` (все четыре ключа), `comments` (`reviews`, `collections`, без удалённых), `likes_given` (`collections`, `people`, `entities`) и `by_kind` (`rated`, `done` по типам контента — из `EntityDirectory::kind_counts`, ключей без единой сущности нет). 403 `stats_private` — владелец не открыл аналитику; 404 — нет пользователя |
 | GET | `/users/{username}/ratings` | гость / вошедший | Что пользователь оценил: `Page<{entity, rating, has_text, created_at}>`, `?sort=new` (по умолчанию) `\|rating_desc\|rating_asc`, `?limit=1..100&offset=`. 400 — неизвестный `sort`; 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}/marks` | гость / вошедший | Отметки пользователя: `?kind=later\|done` (не передан — все), `limit`, `offset` → `Page<{entity, kind, created_at}>`. Своё без оглядки на приватность — `/users/me/marks`. 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых), `likes_count` и `liked` (лайкнул ли вошедший; гостю и в своём профиле `false`), `reputation` (`score`, `parts`, `computed_at`; пересчёт раз в сутки, поэтому свежий лайк виден в `likes_count` сразу, а в `score` — после ближайшего прохода), `relation`, `blocked` (я заблокировал его; гостю и в своём профиле `false`), `blocked_by` (он заблокировал меня; `null` — гость или свой профиль), а также `bio`, `stats_public` (открыл ли пользователь свою аналитику всем) и `registered_at` — из `auth` через `UserDirectory::details` |
@@ -770,7 +792,13 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | Метод | Путь | Доступ | Что делает |
 |---|---|---|---|
 | GET | `/entities/{slug}/reviews` | гость | Рецензии на сущность. По умолчанию только с текстом; `all=true` — и оценки без текста. `sort`: `new` (по умолчанию), `rating_desc`, `rating_asc` (без оценки — в конце) |
-| GET | `/entities/{slug}/rating` | гость | Сводка: `{"average": 8.3, "count": 12, "distribution": [n1, ..., n10], "reactions": {"fire": 12, "sad": 3, "think": 5, "bored": 1}}`. Среднее округлено до 0.1, без оценок — `null`. Учитываются все оценки, в том числе без текста; в `reactions` всегда все четыре ключа |
+| GET | `/entities/{slug}/rating` | гость | Сводка: `{"average": 8.3, "count": 12, "distribution": [n1, ..., n10], "reactions": {...}, "reaction_items": [{"emoji": "🔥", "count": 128}], "likes_count": 42}`. Среднее округлено до 0.1, без оценок — `null`. Учитываются все оценки, в том числе без текста. `reaction_items` — все реакции по убыванию числа (при равенстве раньше появившаяся); `reactions` — те же строки по четырём старым эмодзи, всегда все четыре ключа (устарело, фронтенд переходит на `reaction_items`); `likes_count` — сердечки, чтобы карточке хватило одного запроса |
+| GET | `/entities/{slug}/reactions` | гость / вошедший | `{"items": [{"emoji": "🔥", "count": 128, "mine": true}]}` — по убыванию `count`, при равенстве раньше та, что появилась первой; `mine` у гостя всегда `false`. 404 — нет сущности |
+| PUT | `/entities/{slug}/reaction` | user | `{"emoji": "❤️"}` → 204. Разных реакций у зрителя сколько угодно, повторная та же ничего не меняет. 400 `bad_emoji` — не эмодзи (`validate::emoji`: одна графемная последовательность, тона, ZWJ, клавиши, флаги; буквы, цифры и разметка — нет); 409 `not_released` — ещё не вышло; 409 `reaction_limit` — у произведения уже 30 разных эмодзи, а это новое |
+| DELETE | `/entities/{slug}/reaction` | user | С телом `{"emoji": "❤️"}` снимает её, без тела — все свои → 204 (даже если нечего снимать). 400 `bad_emoji`; 404 — нет сущности |
+| GET | `/entities/{slug}/reaction` | user | Устарело: своя реакция одним из четырёх старых видов (`{"kind": "fire"}`) — самая ранняя своя из 🔥 😢 🤔 😴, иначе 404. Весь набор — в `/entities/{slug}/reactions` |
+| PUT / DELETE | `/entities/{slug}/like` | user | Поставить / снять «нравится» → 204; идемпотентно. До выхода — можно (это не оценка). 404 — нет сущности |
+| GET | `/entities/{slug}/likes` | гость / вошедший | `{"likes": 128, "mine": true}`; `mine` у гостя `false`. То же число — `likes_count` в сводке оценок. 404 — нет сущности |
 | GET | `/ratings?slugs=a,b,c` | гость | Средние оценки пачкой для сеток каталога (до 100 slug'ов): `{"dune-2021": {"average": 8.3, "count": 12}}`. Без оценок — `{"average": null, "count": 0}`, неизвестных slug'ов в ответе нет; пусто или больше 100 — 400 |
 | GET | `/entities/{slug}/review` | user | Своя рецензия, нет — 404 |
 | PUT | `/entities/{slug}/review` | user | `{"rating": 1–10, "body": "...", "is_spoiler": false}`: создать (201) или заменить целиком (200). Нужна оценка или текст; `is_spoiler` по умолчанию `false`. До выхода (`release_date` позже сегодняшней даты UTC) — 409 `not_released`; без даты — можно |
@@ -902,7 +930,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | Метод | Путь | Кто | Что делает |
 |---|---|---|---|
 | GET | `/chats` | user | Мои чаты = комнаты всех сущностей, людей и тегов из интересов, премии и церемонии, в чат которых вступил, и свои комнаты (сообщений может не быть): `[{room: "entity:<slug>" \| "person:<slug>" \| "tag:<slug>" \| "award:<slug>" \| "room:<slug>" \| "dm:<id>", kind, entity \| null, person \| null, tag \| null, award \| null, custom \| null, dm \| null, last_message \| null, unread (до 100), muted}]` — из `entity`/`person`/`tag`/`award`/`custom` заполнено одно, по `kind` (`award` — `{id, slug, title, year, logo_url}`, `year` есть только у церемонии: строка ведёт на `/awards/{slug}` или `/awards/{slug}/{year}`); сверху со свежими сообщениями, затем без сообщений (новые интересы сверху). Без пагинации (интересов ≤ 3 × 500) |
-| GET | `/chat/{kind}/{slug}` | все (`Option<AuthUser>`) | Комната для открытой панели, в том числе не из «моих чатов» (открыта с карточки): `{room, kind, entity \| person \| tag \| award \| custom, last_message \| null, me}`. `kind` в пути — `entity`, `person`, `tag`, `award`, `room`, `dm`; у премии slug — `oscar`, у церемонии `oscar-2024`, в ответе вид `award` или `award_edition`, а `room` у обоих — `award:<slug>`. `me` — вошедшему `{member, muted, unread (до 100), last_read_id}`: `member` — сущность, человек или тег в интересах / в свою комнату или комнату премии вступил; `last_read_id` — для разделителя «новые сообщения». Гостю `me: null`. 404 — неизвестный `kind` или slug; 401 — неверный токен |
+| GET | `/chat/{kind}/{slug}` | все (`Option<AuthUser>`) | Комната для открытой панели, в том числе не из «моих чатов» (открыта с карточки): `{room, kind, entity \| person \| tag \| award \| custom, messages_count, messages_24h, members_count, last_message \| null, me}`. Три счётчика — у комнаты любого вида, а не только своей: кнопке «Открыть чат» на карточке нужно видеть, идёт ли разговор (`messages_24h` — «обсуждают сейчас»). Считаются публично, без токена; комнаты ещё нет — нули. `members_count`: у сущности, человека и тега — у скольких она в интересах, у своей комнаты — вступившие (у системной — все пользователи), у премии — участники её комнаты, у переписки — 2. `kind` в пути — `entity`, `person`, `tag`, `award`, `room`, `dm`; у премии slug — `oscar`, у церемонии `oscar-2024`, в ответе вид `award` или `award_edition`, а `room` у обоих — `award:<slug>`. `me` — вошедшему `{member, muted, unread (до 100), last_read_id}`: `member` — сущность, человек или тег в интересах / в свою комнату или комнату премии вступил; `last_read_id` — для разделителя «новые сообщения». Гостю `me: null`. 404 — неизвестный `kind` или slug; 401 — неверный токен |
 | GET | `/chat/{kind}/{slug}/messages?before=&limit=` | все | История комнаты (`kind` — `entity`, `person`, `tag`, `award`, `room`): `{items, next_before}` — `limit` 1–100 (50) сообщений старше `before` (без него — последние), в `items` старые сверху; `next_before` — курсор дальше в прошлое, `null` — начало. 400 — `limit` вне 1–100; 404 — неизвестный `kind` или slug |
 | GET | `/chat/search` | все (`Option<AuthUser>`) | Поиск по сообщениям: `?q=` (1–100, по словам с русской морфологией), `?room=<kind>:<slug>` (без него — по всем моим чатам, нужен вход), `?limit=` 1–100 (50), `?before=` — курсор. `{items: [{room, message}], next_before}`, новые сверху; удалённые не находятся. 400 — пустой/длинный `q`, `limit` вне 1–100, `room` не вида `kind:slug`; 401 — без `room` и без входа; 404 — нет комнаты |
 | GET | `/chat/messages/{id}` | все | Одно сообщение (перечитать по `chat.message.updated` / `deleted`). 404 — нет |
@@ -1071,6 +1099,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `reply.created` | автор сообщения, на которое ответили (себе — нет) | `thread_id`, `post_id`, `parent_id`, `author_id` |
 | `review.created`, `review.updated`, `review.deleted` | сущность | `review_id`, `entity_id`, `author_id` |
 | `review.commented`, `review.comment_deleted` | сущность | `review_id`, `comment_id`, `entity_id`, `author_id` |
+| `entity.reacted` | сущность | `entity_id`, `user_id` — что именно поставили или сняли, в событии нет: карточка перечитывает `GET /entities/{slug}/reactions` |
 | `interest.added`, `interest.removed` | пользователь | `entity_id`, `person_id`, `tag_id` или `room_id` (вступил в свою комнату / вышел) |
 | `chat.message.created` | комната: `entity:`, `person:`, `tag:` или `room:` | `kind`, `target_id`, `message` — **сообщение целиком** (`ChatMessage`). Исключение из правила «только id»: иначе каждое сообщение — запрос каждого онлайн-клиента |
 | `chat.message.updated`, `chat.message.deleted` | комната | `kind`, `target_id`, `message_id` — перечитать `GET /chat/messages/{id}` |

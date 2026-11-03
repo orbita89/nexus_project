@@ -5059,6 +5059,166 @@
         ]
       }
     },
+    "/api/v1/social/entities/{slug}/like": {
+      "put": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Лайкнуть произведение. Повторный лайк ничего не меняет. Дизлайка нет — как у людей.",
+        "description": "409 `not_released` здесь не нужен (в отличие от оценок и реакций): понравиться может и\nтрейлер ещё не вышедшего фильма.",
+        "operationId": "like_entity",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Лайкнуто"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Снять свой лайк с произведения → 204 (даже если его не было).",
+        "operationId": "unlike_entity",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Лайка нет"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/entities/{slug}/likes": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Сколько лайков у произведения и свой. То же число — в сводке оценок (`likes_count`),\nчтобы карточке хватало одного запроса.",
+        "operationId": "get_entity_likes",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Лайки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityLikes"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/entities/{slug}/mark": {
       "get": {
         "tags": [
@@ -5290,7 +5450,8 @@
         "tags": [
           "reviews"
         ],
-        "summary": "Своя реакция на произведение.",
+        "summary": "Своя реакция одним из четырёх старых видов.",
+        "description": "Устарело: реакций у зрителя теперь может быть несколько, и эмодзи — любое. Отдаёт самую\nраннюю свою реакцию, если это 🔥 😢 🤔 😴, иначе 404; весь набор — в `GET …/reactions`.",
         "operationId": "get_own_reaction",
         "parameters": [
           {
@@ -5326,7 +5487,7 @@
             }
           },
           "404": {
-            "description": "Сущность не найдена или реакции нет",
+            "description": "Сущность не найдена или своей реакции из четырёх нет",
             "content": {
               "application/json": {
                 "schema": {
@@ -5346,7 +5507,7 @@
         "tags": [
           "reviews"
         ],
-        "summary": "Поставить реакцию; другая заменяет прежнюю. До выхода — нельзя, как и оценки.",
+        "summary": "Поставить реакцию. Несколько разных можно, повторная та же ничего не меняет.\nДо выхода — нельзя, как и оценки.",
         "operationId": "put_reaction",
         "parameters": [
           {
@@ -5364,25 +5525,18 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Reaction"
+                "$ref": "#/components/schemas/EmojiReaction"
               }
             }
           },
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Реакция сохранена",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Reaction"
-                }
-              }
-            }
+          "204": {
+            "description": "Реакция сохранена"
           },
           "400": {
-            "description": "Неизвестная реакция",
+            "description": "Не эмодзи (`code`: `bad_emoji`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5412,7 +5566,7 @@
             }
           },
           "409": {
-            "description": "Ещё не вышла (`code`: `not_released`)",
+            "description": "Ещё не вышла (`not_released`) или у произведения уже 30 разных эмодзи (`reaction_limit`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5432,7 +5586,7 @@
         "tags": [
           "reviews"
         ],
-        "summary": "Убрать свою реакцию → 204 (даже если её не было).",
+        "summary": "Убрать свою реакцию → 204 (даже если её не было). С телом `{\"emoji\": \"❤️\"}` снимается\nименно она, без тела — все свои реакции на это произведение.",
         "operationId": "delete_reaction",
         "parameters": [
           {
@@ -5446,9 +5600,30 @@
             "example": "dune-2021"
           }
         ],
+        "requestBody": {
+          "description": "Какую снять; без тела — все свои",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteReaction"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "204": {
             "description": "Реакции нет"
+          },
+          "400": {
+            "description": "Не эмодзи (`code`: `bad_emoji`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           },
           "401": {
             "description": "Нет токена",
@@ -5472,6 +5647,65 @@
           }
         },
         "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/entities/{slug}/reactions": {
+      "get": {
+        "tags": [
+          "reviews"
+        ],
+        "summary": "Реакции произведения и своя отметка. Публичный: у гостя все `mine: false`.",
+        "operationId": "list_entity_reactions",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Реакции",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityReactions"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
           {
             "bearer": []
           }
@@ -9634,7 +9868,10 @@
         "description": "Комната для открытой панели чата: что это, последнее сообщение и состояние текущего\nпользователя. Заполнено одно из `entity`, `person`, `tag`, `custom` — по `kind`.",
         "required": [
           "room",
-          "kind"
+          "kind",
+          "messages_count",
+          "messages_24h",
+          "members_count"
         ],
         "properties": {
           "award": {
@@ -9704,6 +9941,24 @@
                 "type": "null"
               }
             ]
+          },
+          "members_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Участников: у сущности, человека и тега — у кого они в интересах, у своей комнаты —\nвступившие (у системной — все пользователи), у переписки — двое.",
+            "example": 58
+          },
+          "messages_24h": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сообщений за последние сутки — «обсуждают сейчас».",
+            "example": 37
+          },
+          "messages_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего сообщений в комнате, без удалённых насовсем.",
+            "example": 412
           },
           "person": {
             "oneOf": [
@@ -10612,6 +10867,21 @@
           }
         }
       },
+      "DeleteReaction": {
+        "type": "object",
+        "description": "Тело `DELETE /entities/{slug}/reaction`: какую снять. Пустое тело снимает все свои.",
+        "properties": {
+          "emoji": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Эмодзи; не передано — снимаются все свои реакции на это произведение.",
+            "example": "❤️"
+          }
+        },
+        "additionalProperties": false
+      },
       "DmPolicy": {
         "type": "string",
         "description": "Кто может начать переписку с пользователем.",
@@ -10635,6 +10905,55 @@
           },
           "peer": {
             "$ref": "#/components/schemas/UserRef"
+          }
+        }
+      },
+      "EmojiReaction": {
+        "type": "object",
+        "description": "Какую реакцию ставят или снимают: любое эмодзи.",
+        "required": [
+          "emoji"
+        ],
+        "properties": {
+          "emoji": {
+            "type": "string",
+            "description": "Одно эмодзи: 🔥, ❤️, 👍🏽, 👩‍👩‍👧. Не эмодзи — 400 `bad_emoji`.",
+            "example": "❤️"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EntityLikes": {
+        "type": "object",
+        "description": "Лайки произведения: сколько всего и свой.",
+        "required": [
+          "likes",
+          "mine"
+        ],
+        "properties": {
+          "likes": {
+            "type": "integer",
+            "format": "int64",
+            "example": 128
+          },
+          "mine": {
+            "type": "boolean",
+            "description": "Лайкнул ли текущий пользователь; у гостя `false`."
+          }
+        }
+      },
+      "EntityReactions": {
+        "type": "object",
+        "description": "Реакции произведения: по убыванию числа, при равенстве — кто появился раньше.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReactionItem"
+            }
           }
         }
       },
@@ -11087,9 +11406,27 @@
                 "$ref": "#/components/schemas/PersonRef"
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "entity",
+              "kind"
+            ],
+            "properties": {
+              "entity": {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "entity"
+                ]
+              }
+            }
           }
         ],
-        "description": "Цель лайка. `kind` — `collection` или `person`; остальные поля зависят от него."
+        "description": "Цель лайка. `kind` — `collection`, `person` или `entity`; остальные поля зависят от него."
       },
       "LikesGiven": {
         "type": "object",
@@ -11108,8 +11445,7 @@
           "entities": {
             "type": "integer",
             "format": "int64",
-            "description": "Лайков у произведений нет — всегда `0`.",
-            "example": 0
+            "example": 8
           },
           "people": {
             "type": "integer",
@@ -12946,7 +13282,9 @@
         "required": [
           "count",
           "distribution",
-          "reactions"
+          "reactions",
+          "reaction_items",
+          "likes_count"
         ],
         "properties": {
           "average": {
@@ -12984,9 +13322,22 @@
               2
             ]
           },
+          "likes_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько раз произведению поставили «нравится» (`PUT /entities/{slug}/like`).",
+            "example": 128
+          },
+          "reaction_items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReactionCount"
+            },
+            "description": "Все реакции произведения, по убыванию числа; при равенстве раньше та, что появилась\nпервой. Своя отметка — `GET /entities/{slug}/reactions`: сводка одинакова для всех."
+          },
           "reactions": {
             "$ref": "#/components/schemas/Reactions",
-            "description": "Реакции зрителей. Своя — `GET /entities/{slug}/reaction`."
+            "description": "Реакции зрителей четырьмя старыми видами. Устарело: это те же 🔥 😢 🤔 😴 из\n`reaction_items`. Своя — `GET /entities/{slug}/reactions` (поле `mine`)."
           }
         }
       },
@@ -13002,6 +13353,49 @@
           }
         },
         "additionalProperties": false
+      },
+      "ReactionCount": {
+        "type": "object",
+        "description": "Сколько зрителей поставили это эмодзи.",
+        "required": [
+          "emoji",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "example": 128
+          },
+          "emoji": {
+            "type": "string",
+            "example": "🔥"
+          }
+        }
+      },
+      "ReactionItem": {
+        "type": "object",
+        "description": "Реакция произведения с отметкой «моя»: строка реакций на карточке.",
+        "required": [
+          "emoji",
+          "count",
+          "mine"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "example": 128
+          },
+          "emoji": {
+            "type": "string",
+            "example": "🔥"
+          },
+          "mine": {
+            "type": "boolean",
+            "description": "Поставил ли её текущий пользователь; у гостя всегда `false`."
+          }
+        }
       },
       "ReactionKind": {
         "type": "string",
