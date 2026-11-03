@@ -33,7 +33,7 @@
 | `metadata` | `jsonb` | NOT NULL, default `{}` | Поля, специфичные для типа (см. ниже) |
 | `active` | `boolean` | NOT NULL, default `true` | Видна на сайте. Миграция `20261016100000_entity_active.sql`, см. ниже |
 | `active_manual` | `boolean` | NOT NULL, default `false` | `active` переключали в админке (`PATCH`, `POST` с `active`) или это сид, привязанный импортом: «Пересобрать активные» не трогает. Миграция `20261017100000_entity_tmdb.sql` |
-| `external_ids` | `jsonb` | NOT NULL, default `{}` | Id во внешних сервисах, например `{"tmdb": 550}`. Уникальный индекс `entities_external_tmdb_uq` по `((external_ids->>'tmdb')::int) WHERE external_ids ? 'tmdb'`. Игры: `{"steam": 292030}`, индекс `entities_external_steam_uq` — UNIQUE `((external_ids->>'steam')::int)` WHERE `external_ids ? 'steam'` (миграция `20261029100000_external_steam.sql`, пишет `scripts/games-import/steam_games.py`). Сериалы из TMDB: `{"tmdb_tv": 1396}`, индекс `entities_external_tmdb_tv_uq` (миграция `20261127100000_external_tmdb_tv.sql`) — **не** `tmdb`: id фильмов и сериалов у TMDB независимы, а `external_ids ? 'tmdb'` по всему каталогу значит «фильм из TMDB» (видимость, «Пересобрать активные», архив). Новый внешний сервис — новый ключ, без новой таблицы. Миграция `20261027100000_external_ids.sql` (2026-10-19) |
+| `external_ids` | `jsonb` | NOT NULL, default `{}` | Id во внешних сервисах, например `{"tmdb": 550}`. Уникальный индекс `entities_external_tmdb_uq` по `((external_ids->>'tmdb')::int) WHERE external_ids ? 'tmdb'`. Игры: `{"steam": 292030}`, индекс `entities_external_steam_uq` — UNIQUE `((external_ids->>'steam')::int)` WHERE `external_ids ? 'steam'` (миграция `20261029100000_external_steam.sql`, пишет `scripts/games-import/steam_games.py`), он же и `wikidata_games.py` из `P1733`). Игры из Wikidata: `{"wikidata": "Q17452"}`, тот же индекс `entities_external_wikidata_uq`, что у картин. Сериалы из TMDB: `{"tmdb_tv": 1396}`, индекс `entities_external_tmdb_tv_uq` (миграция `20261127100000_external_tmdb_tv.sql`) — **не** `tmdb`: id фильмов и сериалов у TMDB независимы, а `external_ids ? 'tmdb'` по всему каталогу значит «фильм из TMDB» (видимость, «Пересобрать активные», архив). Новый внешний сервис — новый ключ, без новой таблицы. Миграция `20261027100000_external_ids.sql` (2026-10-19) |
 | `created_at` | `timestamptz` | NOT NULL | |
 | `updated_at` | `timestamptz` | NOT NULL | Обновляется триггером |
 
@@ -1319,6 +1319,50 @@ Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `cov
   `((external_ids->>'steam')::int)` WHERE `external_ids ? 'steam'` (миграция
   `20261029100000_external_steam.sql`); перезапуск безопасен.
 - Событий нет. Затем `scripts/reindex-search.sh` (поиск, ISR) и `make media` (трейлер Rutube).
+
+## Игры из Wikidata ✅ — `scripts/games-import/wikidata_games.py`
+
+Запасной путь для раздела «Игры» (решение пользователя 2026-11-03): Steam и его CDN закрыты
+корпоративным фильтром (`steam_games.py` получает 403 на `shared.akamai.steamstatic.com`), поэтому
+игры берутся из Wikidata и Википедии. Без своих таблиц и кода в `catalog`, без ключей
+(`requests`, `psycopg2`; `DATABASE_URL`; venv — `scripts/games-import/.venv`).
+
+- **Отбор в два шага**: SPARQL к WDQS — `wdt:P31 wd:Q7889` (компьютерная игра) со статьёй в англ.
+  Википедии, по убыванию `wikibase:sitelinks`, порог `--min-sitelinks` (8), `--pool` (400)
+  кандидатов; затем Wikimedia Pageviews (`metrics/pageviews/per-article`, `all-access/user`,
+  `monthly`) — сумма просмотров ru- и en-статьи за два последних полных месяца, по ней берутся
+  `--limit` (100) самых читаемых сейчас. Sitelinks как прокси «популярности сегодня» не годится:
+  он почти не меняется, просмотры поднимают то, во что играют в этом месяце.
+  Паузы: `--delay` (1,5 с) к API Викимедиа, `--views-delay` (0,4 с) к Pageviews; на 429/5xx —
+  повторы, 404 Pageviews = 0 просмотров.
+- **Данные** — `wbgetentities` пачками по 50 (`labels|claims`, языки `ru|en|mul`: у платформ
+  вроде «PlayStation 5» отдельной английской метки уже нет), вторая пачка — названия ссылок
+  (`P178` разработчик, `P123` издатель, `P400` платформы); описания — `extracts` (`exintro`,
+  `explaintext`) ру-Википедии, нет статьи — англ.
+- `entities` (`kind = 'game'`): `title` — русское название (нет — английское); `original_title` —
+  английское, если отличается; `description` — вступление статьи (до 20 000); `release_date` —
+  самая ранняя `P577` (точность 9 → 1 января, 10 → первое число месяца); `metadata`: `platforms`
+  (`P400` по карте `PLATFORMS`: `pc`, `ps5`, `xbox-series`, `switch`…, незнакомая — slug от
+  **английского** названия, синонимы сводит `PLATFORM_ALIASES` (`playstation-vita` → `ps-vita`,
+  `mac-operating-system` → `macos`); не больше `MAX_PLATFORMS` = 12 — у Minecraft их три десятка
+  вместе с ответвлениями), `developer`, `publisher` (`GameMetadata`); `external_ids` = `{"wikidata": "Q17452"}`
+  и `{"steam": appid}` из `P1733`, если он есть. Трейлеры не пишутся — `make media` (Rutube).
+- `cover_url` — бокс-арт из карточки англ. статьи: вики-текст вступительной секции
+  (`rvsection=0`), поле `image`/`cover` шаблона Infobox, затем `imageinfo` с `iiurlwidth=600`
+  (`upload.wikimedia.org`). Нет — изображение `P18`, иначе логотип `P154` из Commons тем же
+  `imageinfo`. `cover_width`/`cover_height` — размеры той самой копии (файл уже́ ýже 600 px —
+  размеры оригинала), карточка получает точное `aspect-ratio` до загрузки. Нет обложки — пропуск.
+- Slug — от `original_title`/`title`, занят — `-<год>`, затем `-<qid>`.
+- Теги — жанры `P136` по известным id (`GENRES`): `action-adventure`, `platformer`, `fps`, `tps`,
+  `rpg`, `action-rpg`, `action`, `racing`, `adventure`, `puzzle`, `rts`, `turn-based-strategy`,
+  `strategy`, `survival-horror`, `fighting`, `shmup`, `simulator`, `sport`, `visual-novel`,
+  `hack-and-slash`, `stealth` (`kind = genre`), `mmo`, `sci-fi`, `post-apocalyptic`
+  (`kind = tag`); нет тега — создаётся. Незнакомый жанр пропускается.
+- Дубликат — записанный qid (пропускается до запросов) или занятый slug/appid: уникальные индексы
+  `entities_external_wikidata_uq` и `entities_external_steam_uq`; перезапуск безопасен.
+- Событий нет. Затем `scripts/index-entities.sh <slug'и>` — скрипт печатает готовую команду
+  (Meili дописывает документы асинхронно: если счётчик меньше ожидаемого, повторный прогон по
+  недостающим slug'ам их добирает).
 
 ## Эндпоинты
 
