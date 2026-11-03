@@ -1671,26 +1671,27 @@ pub async fn tags(
     }
     let hits = facet_hits(&state, "tags", q, query.kind, query.limit).await?;
     let slugs: Vec<String> = hits.iter().map(|(slug, _)| slug.clone()).collect();
-    let rows: Vec<(String, String, String)> =
-        sqlx::query_as("SELECT slug, name, kind FROM tags WHERE slug = ANY($1)")
+    let rows: Vec<(String, String, String, Option<String>)> =
+        sqlx::query_as("SELECT slug, name, kind, description FROM tags WHERE slug = ANY($1)")
             .bind(&slugs)
             .fetch_all(&state.db)
             .await?;
-    let named: HashMap<String, (String, String)> = rows
+    let named: HashMap<String, (String, String, Option<String>)> = rows
         .into_iter()
-        .map(|(slug, name, kind)| (slug, (name, kind)))
+        .map(|(slug, name, kind, description)| (slug, (name, kind, description)))
         .collect();
     Ok(Json(
         hits.into_iter()
             .map(|(slug, count)| {
-                let (name, kind) = named
+                let (name, kind, description) = named
                     .get(&slug)
                     .cloned()
-                    .unwrap_or_else(|| (slug.clone(), "tag".to_owned()));
+                    .unwrap_or_else(|| (slug.clone(), "tag".to_owned(), None));
                 TagHit {
                     slug,
                     name,
                     kind,
+                    description,
                     count,
                 }
             })

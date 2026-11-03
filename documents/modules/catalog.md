@@ -191,6 +191,31 @@ Wikimedia Commons (решение пользователя 2026-10-30): у ни�
 | `name` | `text` | NOT NULL | Отображаемое название |
 | `kind` | `text` | NOT NULL, default `tag`, `genre` / `tag` | Жанр («Драма», «Космическая опера») или остальная метка («Экранизация», «Открытый мир»). Миграция `20261015110000_tag_kinds.sql` |
 | `entities_count` | `integer` | NOT NULL, default 0 | Сколько **активных** сущностей с тегом (`entities_count` в API). Держат триггеры: на `entity_tags` (±1, если сущность активна) и на смену/удаление активной сущности. Миграция `20261016100000_entity_active.sql` |
+| `description` | `text` | NULL | 1–2 предложения о жанре или метке (`description` в API, до 20 000 символов). Пишется руками через `/admin/tags`, `NULL` — обычное состояние. В поисковый документ не входит. Миграция `20261128100000_catalog_tag_kinds.sql` |
+
+### `tag_kind_counts` ✅ — счётчик тега по типам работ
+
+Сколько **активных** сущностей каждого типа с тегом (`by_kind` в API): справочник `/tags` разводит
+жанры по разделам (вкладки Фильмы / Сериалы / Книги / Игры / Картины) и фильтрует список
+(`?entity_kind=`). Считать это запросом по `entity_tags` (2,4 млн связей) на каждый показ нельзя —
+счётчик держат те же триггеры, что и `tags.entities_count`. Узкая таблица, а не jsonb-колонка в
+`tags`: у тега обычно один-два типа, строки нет — нет и работ этого типа.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `tag_id` | `uuid` | PK, FK → `tags`, CASCADE | |
+| `kind` | `text` | PK | Тип работы: `movie` / `series` / `book` / `game` / `painting` |
+| `entities_count` | `integer` | NOT NULL, default 0 | Активных сущностей этого типа с тегом; сумма по строкам = `tags.entities_count` |
+
+**Индексы:** PK (`tag_id`, `kind`) — разбивка тега; частичный по (`kind`, `tag_id`)
+`WHERE entities_count > 0` — теги раздела для `?entity_kind=`.
+
+Триггеры (миграция `20261128100000_catalog_tag_kinds.sql` дополняет функции из
+`20261016100000_entity_active.sql` и `20261017100000_entity_tmdb.sql`): `entity_tags_count()` —
+построчный ±1 по типу сущности при навешивании/снятии тега; `entities_active_changed()` —
+операторный пересчёт на весь `UPDATE entities` при смене `active`; `entities_active_counts()` —
+`BEFORE DELETE` активной сущности. Тип сущности не меняется, поэтому отдельного триггера на
+`entities.kind` нет.
 
 Жанры — те же теги с `kind = genre`: фильтр `?tag=`, поиск и похожие работают одинаково, а фронтенд
 показывает жанры в шапке карточки, остальные теги — над «О фильме». В карточке `tags` — все теги,
@@ -653,8 +678,9 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 
 **Подсказки тегов** `GET /search/tags?q=&kind=&limit=` (2026-10-30) — facet search по полю `tags`:
 только теги и жанры, которые есть у сущностей этого `kind` (жанры фильмов не попадают в книги).
-Ответ `[{slug, name, kind, count}]`: в фасете только slug'и, название и `kind` (`genre`/`tag`)
-дочитываются из таблицы `tags` одним запросом на ответ. `q` сопоставляется со slug'ом, поэтому
+Ответ `[{slug, name, kind, description, count}]`: в фасете только slug'и, название, `kind`
+(`genre`/`tag`) и `description` дочитываются из таблицы `tags` одним запросом на ответ (тега уже
+нет в БД — `description` = `null`). `q` сопоставляется со slug'ом, поэтому
 фронтенд фильтрует по названию у себя, а отсюда берёт состав раздела и счётчики.
 
 Источник правды — PostgreSQL, индекс производный:
@@ -1309,8 +1335,8 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/entities/{slug}/similar` | Похожие активные (Meilisearch: тот же тип, хотя бы один общий тег, по баллу «Рекомендуемые», затем новее): `?limit=` 1–24 (по умолчанию 12) → `Page<EntitySummary>` ([«Похожие»](#похожие-)); у скрытой — 404; 503 — Meilisearch недоступен |
 | GET | `/people` | Список публичных людей по алфавиту (с активной работой или без работ), `q` — подстрока в имени |
 | GET | `/people/{slug}` | Человек и его работы в активных сущностях, новые сверху. Из PostgreSQL. Все работы скрыты — 404; админу — 200 со всеми работами |
-| GET | `/tags` | Все теги с `kind` и `entities_count` (активных сущностей), без пагинации (тегов немного); `?kind=genre\|tag` — только жанры или только теги |
-| GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `entities_count`; нет — 404 |
+| GET | `/tags` | Все теги с `kind`, `description`, `entities_count` (активных сущностей) и `by_kind` — разбивкой счётчика по типу работы (`{"movie": 11800, "book": 2}`, типы без работ не отдаются, сумма = `entities_count`); без пагинации (тегов немного). `?kind=genre\|tag` — только жанры или только теги; `?entity_kind=movie\|series\|book\|game\|painting` — только теги с активными работами этого типа (вкладки разделов на `/tags`; `kind` здесь занят видом тега, поэтому тип работы — отдельный параметр). 400 — неизвестный `kind` или `entity_kind` |
+| GET | `/tags/{slug}` | Тег: `id`, `slug`, `name`, `kind`, `description`, `entities_count`, `by_kind`; нет — 404 |
 | GET | `/banners?path=` / `/banners?page=` | Баннеры страницы сайта. `path` — путь страницы (`/films/dune-2021`; query и `#` отбрасываются, хвостовой `/` тоже; должен начинаться с `/`, ≤ 2048); `page` (совместимость: `home`→`/`, `films`→`/films`, `series`, `books`, `games`, `paintings`, `people`). Возвращает `is_active`, сейчас в окне `starts_at`/`ends_at` (пустая граница — открыта), у которых совпал хотя бы один target (`all` — только главные страницы разделов `/`, `/films`, `/series`, `/books`, `/games`, `/paintings`, `/people` после нормализации пути; `page`, соответствующий пути: `/`→home, `/films`→films, …, точное совпадение; `path`-шаблон: `*` — любая последовательность символов, `/x/*` совпадает и с `/x`) и не совпал ни один `exclude_paths`; на `/admin` и `/admin/*` — всегда `[]`. Порядок `priority desc`, `position`, `created_at`; до 20, без пагинации → `[Banner]` (`id`, `page` — первый `targets[].page` или `null`, переходный период; `kind`, `title`, `subtitle`, `image_url`, `link_url`, `content_html`, `custom_html`, `slides`, `buttons`, `theme`, `targets`, `exclude_paths`, `priority`, `position`, `is_active`, `starts_at`, `ends_at`, `created_at`, `updated_at`). Заголовок `Cache-Control: public, max-age=60`. Публичный. 400 `validation` + `field` — нет ни `path`, ни `page`, неизвестная `page`, `path` не с `/` |
 | GET | `/archive/search` | Поиск по холодному архиву (Tantivy): `q` (1–200 символов, все слова в `title` или `orig_title`; синтаксис Tantivy разбирается снисходительно), `limit` 1–20 (20), `offset` 0–1000 (0) → `Page<ArchiveDoc>` `{items, total, limit, offset}` (`total` — всего найдено, `Count`); `ArchiveDoc`: `slug`, `title`, `original_title`, `kind`, `tmdb_id`, `release_date`, `popularity`, `cover_url` (`null` — нет постера). Публичный. На сайте — второй блок выдачи после `GET /search` (чекбокс «Архив», по умолчанию включён). 400 — пустой/длинный `q`, `limit`/`offset` вне диапазона; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/stats` | Размер холодного архива: `{"total": N, "by_kind": {"book": 0, "game": 0, "movie": N, "series": 0}}` — документов в индексе Tantivy (работы не на сайте, их ищет `GET /archive/search`). `by_kind` — все типы `EntityKind::ALL` (нет в архиве — 0; новый тип появляется сам), счёт — `Count` по терму поля `type`, удалённые не считаются; всё с одного снимка индекса (`Archive::counts`). `?kind=movie\|series\|book\|game` — `total` только этого типа (как фильтр `kind` у `/search`). Публичный, без запроса к PostgreSQL. Для подписи на сайте («ещё N в архиве»). 400 — неизвестный `kind`; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
@@ -1320,7 +1346,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/search/people` | Поиск людей, Meilisearch, индекс `people` ([«Поиск людей»](#поиск-людей-)): `q` (имя по-русски или латиницей, опечатки, начало слова; до 300 символов; пустой — самые известные), `known_for` (основная роль: `actor`, `director`, …), `limit` 1–100 (20), `offset` → `Page<PersonHit>` (`total` точный): `id`, `slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `known_for`. Ранжирование — качество совпадения, затем известность (`person_stats.fame`). 400 — длинный `q`, `known_for` не `a-z`/`_`; 503 — Meilisearch недоступен; индекса нет — пустая страница |
 | GET | `/search/studios` | Подсказки для фильтра `studio` (facet search Meilisearch): `q` — часть названия, опечатки допустимы (пустой — самые частые), `kind`, `limit` 1–50 (10) → `[{"name", "slug", "count"}]` (`slug` — страница студии, значение для `studio_slug`; `null` — страницы нет). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` |
 | GET | `/search/publishers` | Подсказки для фильтра `publisher` (facet search по полю `publishers`): издательство книги, издатель или разработчик игры. `q`, `kind`, `limit` 1–50 (10) → `[{"name", "count"}]`. 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
-| GET | `/search/tags` | Подсказки для фильтра `tag`: теги и жанры, которые есть у сущностей этого `kind` (жанры фильмов не предлагаются в книгах). `q` (по slug'у), `kind`, `limit` 1–50 (10) → `[{"slug", "name", "kind", "count"}]` (название и `kind` — из таблицы `tags`). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
+| GET | `/search/tags` | Подсказки для фильтра `tag`: теги и жанры, которые есть у сущностей этого `kind` (жанры фильмов не предлагаются в книгах). `q` (по slug'у), `kind`, `limit` 1–50 (10) → `[{"slug", "name", "kind", "description", "count"}]` (название, `kind` и `description` — из таблицы `tags`). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
 | GET | `/search/museums` | Подсказки для фильтра `museum` (facet search по полю `museums`): где хранится картина. `q`, `kind`, `limit` 1–50 (10) → `[{"name", "count"}]`. 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
 
 **`related`** в карточке — одна лента для карусели: `[{...EntitySummary, "relation": "prequel"|"sequel"|"remake"}, ...]`, хронологически по `release_date` (без даты — в конце, затем `position`, затем заголовок), пусто — `[]`. Сиквелы, ремейки и приквелы идут **в одной полосе**, тип связи — у каждой карточки. Связи — в самой карточке, а не отдельным запросом: карточка — статика фронтенда, они попадают в HTML.
@@ -1367,8 +1393,8 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | DELETE | `/admin/entities/{id}/relations/{to_id}?kind=...` | Убрать связь того же вида (`prequel` — со стороны сиквела, ремейк — с любой) → 204, нет — 404 |
 | POST | `/admin/people` | Добавить человека (`slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `bio`) → 201; в индексе `people` сразу |
 | PATCH / DELETE | `/admin/people/{id}` | Изменить (`null` очищает; `original_name` — до 300 символов) / удалить вместе с участием; `fame` и документ в индексе `people` пересчитываются |
-| POST | `/admin/tags` | Создать тег: `slug`, `name`, `kind` (`genre` / `tag`, по умолчанию `tag`) → 201 |
-| PATCH / DELETE | `/admin/tags/{id}` | Переименовать, сменить slug или `kind` / удалить (снимается со всех сущностей). Карточки с тегом пересобираются |
+| POST | `/admin/tags` | Создать тег: `slug`, `name`, `kind` (`genre` / `tag`, по умолчанию `tag`), `description` (до 20 000 символов, пусто — `null`) → 201 |
+| PATCH / DELETE | `/admin/tags/{id}` | Переименовать, сменить slug, `kind` или `description` (`null` стирает, пропущенное поле оставляет как было) / удалить (снимается со всех сущностей). Карточки с тегом пересобираются |
 | GET | `/admin/banners` | Все баннеры (и выключенные, и вне окна), query-параметры: `?target=` (`all`, страница `home`…`people` или `path` — баннеры с такой целью, `targets @> ...`), `?page=` (совместимость, = `target=<page>`), `?q=` (подстрока `title`, ILIKE), `limit`/`offset` → `Page<Banner>`, по `priority desc`, `position`. 400 `validation`, `field: "target"` — неизвестная цель |
 | POST | `/admin/banners` | Создать: `title` обязателен (при `kind=custom` — подпись для админки и `aria-label`); `kind` (`image` по умолчанию; `image|html|slides|custom`), `subtitle`, `image_url` (обязателен при `image`), `link_url`, `content_html`, `custom_html` (обязателен при `custom`; при `custom` прочие поля показа необязательны и фронтом не показываются), `slides` (`[]`), `buttons` (`[]`), `theme`, `targets` (1..20; можно вместо него устаревший `page` → `[{type:page}]`), `exclude_paths` (`[]`), `priority` (0), `position` (0), `is_active` (`true`), `starts_at`, `ends_at` → 201 `Banner`. 400 `{error, code:"validation", field}` (см. «Валидация баннеров») |
 | PATCH / DELETE | `/admin/banners/{id}` | Изменить: переданные поля заменяются, массивы `slides`, `buttons`, `targets`, `exclude_paths` — целиком; `null` очищает `subtitle`, `image_url`, `link_url`, `content_html`, `custom_html`, `theme`, `starts_at`, `ends_at`; устаревший `page` заменяет `targets` (если `targets` не передан). Итог (текущие значения + патч) проверяется целиком, как при POST (под `FOR UPDATE`) → 200 `Banner` / удалить → 204. 400 — как у POST; 404 — нет баннера. Событий и ISR нет: фронтенд читает список сам |
@@ -1444,6 +1470,10 @@ dev.twitch.tv/console (IGDB принадлежит Twitch). Без ключа и
 каталог — только фильмы TMDB ([«Полные данные TMDB»](#полные-данные-tmdb-)), `make seed` грузит
 лишь тестовых пользователей (`seeds/dev.sql`). Тестам данные дают фикстуры
 `app/tests/fixtures/catalog.sql`.
+
+`seeds/dev.sql` дописывает только `tags.description` шести популярным жанрам (`drama`, `comedy`,
+`sci-fi`, `fantasy`, `thriller`, `documentary`) — `UPDATE ... WHERE description IS NULL`: нет
+такого тега в импорте — нет и строки, уже написанное руками не затирается.
 
 ## Каталог фильмов из TMDB + Wikidata (основной путь)
 

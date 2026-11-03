@@ -17,4 +17,17 @@ INSERT INTO users (id, email, username, password_hash, display_name, role, is_ac
     ('00000000-0000-4000-8000-000000000004', 'blocked@nexus.local', 'blocked', '$argon2id$v=19$m=19456,t=2,p=1$apC26N9EwcIwxzfqlbkpOg$1PRD3C7ATtGryIyfK6ibYuu7kZmQ+2rwRtHBfXRuMqA', 'Заблокированный',      'user',   false, now())
 ON CONFLICT DO NOTHING;
 
+-- Описания нескольких популярных жанров: каталог приходит из импорта (scripts/catalog-import),
+-- поэтому теги только дополняются — нет тега, нет и строки. Уже написанное не затирается.
+UPDATE tags SET description = v.description
+FROM (VALUES
+    ('drama',       'Истории о характерах и отношениях: конфликт держится на людях, а не на внешних событиях.'),
+    ('comedy',      'Смешное во всех видах — от бытовых недоразумений до сатиры на нравы.'),
+    ('sci-fi',      'Мир, перестроенный наукой и технологией: космос, будущее, изобретения и их последствия.'),
+    ('fantasy',     'Выдуманный мир со своей магией и мифологией, живущий по собственным законам.'),
+    ('thriller',    'Напряжение как главный приём: угроза близко, время на исходе.'),
+    ('documentary', 'Невыдуманный материал: съёмка, хроника и свидетельства о том, что было на самом деле.')
+) AS v(slug, description)
+WHERE tags.slug = v.slug AND tags.description IS NULL;
+
 COMMIT;

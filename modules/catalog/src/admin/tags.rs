@@ -1,10 +1,10 @@
 //! Админка тегов.
 
-use super::affected_entities;
+use super::{affected_entities, nullable_param};
 use crate::jobs::Reporter;
 use crate::models::{CreateTag, Tag, UpdateTag};
 use crate::publish::{self, Touched};
-use crate::validate::{self, MAX_TITLE};
+use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
@@ -35,13 +35,16 @@ pub async fn create(
 ) -> AppResult<(StatusCode, Json<Tag>)> {
     validate::slug("slug", &req.slug)?;
     let name = validate::required("name", &req.name, MAX_TITLE)?;
+    let description = validate::optional("description", req.description, MAX_LONG_TEXT)?;
 
     let tag: Tag = sqlx::query_as(
-        "INSERT INTO tags (slug, name, kind) VALUES ($1, $2, $3) RETURNING id, slug, name, kind",
+        "INSERT INTO tags (slug, name, kind, description) VALUES ($1, $2, $3, $4)
+         RETURNING id, slug, name, kind, description",
     )
     .bind(&req.slug)
     .bind(name)
     .bind(req.kind)
+    .bind(description)
     .fetch_one(&state.db)
     .await
     .map_err(validate::conflict("slug is already taken"))?;
@@ -78,16 +81,24 @@ pub async fn update(
         .name
         .map(|name| validate::required("name", &name, MAX_TITLE))
         .transpose()?;
+    let description = nullable_param(
+        req.description
+            .map(|value| validate::optional("description", value, MAX_LONG_TEXT))
+            .transpose()?,
+    );
 
     let tag: Option<Tag> = sqlx::query_as(
         "UPDATE tags SET slug = COALESCE($2, slug), name = COALESCE($3, name),
-                         kind = COALESCE($4, kind)
-         WHERE id = $1 RETURNING id, slug, name, kind",
+                         kind = COALESCE($4, kind),
+                         description = CASE WHEN $5 THEN $6 ELSE description END
+         WHERE id = $1 RETURNING id, slug, name, kind, description",
     )
     .bind(id)
     .bind(&req.slug)
     .bind(name)
     .bind(req.kind)
+    .bind(description.0)
+    .bind(description.1)
     .fetch_optional(&state.db)
     .await
     .map_err(validate::conflict("slug is already taken"))?;

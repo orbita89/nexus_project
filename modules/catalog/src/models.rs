@@ -3,6 +3,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -283,10 +284,13 @@ pub struct Tag {
     #[schema(example = "Научная фантастика")]
     pub name: String,
     pub kind: TagKind,
+    /// 1–2 предложения о жанре или метке; пишется руками через админку.
+    #[schema(example = "Сцены повседневной жизни: кухни, рынки, мастерские.")]
+    pub description: Option<String>,
 }
 
 /// Колонки [`Tag`] для `FROM tags t`. Порядок в карточке: жанры первыми, затем по названию.
-pub const TAG_COLUMNS: &str = "t.id, t.slug, t.name, t.kind";
+pub const TAG_COLUMNS: &str = "t.id, t.slug, t.name, t.kind, t.description";
 pub const TAG_ORDER: &str = "t.kind = 'genre' DESC, t.name";
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
@@ -297,9 +301,16 @@ pub struct TagWithCount {
     #[schema(example = "Научная фантастика")]
     pub name: String,
     pub kind: TagKind,
-    /// Сколько активных сущностей с этим тегом.
+    /// 1–2 предложения о жанре или метке; пишется руками через админку.
+    #[schema(example = "Сцены повседневной жизни: кухни, рынки, мастерские.")]
+    pub description: Option<String>,
+    /// Сколько активных сущностей с этим тегом — сумма [`TagWithCount::by_kind`].
     #[schema(example = 12)]
     pub entities_count: i64,
+    /// Разбивка по типу работы; типы без активных сущностей не отдаются (`{"movie": 10,
+    /// "book": 2}`).
+    #[schema(value_type = HashMap<String, i64>)]
+    pub by_kind: sqlx::types::Json<BTreeMap<String, i64>>,
 }
 
 /// Человек в титрах сущности.
@@ -716,6 +727,8 @@ pub struct TagHit {
     /// `genre` или `tag`.
     #[schema(example = "genre")]
     pub kind: String,
+    /// Описание из `tags`; у тега, которого уже нет в БД, — `null`.
+    pub description: Option<String>,
     pub count: i64,
 }
 
@@ -970,6 +983,8 @@ pub struct CreateTag {
     /// По умолчанию `tag`.
     #[serde(default)]
     pub kind: TagKind,
+    /// 1–2 предложения, до 20 000 символов; пусто — `null`.
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -978,6 +993,10 @@ pub struct UpdateTag {
     pub slug: Option<String>,
     pub name: Option<String>,
     pub kind: Option<TagKind>,
+    /// `null` стирает описание, пропущенное поле — оставляет как было.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<String>)]
+    pub description: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -986,6 +1005,11 @@ pub struct ListTagsQuery {
     /// Только жанры или только остальные теги; не передан — все.
     #[param(inline)]
     pub kind: Option<TagKind>,
+    /// Только теги, у которых есть активные работы этого типа (`by_kind[entity_kind] > 0`):
+    /// вкладки разделов на `/tags`. `kind` у этого эндпойнта занят видом тега, поэтому тип
+    /// работы — отдельный параметр.
+    #[param(inline, example = "painting")]
+    pub entity_kind: Option<EntityKind>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

@@ -169,6 +169,15 @@ impl Ctx {
     }
 }
 
+/// slug'и из ответа `/tags` — это голый массив, а не страница.
+fn tag_slugs(tags: &Value) -> Vec<&str> {
+    tags.as_array()
+        .unwrap()
+        .iter()
+        .map(|tag| tag["slug"].as_str().unwrap())
+        .collect()
+}
+
 fn slugs(page: &Value) -> Vec<&str> {
     page["items"]
         .as_array()
@@ -383,8 +392,115 @@ async fn tags_list_with_counts(pool: PgPool) {
     assert_eq!(tag["name"], "Научная фантастика");
     assert_eq!(tag["kind"], "tag");
     assert_eq!(tag["entities_count"], 3);
-    assert_eq!(ctx.get_ok("/tags/unused").await["entities_count"], 0);
+    assert_eq!(tag["description"], Value::Null);
+    // Сумма by_kind = entities_count; типов без работ в разбивке нет.
+    assert_eq!(tag["by_kind"], json!({ "book": 1, "movie": 2 }));
+    let unused = ctx.get_ok("/tags/unused").await;
+    assert_eq!(unused["entities_count"], 0);
+    assert_eq!(unused["by_kind"], json!({}));
     assert_eq!(ctx.get("/tags/no-such").await.status, StatusCode::NOT_FOUND);
+}
+
+/// `?entity_kind=` оставляет только теги с активными работами этого типа; `?kind=` (вид тега)
+/// работает вместе с ним.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn tags_list_filtered_by_entity_kind(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+
+    let movies = ctx.get_ok("/tags?entity_kind=movie").await;
+    assert_eq!(tag_slugs(&movies), ["sci-fi"], "{movies}");
+    // entities_count остаётся общим по всем типам, разбивка — в by_kind.
+    assert_eq!(movies[0]["entities_count"], 3);
+    assert_eq!(movies[0]["by_kind"], json!({ "book": 1, "movie": 2 }));
+
+    let games = ctx.get_ok("/tags?entity_kind=game").await;
+    assert_eq!(tag_slugs(&games), ["fantasy"], "{games}");
+    assert!(ctx
+        .get_ok("/tags?entity_kind=painting")
+        .await
+        .as_array()
+        .unwrap()
+        .is_empty());
+    // sci-fi и fantasy — теги, не жанры.
+    assert!(ctx
+        .get_ok("/tags?kind=genre&entity_kind=movie")
+        .await
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        ctx.get("/tags?entity_kind=nope").await.status,
+        StatusCode::BAD_REQUEST
+    );
+
+    // Сущность скрыли — тег ушёл из своего раздела вместе со счётчиком.
+    set_active(&ctx, "witcher-3", false).await;
+    assert!(ctx
+        .get_ok("/tags?entity_kind=game")
+        .await
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(ctx.get_ok("/tags/fantasy").await["by_kind"], json!({}));
+}
+
+/// Описание тега правится в админке и видно в публичном чтении.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn admin_edits_tag_description(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+
+    let (status, created) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/tags",
+            Some(json!({
+                "slug": "genre-painting",
+                "name": "Бытовой жанр",
+                "kind": "genre",
+                "description": "  Сцены повседневной жизни: кухни, рынки, мастерские.  ",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["description"],
+        "Сцены повседневной жизни: кухни, рынки, мастерские."
+    );
+
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        ctx.get_ok("/tags/genre-painting").await["description"],
+        "Сцены повседневной жизни: кухни, рынки, мастерские."
+    );
+
+    // Поле не передано — описание на месте.
+    let (status, patched) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/tags/{id}"),
+            Some(json!({ "name": "Бытовой жанр" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(
+        patched["description"],
+        "Сцены повседневной жизни: кухни, рынки, мастерские."
+    );
+
+    // null — стирает.
+    let (status, patched) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/tags/{id}"),
+            Some(json!({ "description": Value::Null })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["description"], Value::Null);
+    assert_eq!(
+        ctx.get_ok("/tags/genre-painting").await["description"],
+        Value::Null
+    );
 }
 
 // ---------------------------------------------------------------- права
@@ -1241,6 +1357,7 @@ async fn search_filters_and_sorts(pool: PgPool) {
     assert_eq!(tags[0]["slug"], "fantasy");
     assert_eq!(tags[0]["name"], "Фэнтези");
     assert_eq!(tags[0]["count"], 1);
+    assert_eq!(tags[0]["description"], Value::Null);
     let tags = ctx.get_ok("/search/tags?kind=book").await;
     assert_eq!(tags.as_array().unwrap().len(), 1, "{tags}");
     assert_eq!(tags[0]["slug"], "sci-fi");
