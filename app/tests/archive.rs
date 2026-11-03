@@ -280,7 +280,7 @@ async fn build_splits_hot_layer_and_archive(pool: PgPool) {
     assert_eq!(stats.status, StatusCode::OK);
     assert_eq!(
         stats.json(),
-        json!({"total": 0, "by_kind": {"book": 0, "game": 0, "movie": 0, "series": 0}})
+        json!({"total": 0, "by_kind": {"book": 0, "game": 0, "movie": 0, "painting": 0, "series": 0}})
     );
 
     let report = ctx.dump_and_build().await;
@@ -306,7 +306,7 @@ async fn build_splits_hot_layer_and_archive(pool: PgPool) {
     let stats = ctx.send(Method::GET, "/archive/stats", None).await;
     assert_eq!(
         stats.json(),
-        json!({"total": 4, "by_kind": {"book": 0, "game": 0, "movie": 4, "series": 0}})
+        json!({"total": 4, "by_kind": {"book": 0, "game": 0, "movie": 4, "painting": 0, "series": 0}})
     );
     let movies = ctx
         .send(Method::GET, "/archive/stats?kind=movie", None)
