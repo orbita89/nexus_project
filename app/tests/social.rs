@@ -1553,6 +1553,171 @@ async fn marks_errors(pool: PgPool) {
     .await;
 }
 
+// ---------------------------------------------------------------- личные заметки
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn notes_are_private_and_replaceable(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let (alice, bob) = (ctx.user("alice").await, ctx.user("bob").await);
+    let ctx = &ctx;
+    let note = |user, slug: &str, body: &str| {
+        let path = format!("/entities/{slug}/note");
+        let body = json!({ "body": body });
+        async move {
+            ctx.expect(StatusCode::OK, Method::PUT, &path, Some(body), Some(user))
+                .await
+        }
+    };
+
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/entities/dune-2021/note",
+        None,
+        Some(&alice),
+    )
+    .await;
+
+    let created = note(&alice, "dune-2021", "Пересмотреть перед второй частью").await;
+    assert_eq!(created["body"], "Пересмотреть перед второй частью");
+    assert!(created["id"].is_string());
+    // Повторный PUT заменяет текст целиком, заметка остаётся одна.
+    let replaced = note(&alice, "dune-2021", "  Мама советовала  ").await;
+    assert_eq!(replaced["id"], created["id"]);
+    assert_eq!(replaced["body"], "Мама советовала");
+    assert_eq!(
+        ctx.get_ok("/entities/dune-2021/note", Some(&alice)).await["body"],
+        "Мама советовала"
+    );
+
+    note(&alice, "dune-novel", "Дочитать").await;
+    note(&bob, "dune-2021", "Своя заметка bob").await;
+
+    // Публичное о произведении заметок не знает: ни рецензии, ни оценка.
+    let reviews = ctx.get_public("/entities/dune-2021/reviews?all=true").await;
+    assert_eq!(reviews["total"], 0);
+    assert_eq!(
+        ctx.get_public("/entities/dune-2021/rating").await["count"],
+        0
+    );
+    assert_eq!(
+        ctx.get_public(&format!("/users/{}/reviews", alice.username))
+            .await["total"],
+        0
+    );
+
+    // Свой список — новые сверху, с произведением; чужого в нём нет.
+    let mine = ctx.get_ok("/users/me/notes", Some(&alice)).await;
+    assert_eq!(mine["total"], 2);
+    assert_eq!(
+        pluck(items(&mine), "entity/slug"),
+        ["dune-novel", "dune-2021"]
+    );
+    assert_eq!(items(&mine)[1]["body"], "Мама советовала");
+    let bobs = ctx.get_ok("/users/me/notes", Some(&bob)).await;
+    assert_eq!(pluck(items(&bobs), "entity/slug"), ["dune-2021"]);
+    assert_eq!(items(&bobs)[0]["body"], "Своя заметка bob");
+
+    // Число заметок в статистике — только себе.
+    let own = ctx
+        .get_ok(&format!("/users/{}/stats", alice.username), Some(&alice))
+        .await;
+    assert_eq!(own["notes"], 2);
+    // Даже админу, который видит чужую аналитику всегда, число заметок не показывается.
+    let admin = ctx.login("admin@example.com", "admin").await;
+    assert_eq!(
+        ctx.get_ok(&format!("/users/{}/stats", alice.username), Some(&admin))
+            .await["notes"],
+        Value::Null
+    );
+    // Заметки — не публикация: в рецензиях профиля их нет.
+    assert_eq!(own["reviews_with_text"], 0);
+
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        "/entities/dune-2021/note",
+        None,
+        Some(&alice),
+    )
+    .await;
+    // Второй DELETE — заметки уже нет.
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        "/entities/dune-2021/note",
+        None,
+        Some(&alice),
+    )
+    .await;
+    let mine = ctx.get_ok("/users/me/notes", Some(&alice)).await;
+    assert_eq!(pluck(items(&mine), "entity/slug"), ["dune-novel"]);
+    // Заметка bob на месте: удалилась только своя.
+    assert_eq!(
+        ctx.get_ok("/entities/dune-2021/note", Some(&bob)).await["body"],
+        "Своя заметка bob"
+    );
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn notes_errors(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let alice = ctx.user("alice").await;
+    let path = "/entities/dune-2021/note";
+
+    // Пустой текст — 400: удаляют через DELETE. Слишком длинный — тоже.
+    for body in [
+        json!({ "body": "   " }),
+        json!({ "body": "я".repeat(10_001) }),
+        json!({}),
+    ] {
+        ctx.expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            path,
+            Some(body),
+            Some(&alice),
+        )
+        .await;
+    }
+    for method in [Method::GET, Method::PUT, Method::DELETE] {
+        let body = (method == Method::PUT).then(|| json!({ "body": "текст" }));
+        ctx.expect(
+            StatusCode::UNAUTHORIZED,
+            method.clone(),
+            path,
+            body.clone(),
+            None,
+        )
+        .await;
+        ctx.expect(
+            StatusCode::NOT_FOUND,
+            method,
+            "/entities/no-such/note",
+            body,
+            Some(&alice),
+        )
+        .await;
+    }
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::GET,
+        "/users/me/notes",
+        None,
+        None,
+    )
+    .await;
+    // Чужого списка заметок нет: `/users/{username}/notes` не маршрут.
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        &format!("/users/{}/notes", alice.username),
+        None,
+        Some(&alice),
+    )
+    .await;
+}
+
 // ---------------------------------------------------------------- подписки
 
 #[sqlx::test(migrator = "nexus::MIGRATOR")]

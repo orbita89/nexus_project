@@ -996,6 +996,48 @@ pub struct MarkRow {
     pub created_at: DateTime<Utc>,
 }
 
+// ---------------------------------------------------------------- личные заметки
+
+/// Личная заметка о произведении: видит только автор. Оценка живёт в рецензии и публична.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Note {
+    pub id: Uuid,
+    #[schema(example = "Пересмотреть перед второй частью")]
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Заметка в своём списке: то же плюс произведение, к которому она написана.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NoteWithEntity {
+    pub entity: EntityRef,
+    pub id: Uuid,
+    #[schema(example = "Пересмотреть перед второй частью")]
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct NoteRow {
+    pub id: Uuid,
+    pub entity_id: Uuid,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub const NOTE_COLUMNS: &str = "id, entity_id, body, created_at, updated_at";
+
+/// Своя заметка: заменяется целиком. Пустой текст — 400, удаление через `DELETE`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PutNote {
+    #[schema(example = "Пересмотреть перед второй частью")]
+    pub body: String,
+}
+
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct MarksQuery {
@@ -1288,6 +1330,9 @@ pub struct ProfileStats {
     pub comments: CommentCounts,
     /// Сколько лайков пользователь поставил сам — раздел «Что нравится».
     pub likes_given: LikesGiven,
+    /// Свои личные заметки. Приватны: чужому и админу — `null`, число видит только сам автор.
+    #[schema(example = 7)]
+    pub notes: Option<i64>,
     /// Сколько оценённого и просмотренного каждого типа (`movie`, `series`, `book`, `game`):
     /// типы берутся у каталога через справочник, ключей без единой сущности нет.
     pub by_kind: ByKind,

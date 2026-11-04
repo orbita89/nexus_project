@@ -6,8 +6,8 @@
 
 use crate::models::{
     Collection, CollectionEntity, CollectionItem, CollectionItemRow, CollectionRow, Interest,
-    InterestRow, MarkRow, MarkedEntity, Post, PostRow, RatedEntity, RatedRow, Review,
-    ReviewComment, ReviewCommentRow, ReviewRow, Thread, ThreadRow,
+    InterestRow, MarkRow, MarkedEntity, NoteRow, NoteWithEntity, Post, PostRow, RatedEntity,
+    RatedRow, Review, ReviewComment, ReviewCommentRow, ReviewRow, Thread, ThreadRow,
 };
 use shared::directory::{AwardRoomRef, EntityRef, PersonRef, StudioRef, TagRef, UserRef};
 use shared::{AppError, AppResult, AppState};
@@ -360,6 +360,23 @@ pub async fn rated(state: &AppState, rows: Vec<RatedRow>) -> AppResult<Vec<Rated
                 rating: row.rating,
                 has_text: row.has_text,
                 created_at: row.created_at,
+            })
+        })
+        .collect())
+}
+
+/// Свои заметки для списка в профиле: сущности — одним вызовом справочника.
+pub async fn notes(state: &AppState, rows: Vec<NoteRow>) -> AppResult<Vec<NoteWithEntity>> {
+    let entities = entities(state, rows.iter().map(|r| r.entity_id).collect()).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(NoteWithEntity {
+                entity: entities.get(&row.entity_id)?.clone(),
+                id: row.id,
+                body: row.body,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
             })
         })
         .collect())

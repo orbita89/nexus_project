@@ -125,7 +125,19 @@ pub async fn get(
     .fetch_one(&state.db)
     .await?;
 
+    // Личные заметки — только своё число: чужому и админу их не видно нигде, включая статистику.
+    let notes = match viewer.as_ref().is_some_and(|viewer| viewer.id == user.id) {
+        false => None,
+        true => Some(
+            sqlx::query_scalar("SELECT count(*) FROM entity_notes WHERE user_id = $1")
+                .bind(user.id)
+                .fetch_one(&state.db)
+                .await?,
+        ),
+    };
+
     Ok(Json(ProfileStats {
+        notes,
         likes_given: LikesGiven {
             collections: likes_given.0,
             people: likes_given.1,

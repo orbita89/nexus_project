@@ -1,12 +1,12 @@
 # Модуль `social` — LOD 2
 
-**Summary (EN):** reviews & ratings, votes, comments, reactions, follows, collections, forum threads/posts, interests, marks, feed, moderation, events for realtime.
+**Summary (EN):** reviews & ratings, votes, comments, reactions, follows, collections, forum threads/posts, interests, marks, private notes, feed, moderation, events for realtime.
 **Отвечает за:** всё общение вокруг контента — форумы, рецензии и оценки, коллекции, подписки
 на пользователей, интересы.
 **URL:** `/api/v1/social` · **Код:** `modules/social/` · **Источник (LOD 3):** `documents/modules/social.md`
 
 **Статус:** ✅ рецензии и оценки (спойлеры, лайки и дизлайки, комментарии, только после выхода),
-реакции, отметки «позже» / «просмотрено», подписки на пользователей, коллекции (с превью),
+реакции, отметки «позже» / «просмотрено», личные заметки, подписки на пользователей, коллекции (с превью),
 социальный профиль, форум (темы на несколько сущностей, сообщения с ветками, закрытие тем),
 интересы (сущности, люди, теги), чат по интересам (комнаты сущностей, людей, тегов и свои комнаты
 админа, отправка по WebSocket), лента, события
@@ -694,6 +694,24 @@ Meilisearch: комнат десятки, а сообщения ищутся в�
 Одна строка на пару: отметки взаимоисключающие. **Индексы:** PK; (`user_id`, `kind`,
 `created_at DESC`) — свои списки.
 
+### `entity_notes` ✅ — личные заметки о произведениях
+
+Текст «для себя», который видит только автор. Отдельная запись, а не флаг приватности у рецензии:
+публичный отзыв и своя пометка нужны одновременно. Оценка остаётся в `reviews` и публична.
+Миграция `20261130100000_social_entity_notes.sql`.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK, `uuidv7()` | |
+| `user_id` | `uuid` | NOT NULL, FK → `users`, CASCADE | Автор; UNIQUE с `entity_id` |
+| `entity_id` | `uuid` | NOT NULL, FK → `entities`, CASCADE | UNIQUE с `user_id` |
+| `body` | `text` | NOT NULL | До 10 000 символов, пустой не записывается |
+| `created_at` | `timestamptz` | NOT NULL | |
+| `updated_at` | `timestamptz` | NOT NULL | Триггер `set_updated_at()` |
+
+Одна заметка на пару «пользователь + произведение». **Индексы:** PK; UNIQUE (`user_id`,
+`entity_id`) — свой `GET`/`PUT`; (`user_id`, `created_at DESC`) — вкладка «Заметки» в профиле.
+
 </tables>
 
 <deps>
@@ -789,7 +807,7 @@ body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, mes
 | DELETE | `/users/{username}/like` | user | Снять лайк → 204 (даже если его не было) |
 | GET | `/users/{username}/likes` | все | Кто лайкнул: `Page<{user, since}>` (`?limit=1..100&offset=`), новые сверху. 404 — нет пользователя |
 | GET | `/users/{username}/comments` | гость / вошедший | «Мои комментарии»: всё, что пользователь написал — к произведениям, людям и студиям (`comments`), к рецензиям и в обсуждениях коллекций — одной лентой, новые сверху. `Page<UserComment>` (`?limit=1..100&offset=`); `UserComment`: `id`, `body`, `created_at`, `updated_at` и `target` с `kind` — `entity`/`person`/`studio` (рядом `entity`/`person`/`studio`), `review` (`review_id` и `entity`, о котором рецензия) или `collection` (`collection_id`, `title`). Цель удалена — строки в ленте нет. 403 `stats_private`; 404 — нет пользователя |
-| GET | `/users/{username}/stats` | гость / вошедший | Аналитика профиля: `ratings` (`average`, `count`, `distribution` 1–10), `reviews_with_text`, `marks` (`later`, `done`), `reactions` (все четыре ключа), `comments` (`reviews`, `collections`, без удалённых), `likes_given` (`collections`, `people`, `entities`) и `by_kind` (`rated`, `done` по типам контента — из `EntityDirectory::kind_counts`, ключей без единой сущности нет). 403 `stats_private` — владелец не открыл аналитику; 404 — нет пользователя |
+| GET | `/users/{username}/stats` | гость / вошедший | Аналитика профиля: `ratings` (`average`, `count`, `distribution` 1–10), `reviews_with_text`, `marks` (`later`, `done`), `reactions` (все четыре ключа), `comments` (`reviews`, `collections`, без удалённых), `likes_given` (`collections`, `people`, `entities`), `notes` (число своих личных заметок; чужому и admin — `null`) и `by_kind` (`rated`, `done` по типам контента — из `EntityDirectory::kind_counts`, ключей без единой сущности нет). 403 `stats_private` — владелец не открыл аналитику; 404 — нет пользователя |
 | GET | `/users/{username}/ratings` | гость / вошедший | Что пользователь оценил: `Page<{entity, rating, has_text, created_at}>`, `?sort=new` (по умолчанию) `\|rating_desc\|rating_asc`, `?limit=1..100&offset=`. 400 — неизвестный `sort`; 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}/marks` | гость / вошедший | Отметки пользователя: `?kind=later\|done` (не передан — все), `limit`, `offset` → `Page<{entity, kind, created_at}>`. Своё без оглядки на приватность — `/users/me/marks`. 403 `stats_private`; 404 — нет пользователя |
 | GET | `/users/{username}` | гость / вошедший | Шапка профиля: `user`, `followers_count`, `following_count`, `reviews_count`, `collections_count` (владельцу — с приватными), `threads_count`, `posts_count` (сообщения форума без удалённых), `likes_count` и `liked` (лайкнул ли вошедший; гостю и в своём профиле `false`), `reputation` (`score`, `parts`, `computed_at`; пересчёт раз в сутки, поэтому свежий лайк виден в `likes_count` сразу, а в `score` — после ближайшего прохода), `relation`, `blocked` (я заблокировал его; гостю и в своём профиле `false`), `blocked_by` (он заблокировал меня; `null` — гость или свой профиль), а также `bio`, `stats_public` (открыл ли пользователь свою аналитику всем) и `registered_at` — из `auth` через `UserDirectory::details` |
@@ -990,6 +1008,23 @@ WebSocket-соединений пользователя (`interest.added` / `int
 
 Отметки приватные, как интересы: чужие не отдаются никак, включая admin.
 
+### Личные заметки о произведениях
+
+| Метод | Путь | Доступ | Что делает |
+|---|---|---|---|
+| GET | `/entities/{slug}/note` | user | Своя заметка `{id, body, created_at, updated_at}`, нет — 404 |
+| PUT | `/entities/{slug}/note` | user | `{"body": "…"}` → 200 `Note`; заменяет текст целиком. 400 — пустой текст (удаление — через `DELETE`) или длиннее 10 000 символов |
+| DELETE | `/entities/{slug}/note` | user | Удалить свою → 204; заметки нет — 404 |
+| GET | `/users/me/notes` | user | Свои заметки, новые сверху: `limit`, `offset` → `Page<{entity, id, body, created_at, updated_at}>` |
+
+Заметка — отдельная запись, а не приватная рецензия: человеку нужны обе сразу (публичный отзыв и
+своя пометка). Приватность серверная: заметки не попадают ни в `/entities/{slug}/reviews`, ни в
+`/users/{username}/reviews`, ни в ленту, ни в админские ручки; чужого `/users/{username}/notes`
+нет. В `reviews_count` и репутацию заметки не идут — это не публикация, и событий в `realtime`
+они не порождают. Оценка остаётся в рецензии: заметка на среднюю и статистику не влияет.
+В `ProfileStats` есть `notes` — число своих заметок, у чужого и у admin `null`. Тег OpenAPI —
+`notes`.
+
 ### Лента
 
 | Метод | Путь | Доступ | Что делает |
@@ -1087,6 +1122,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `collection_search.rs` | Индекс коллекций в Meilisearch: документ и настройки, наполнение при старте (`fill`, `spawn_fill`), правка после записи (`update`), поиск по `?q=` для `GET /collections` |
 | `votes.rs`, `comments.rs` | Голоса и комментарии к рецензиям |
 | `reactions.rs`, `marks.rs` | Реакции произведений и коллекций, личные отметки |
+| `notes.rs` | Личные заметки о произведениях: своя заметка на карточке (`GET`/`PUT`/`DELETE`), свой список `/users/me/notes`; чужих заметок нет нигде |
 | `target_comments.rs` | Комментарии к произведениям, людям и студиям: разбор цели `kind:slug` через справочники, лента, запись (лимит частоты, ответы — к корню), мягкое удаление, `remove` для модерации |
 | `reputation.rs` | Рейтинг пользователя: веса, пересчёт одним запросом, суточная задача с advisory-блокировкой, ручной запуск |
 | `likes.rs` | Лайки профилей, подборок (с дизлайком) и людей каталога; лента «Что нравится» |
