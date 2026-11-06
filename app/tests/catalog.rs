@@ -1379,6 +1379,24 @@ async fn search_filters_and_sorts(pool: PgPool) {
     assert_eq!(studios[0]["count"], 1);
     assert!(studios[0]["slug"].is_string(), "{studios}");
 
+    // Логотип студии — в подсказках тот же, что на её странице (фронтенду он нужен в карточке
+    // фильтра, а девять запросов `/studios/{slug}` на открытие панели делать незачем).
+    let logo = "https://image.tmdb.org/t/p/w300/warner.png";
+    sqlx::query("UPDATE studios SET logo_url = $1 WHERE name = 'Warner Bros. Pictures'")
+        .bind(logo)
+        .execute(&ctx.state.db)
+        .await
+        .expect("set studio logo");
+    let studios = ctx.get_ok("/search/studios?q=warn").await;
+    assert_eq!(studios[0]["logo_url"], logo, "{studios}");
+    assert_eq!(
+        ctx.get_ok(&format!("/studios/{slug}")).await["logo_url"],
+        logo
+    );
+    // Логотипа нет — поле `null`, карточка просто без картинки.
+    let studios = ctx.get_ok("/search/studios?kind=game").await;
+    assert!(studios[0]["logo_url"].is_null(), "{studios}");
+
     // Издатель: книга — `metadata.publisher`, игра — издатель и разработчик.
     assert_eq!(
         slugs(&ctx.get_ok("/search?publisher=%D0%90%D0%A1%D0%A2").await),
@@ -1406,6 +1424,24 @@ async fn search_filters_and_sorts(pool: PgPool) {
         .collect();
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(names.contains(&"CD Projekt"), "{names:?}");
+    // У издателей и музеев своих логотипов нет: берётся логотип студии с тем же названием.
+    sqlx::query("UPDATE studios SET logo_url = $1 WHERE name = 'CD Projekt Red'")
+        .bind("https://image.tmdb.org/t/p/w300/cdpr.png")
+        .execute(&ctx.state.db)
+        .await
+        .expect("set studio logo");
+    let game_publishers = ctx.get_ok("/search/publishers?kind=game").await;
+    let logos: Vec<&Value> = game_publishers
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| &hit["logo_url"])
+        .collect();
+    assert!(
+        logos.contains(&&json!("https://image.tmdb.org/t/p/w300/cdpr.png")),
+        "{game_publishers}"
+    );
+    assert!(logos.contains(&&Value::Null), "{game_publishers}");
 
     // Страна: код alpha-2, регистр не важен; несколько — ИЛИ между собой.
     assert_eq!(

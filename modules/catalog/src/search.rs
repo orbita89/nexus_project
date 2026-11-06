@@ -1575,7 +1575,9 @@ fn filter_string(value: &str) -> String {
 }
 
 /// Подсказки студий для фильтра `studio` (facet search Meilisearch по полю `studios`): по части
-/// названия с опечатками; без `q` — самые частые. `count` — сколько видимых сущностей в индексе.
+/// названия с опечатками; без `q` — самые частые. `count` — сколько видимых сущностей в индексе,
+/// `slug` и `logo_url` — из `studios` (одним запросом на ответ), логотип тот же, что на странице
+/// студии.
 #[utoipa::path(
     get, operation_id = "search_studios", path = "/search/studios", tag = "catalog",
     params(StudiosQuery),
@@ -1596,18 +1598,33 @@ pub async fn studios(
         )));
     }
     let hits = facet_hits(&state, "studios", q, query.kind, query.limit).await?;
-    // Slug'и страниц студий — одним запросом на ответ.
-    let names: Vec<String> = hits.iter().map(|(name, _)| name.clone()).collect();
-    let refs = crate::studios::refs(&state.db, &names).await?;
+    // Slug'и страниц студий и логотипы — одним запросом на ответ.
+    let refs = studio_refs(&state, &hits).await?;
     Ok(Json(
         hits.into_iter()
-            .map(|(name, count)| StudioHit {
-                slug: refs.get(&name).map(|r| r.slug.clone()),
-                name,
-                count,
+            .map(|(name, count)| {
+                let studio = refs.get(&name);
+                StudioHit {
+                    slug: studio.map(|r| r.slug.clone()),
+                    logo_url: studio.and_then(|r| r.logo_url.clone()),
+                    name,
+                    count,
+                }
             })
             .collect(),
     ))
+}
+
+/// Строки `studios` для значений фасета — одним запросом на ответ, а не по хиту: панель фильтров
+/// открывается одним запросом в поиск, и девяти походов в БД за логотипами там быть не должно.
+/// В документе индекса логотипа нет и быть не может: facet search возвращает только само значение
+/// и счётчик.
+async fn studio_refs(
+    state: &AppState,
+    hits: &[(String, i64)],
+) -> AppResult<HashMap<String, crate::studios::StudioRef>> {
+    let names: Vec<String> = hits.iter().map(|(name, _)| name.clone()).collect();
+    Ok(crate::studios::refs(&state.db, &names).await?)
 }
 
 /// Значения фасета с числом видимых сущностей: по части значения с опечатками, без `q` — самые
@@ -1668,11 +1685,25 @@ pub async fn publishers(
         )));
     }
     let hits = facet_hits(&state, "publishers", q, query.kind, query.limit).await?;
-    Ok(Json(
-        hits.into_iter()
-            .map(|(name, count)| PublisherHit { name, count })
-            .collect(),
-    ))
+    Ok(Json(publisher_hits(&state, hits).await?))
+}
+
+/// Издатели и музеи в карточках подсказок. Своей таблицы с логотипами у них нет, поэтому логотип
+/// берётся из `studios` по совпадению названия (издатель игры часто и есть студия-разработчик) —
+/// тем же одним запросом, что и у студий; не нашлось — `null`, карточка без картинки.
+async fn publisher_hits(
+    state: &AppState,
+    hits: Vec<(String, i64)>,
+) -> AppResult<Vec<PublisherHit>> {
+    let refs = studio_refs(state, &hits).await?;
+    Ok(hits
+        .into_iter()
+        .map(|(name, count)| PublisherHit {
+            logo_url: refs.get(&name).and_then(|r| r.logo_url.clone()),
+            name,
+            count,
+        })
+        .collect())
 }
 
 /// Подсказки музеев для фильтра `museum` (facet search по полю `museums`): где хранится картина.
@@ -1696,11 +1727,7 @@ pub async fn museums(
         )));
     }
     let hits = facet_hits(&state, "museums", q, query.kind, query.limit).await?;
-    Ok(Json(
-        hits.into_iter()
-            .map(|(name, count)| PublisherHit { name, count })
-            .collect(),
-    ))
+    Ok(Json(publisher_hits(&state, hits).await?))
 }
 
 /// Подсказки стран для фильтра `country` (facet search по полю `countries`): коды ISO 3166-1

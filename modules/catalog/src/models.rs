@@ -714,6 +714,9 @@ pub struct PublisherHit {
     #[schema(example = "АСТ")]
     pub name: String,
     pub count: i64,
+    /// Логотип, если под этим названием есть студия (`studios.logo_url`) — у издателей и музеев
+    /// своих логотипов нет, поэтому обычно `null`; карточка тогда без картинки.
+    pub logo_url: Option<String>,
 }
 
 /// Страна в подсказках: код ISO 3166-1 alpha-2 (значение для `country`) и сколько сущностей в
@@ -783,6 +786,10 @@ pub struct StudioHit {
     #[schema(example = "warner-bros-pictures")]
     pub slug: Option<String>,
     pub count: i64,
+    /// Логотип студии — тот же адрес, что в `GET /studios/{slug}` и `StudioRef` (`null` — у
+    /// студии его нет).
+    #[schema(example = "https://image.tmdb.org/t/p/w300/xenuUvcunUNpbaDOYGhWZERaym7.png")]
+    pub logo_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
