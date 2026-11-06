@@ -716,6 +716,15 @@ pub struct PublisherHit {
     pub count: i64,
 }
 
+/// Страна в подсказках: код ISO 3166-1 alpha-2 (значение для `country`) и сколько сущностей в
+/// индексе. Название страны показывает фронтенд — в индексе только коды.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CountryHit {
+    #[schema(example = "US")]
+    pub code: String,
+    pub count: i64,
+}
+
 /// Тег или жанр в подсказках: slug (значение для `tag`), название и сколько сущностей типа.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TagHit {

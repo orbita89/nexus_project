@@ -648,6 +648,7 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 | `studio_slug` | `studio_slugs = "<slug>"` — студия по slug страницы `/studios/{slug}` (2026-10-15); неизвестный — пусто | slug, иначе 400 |
 | `publisher` | `publishers = "<название>"` — издательство книги (`metadata.publisher`), издатель или разработчик игры (`publisher`, `developer`); точное, без учёта регистра (2026-10-30) | 1–200 символов после trim; `\` и `"` экранируются |
 | `museum` | `museums = "<название>"` — музей картины (`metadata.museum`); точное, без учёта регистра (2026-10-30) | 1–200 символов после trim; `\` и `"` экранируются |
+| `country` | `countries IN ["US", "GB"]` — страна производства (`metadata.countries`), ИЛИ между значениями (2026-11-06); параметр повторяемый (`country=US&country=GB`) или через запятую, разбирает `Repeated`, как `kind` | код ISO 3166-1 alpha-2, регистр не важен (`us` → `US`); неизвестный — 400 (`validate::country`) |
 | `person` | `people = "<slug>"` — человек в титрах в любой роли (2026-10-15) | slug, иначе 400 |
 | `person` + `role` | `credits = "<role>:<slug>"` — человек именно в этой роли | `person` — slug, `role` — `a-z`/`_`; `role` без `person` — 400 |
 
@@ -683,6 +684,12 @@ next: null}`, а не 404: фронт показывает похожие. По�
 
 **Подсказки издателей** `GET /search/publishers?q=&kind=&limit=` (2026-10-30) — тот же facet search
 по полю `publishers`. Ответ `[{name, count}]`, `name` — значение для фильтра `publisher`.
+
+**Подсказки стран** `GET /search/countries?q=&kind=&limit=` (2026-11-06) — facet search по полю
+`countries`. Ответ `[{code, count}]`, `code` — значение для фильтра `country` (ISO 3166-1 alpha-2);
+без `q` — самые частые (`faceting.sortFacetValuesBy.countries = count`). Названия стран
+(«США») показывает фронтенд (`countryName()`), в индексе только коды, поэтому `q` по названию
+бессмыслен — он сопоставляется с кодом.
 
 **Подсказки тегов** `GET /search/tags?q=&kind=&limit=` (2026-10-30) — facet search по полю `tags`:
 только теги и жанры, которые есть у сущностей этого `kind` (жанры фильмов не попадают в книги).
@@ -738,6 +745,9 @@ Meilisearch считал и листал только 1000: `total` был 1000,
 числа), `studios` (все из `metadata.studios`), `publishers` (издатели: `metadata.publisher` книги,
 `publisher` и `developer` игры, без повторов; фильтр `publisher` и подсказки, 2026-10-30),
 `museums` (музей картины из `metadata.museum`; фильтр `museum` и подсказки, 2026-10-30),
+`countries` (страны производства из `metadata.countries`, коды alpha-2 в верхнем регистре —
+приводятся при сборке документа, старые строки могли быть в нижнем; фильтр `country` и подсказки,
+2026-11-06),
 `tags` (slug'и тегов, фильтр), `rank_score`,
 `popularity`, `quality` (сортировки), `imdb_rating`, `imdb_votes`, `release_status` (выдача),
 `nexus_ratings_count`, `nexus_rating_avg` (оценки Nexus из `entity_ratings`; без оценок — `0` и
@@ -751,9 +761,10 @@ Meilisearch считал и листал только 1000: `total` был 1000,
 `filterableAttributes` — `kind`, `tags`, `year`, `slug`, `studios`, `publishers`, `museums`,
 `release_ts`;
 `sortableAttributes` — `rank_score`, `popularity`, `quality`, `release_ts`, `title`,
-`nexus_ratings_count`, `nexus_rating_avg`; в `filterableAttributes` также `people`, `credits`, `studio_slugs`;
+`nexus_ratings_count`, `nexus_rating_avg`; в `filterableAttributes` также `people`, `credits`,
+`studio_slugs`, `countries`;
 `faceting.sortFacetValuesBy` — `studios: count`, `publishers: count`, `museums: count`,
-`tags: count`; `pagination.maxTotalHits` — 500000. Настройки ставятся на теневой индекс при
+`tags: count`, `countries: count`; `pagination.maxTotalHits` — 500000. Настройки ставятся на теневой индекс при
 перестройке: после выкладки фильтры `studio`/диапазон/`new` работают, когда пройдёт перестройка
 (при старте — в фоне). Карточки (`card`), описания,
 имён участников и названий тегов в индексе больше нет: поиск по имени актёра или названию тега не
@@ -1412,12 +1423,13 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/archive/stats` | Размер холодного архива: `{"total": N, "by_kind": {"book": 0, "game": 0, "movie": N, "series": 0}}` — документов в индексе Tantivy (работы не на сайте, их ищет `GET /archive/search`). `by_kind` — все типы `EntityKind::ALL` (нет в архиве — 0; новый тип появляется сам), счёт — `Count` по терму поля `type`, удалённые не считаются; всё с одного снимка индекса (`Archive::counts`). `?kind=movie\|series\|book\|game` — `total` только этого типа (как фильтр `kind` у `/search`). Публичный, без запроса к PostgreSQL. Для подписи на сайте («ещё N в архиве»). 400 — неизвестный `kind`; 503 — нет `ARCHIVE_DIR` или индекс не открывается |
 | GET | `/archive/entities/{slug}` | Фильм из архива для его страницы (только чтение): `ArchiveDoc` (название, оригинальное название, дата, постер). Публичный. 404 — нет в архиве или неверный slug (фильм мог вернуться на сайт — `GET /entities/{slug}`); 503 — архив недоступен |
 | POST | `/archive/entities/{slug}/restore` | Открыли архивную страницу — вернуть фильм на сайт со всеми данными TMDB ([«Возврат из архива открытием страницы»](#возврат-из-архива-открытием-страницы-)) → 201 `EntityDetail`; уже на сайте → 200 `EntityDetail`. Публичный. 404 — нет ни в архиве, ни на сайте; 409 `kept_in_archive` (убран админом) / `not_restorable` (не фильм TMDB); 429 — лимит `ARCHIVE_RESTORE_PER_HOUR` (`Retry-After`); 503 `restore_unavailable` (нет ключа TMDB, лимит 0) / `tmdb_unavailable` (TMDB не ответил; фильм в архиве) / архив недоступен |
-| GET | `/search` | Весь поиск сайта, Meilisearch, по видимым: `q` (название, оригинальное, студии; пустой — все), фильтры `kind` (можно повторить — `kind=movie&kind=game` — или перечислить через запятую: ИЛИ между типами, И с остальными фильтрами; ранжирование общее по всей выдаче), `tag`, `year` (ровно) или `year_from`/`year_to` (диапазон включительно), `studio` (точное название, без учёта регистра), `studio_slug` (slug студии), `person` (slug, в любой роли) и `person`+`role` (в этой роли) ([«Поиск»](#поиск)). По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb; `new` (вышедшие, новые сверху), `soon` (будущие, ближайшие сверху), `title` (без значения — в конце), `popular` (больше оценок Nexus, затем новее), `rating` (средняя оценка Nexus, затем число оценок, затем новее; без оценок — в конце; оценки доезжают до индекса за ~1 мин), `random` (случайное окно выдачи: `limit=1` — одна случайная работа под теми же фильтрами); другое значение — 400. `total` — точное число совпадений (до 500000), листается весь результат. 400 — неизвестный `kind` (в том числе рядом с верным), `year` вместе с диапазоном, `year_from > year_to`, год вне 1–9998, пустая/длинная (>200) студия, `role` без `person`, неверный slug тега/человека |
+| GET | `/search` | Весь поиск сайта, Meilisearch, по видимым: `q` (название, оригинальное, студии; пустой — все), фильтры `kind` (можно повторить — `kind=movie&kind=game` — или перечислить через запятую: ИЛИ между типами, И с остальными фильтрами; ранжирование общее по всей выдаче), `tag`, `year` (ровно) или `year_from`/`year_to` (диапазон включительно), `studio` (точное название, без учёта регистра), `studio_slug` (slug студии), `country` (страна производства, код ISO 3166-1 alpha-2; можно повторить или через запятую — ИЛИ между странами, 2026-11-06), `person` (slug, в любой роли) и `person`+`role` (в этой роли) ([«Поиск»](#поиск)). По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb; `new` (вышедшие, новые сверху), `soon` (будущие, ближайшие сверху), `title` (без значения — в конце), `popular` (больше оценок Nexus, затем новее), `rating` (средняя оценка Nexus, затем число оценок, затем новее; без оценок — в конце; оценки доезжают до индекса за ~1 мин), `random` (случайное окно выдачи: `limit=1` — одна случайная работа под теми же фильтрами); другое значение — 400. `total` — точное число совпадений (до 500000), листается весь результат. 400 — неизвестный `kind` (в том числе рядом с верным), `year` вместе с диапазоном, `year_from > year_to`, год вне 1–9998, пустая/длинная (>200) студия, неизвестный код страны в `country`, `role` без `person`, неверный slug тега/человека |
 | GET | `/search/people` | Поиск людей, Meilisearch, индекс `people` ([«Поиск людей»](#поиск-людей-)): `q` (имя по-русски или латиницей, опечатки, начало слова; до 300 символов; пустой — самые известные), `known_for` (основная роль: `actor`, `director`, …), `limit` 1–100 (20), `offset` → `Page<PersonHit>` (`total` точный): `id`, `slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `known_for`. Ранжирование — качество совпадения, затем известность (`person_stats.fame`). 400 — длинный `q`, `known_for` не `a-z`/`_`; 503 — Meilisearch недоступен; индекса нет — пустая страница |
 | GET | `/search/studios` | Подсказки для фильтра `studio` (facet search Meilisearch): `q` — часть названия, опечатки допустимы (пустой — самые частые), `kind`, `limit` 1–50 (10) → `[{"name", "slug", "count"}]` (`slug` — страница студии, значение для `studio_slug`; `null` — страницы нет). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` |
 | GET | `/search/publishers` | Подсказки для фильтра `publisher` (facet search по полю `publishers`): издательство книги, издатель или разработчик игры. `q`, `kind`, `limit` 1–50 (10) → `[{"name", "count"}]`. 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
 | GET | `/search/tags` | Подсказки для фильтра `tag`: теги и жанры, которые есть у сущностей этого `kind` (жанры фильмов не предлагаются в книгах). `q` (по slug'у), `kind`, `limit` 1–50 (10) → `[{"slug", "name", "kind", "count"}]` (название и `kind` — из таблицы `tags`). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
 | GET | `/search/museums` | Подсказки для фильтра `museum` (facet search по полю `museums`): где хранится картина. `q`, `kind`, `limit` 1–50 (10) → `[{"name", "count"}]`. 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
+| GET | `/search/countries` | Подсказки для фильтра `country` (facet search по полю `countries`): страны производства. `q` (по коду), `kind`, `limit` 1–50 (10) → `[{"code", "count"}]`, `code` — ISO 3166-1 alpha-2; названия стран показывает фронтенд. 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-11-06) |
 
 **`related`** в карточке — одна лента для карусели: `[{...EntitySummary, "relation": "prequel"|"sequel"|"remake"}, ...]`, хронологически по `release_date` (без даты — в конце, затем `position`, затем заголовок), пусто — `[]`. Сиквелы, ремейки и приквелы идут **в одной полосе**, тип связи — у каждой карточки. Связи — в самой карточке, а не отдельным запросом: карточка — статика фронтенда, они попадают в HTML.
 
@@ -1843,7 +1855,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `metadata.rs` | Схемы `metadata` по типам и их проверка (у книг — `LibgenSource`, `LibgenFile`) |
 | `validate.rs` | Проверка slug, строк, URL, ролей, размеров обложки (`cover_size`); UNIQUE → 409 |
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение (`tags.rs` — `TAG_COUNT_COLUMNS`: `by_kind` подзапросом по `tag_kind_counts`, фильтр `?entity_kind=`) |
-| `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), точечная индексация `POST /admin/search/entities` (`index_entities`), `GET /search` (фильтры — `filters_of`, общее тело запроса — `request_body`, `sort=random` — `random_window`), соседи `GET /entities/{slug}/neighbors` (`neighbors`), подсказки `GET /search/studios`, `GET /search/publishers`, `GET /search/museums`, `GET /search/tags` (общий `facet_hits`) |
+| `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), точечная индексация `POST /admin/search/entities` (`index_entities`), `GET /search` (фильтры — `filters_of`, общее тело запроса — `request_body`, `sort=random` — `random_window`), соседи `GET /entities/{slug}/neighbors` (`neighbors`), подсказки `GET /search/studios`, `GET /search/publishers`, `GET /search/museums`, `GET /search/tags`, `GET /search/countries` (общий `facet_hits`) |
 | `studios.rs` | Студии: `sync` (из `metadata.studios` и переданных `Company`), `refs` (ссылки в карточке), `GET /studios/{slug}` (данные компании из TMDB при первом открытии), `metadata_filter` для `GET /entities?studio=` |
 | `awards.rs` | Раздел «Награды»: `Award`/`AwardDetail`/`AwardEditionDetail`/`Nomination`/`EntityAward`, `GET /awards`, `/awards/{slug}`, `/awards/{slug}/{year}` (`edition_detail` — и для ответов админки), `entity_awards` / `person_awards` для карточек, `facets_of` для документа индекса |
 | `banners.rs` | Баннеры: `Banner`, `BannerKind`/`BannerSlide`/`BannerButton`/`BannerTarget`, `PAGES`, `THEMES`, `Draft::validate` (проверки с `field`), `sanitize_html` (ammonia), `sanitize_custom_html` + `sanitize_css` (kind=custom), сопоставление путей (`glob`, `/admin/*`, `ALL_PATHS` для цели `all`), `GET /banners` |

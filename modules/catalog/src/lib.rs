@@ -48,6 +48,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(search::publishers))
         .routes(routes!(search::tags))
         .routes(routes!(search::museums))
+        .routes(routes!(search::countries))
         .routes(routes!(archive::search))
         .routes(routes!(archive::stats))
         .routes(routes!(archive::get))

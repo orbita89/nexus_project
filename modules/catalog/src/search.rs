@@ -29,9 +29,10 @@
 use crate::entities::check_year;
 use crate::jobs::{self, DoneEvent, JobEvent, Reporter, Step, StepStatus};
 use crate::models::{
-    page_bounds, Entity, EntityKind, EntitySummary, FacetQuery, IndexEntities, IndexResult,
-    Neighbors, Page, PublisherHit, ReindexQuery, ReindexResult, ReleaseStatus, SearchQuery,
-    SearchSort, StudioHit, StudiosQuery, TagHit, ENTITY_COLUMNS, ENTITY_STATS_JOIN, VISIBLE,
+    page_bounds, CountryHit, Entity, EntityKind, EntitySummary, FacetQuery, IndexEntities,
+    IndexResult, Neighbors, Page, PublisherHit, ReindexQuery, ReindexResult, ReleaseStatus,
+    SearchQuery, SearchSort, StudioHit, StudiosQuery, TagHit, ENTITY_COLUMNS, ENTITY_STATS_JOIN,
+    VISIBLE,
 };
 use crate::people_search;
 use crate::publish::Touched;
@@ -107,6 +108,9 @@ struct SearchDoc {
     /// Музей или собрание картины (`metadata.museum`): фильтр `museum`, подсказки
     /// `GET /search/museums`.
     museums: Vec<String>,
+    /// Страны производства (`metadata.countries`), коды ISO 3166-1 alpha-2: фильтр `country`,
+    /// подсказки `GET /search/countries`. Названия стран показывает фронтенд.
+    countries: Vec<String>,
     /// Slug'и тегов: фильтр.
     tags: Vec<String>,
     /// Статистика (`entity_stats`): сортировки `recommended` (`rank_score`), `trending`
@@ -166,6 +170,19 @@ impl SearchDoc {
                 }
             }
         }
+        // В БД коды уже в верхнем регистре (`metadata::validate`), но индекс строится и по
+        // старым строкам — приводим здесь, иначе фильтр `country=US` их не найдёт.
+        let countries: Vec<String> = entity.metadata["countries"]
+            .as_array()
+            .map(|codes| {
+                codes
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|code| code.trim().to_ascii_uppercase())
+                    .filter(|code| !code.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
         let museums = entity.metadata["museum"]
             .as_str()
             .map(str::trim)
@@ -187,6 +204,7 @@ impl SearchDoc {
             studios,
             publishers,
             museums,
+            countries,
             tags,
             rank_score: entity.rank_score,
             popularity: entity.tmdb_popularity,
@@ -213,7 +231,7 @@ fn entity_settings() -> Value {
         "searchableAttributes": ["title", "original_title", "studios", "publishers"],
         "filterableAttributes": [
             "kind", "tags", "year", "slug", "studios", "publishers", "museums", "release_ts",
-            "studio_slugs",
+            "studio_slugs", "countries",
             "award_slugs", "award_years", "award_wins", "award_nominations",
         ],
         "sortableAttributes": [
@@ -224,6 +242,7 @@ fn entity_settings() -> Value {
         "faceting": {
             "sortFacetValuesBy": {
                 "studios": "count", "publishers": "count", "museums": "count", "tags": "count",
+                "countries": "count",
             },
         },
         "pagination": { "maxTotalHits": MAX_TOTAL_HITS },
@@ -981,7 +1000,8 @@ pub async fn sync_ratings(
 /// издатель или разработчик игры — тоже точное название), `museum` (музей картины),
 /// `person` (slug участника) и
 /// `role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`
-/// (год церемонии) и `awarded` (только с наградой).
+/// (год церемонии), `awarded` (только с наградой) и `country` (страна производства, код
+/// ISO 3166-1 alpha-2; несколько — ИЛИ между собой).
 ///
 /// Сортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу
 /// «Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только
@@ -1000,6 +1020,11 @@ pub async fn sync_ratings(
          description = "Типы работ: можно повторить (`kind=movie&kind=game`) или перечислить \
                         через запятую. Несколько — ИЛИ между собой и И с остальными фильтрами. \
                         Не передан — все типы", explode = true),
+        ("country" = Option<Vec<String>>, Query,
+         description = "Страны производства (`metadata.countries`), коды ISO 3166-1 alpha-2: \
+                        можно повторить (`country=US&country=GB`) или перечислить через запятую. \
+                        Несколько — ИЛИ между собой и И с остальными фильтрами. Регистр не важен; \
+                        неизвестный код — 400", explode = true, example = "US"),
     ),
     responses(
         (status = 200, description = "Страница результатов. `total` — всего найдено (точно)", body = Page<EntitySummary>),
@@ -1068,7 +1093,8 @@ async fn request_body(
     query: &SearchQuery,
 ) -> AppResult<Option<Value>> {
     let kinds = kinds_of(repeated)?;
-    let mut filters = filters_of(query, &kinds)?;
+    let countries = countries_of(repeated)?;
+    let mut filters = filters_of(query, &kinds, &countries)?;
     if let Some(person) = &query.person {
         match person_filter(&state.db, person, query.role.as_deref()).await? {
             Some(filter) => filters.push(filter),
@@ -1194,6 +1220,8 @@ const NEIGHBORS_SCAN: i64 = 5000;
         SearchQuery,
         ("kind" = Option<Vec<EntityKind>>, Query,
          description = "Типы работ, как в `GET /search`", explode = true),
+        ("country" = Option<Vec<String>>, Query,
+         description = "Страны производства, как в `GET /search`", explode = true),
     ),
     responses(
         (status = 200, description = "Соседи; на краях ряда — `null`", body = Neighbors),
@@ -1357,8 +1385,24 @@ pub(crate) async fn similar(
 const MAX_STUDIO: usize = 200;
 
 /// Фильтры Meilisearch из запроса. Всё, что подставляется строкой, проверено или экранировано.
-fn filters_of(query: &SearchQuery, kinds: &[EntityKind]) -> AppResult<Vec<String>> {
+fn filters_of(
+    query: &SearchQuery,
+    kinds: &[EntityKind],
+    countries: &[String],
+) -> AppResult<Vec<String>> {
     let mut filters = Vec::new();
+    // Страны — ИЛИ между собой («снято в Великобритании или США») и И с остальным. Коды уже
+    // проверены [`countries_of`], в строке фильтра безопасны.
+    if !countries.is_empty() {
+        filters.push(format!(
+            "countries IN [{}]",
+            countries
+                .iter()
+                .map(|code| format!("\"{code}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     // Типы — ИЛИ между собой и И со всеми остальными фильтрами: «фильмы и игры, но только
     // с тегом sci-fi». Один тип выглядит в фильтре так же, как раньше.
     if !kinds.is_empty() {
@@ -1484,6 +1528,19 @@ fn kinds_of(repeated: &Repeated) -> AppResult<Vec<EntityKind>> {
         }
     }
     Ok(kinds)
+}
+
+/// Страны из запроса: `?country=US&country=GB` или `?country=US,GB` — «страна одна из
+/// перечисленных». Регистр не важен (`gb` → `GB`), повторы схлопываются, неизвестный код — 400.
+fn countries_of(repeated: &Repeated) -> AppResult<Vec<String>> {
+    let mut countries: Vec<String> = Vec::new();
+    for value in repeated.values("country") {
+        let code = validate::country("country", value)?;
+        if !countries.contains(&code) {
+            countries.push(code);
+        }
+    }
+    Ok(countries)
 }
 
 /// Фильтр `person` (+ `role`): работы человека — из `entity_credits` (индекс по `person_id`), в
@@ -1642,6 +1699,36 @@ pub async fn museums(
     Ok(Json(
         hits.into_iter()
             .map(|(name, count)| PublisherHit { name, count })
+            .collect(),
+    ))
+}
+
+/// Подсказки стран для фильтра `country` (facet search по полю `countries`): коды ISO 3166-1
+/// alpha-2 со счётчиками, самые частые сверху. Названия («США») показывает фронтенд, поэтому
+/// запрос `q` по названию бессмыслен — в фасете коды; `kind` сужает до раздела.
+#[utoipa::path(
+    get, operation_id = "search_countries", path = "/search/countries", tag = "catalog",
+    params(FacetQuery),
+    responses(
+        (status = 200, description = "Страны", body = Vec<CountryHit>),
+        (status = 400, description = "Слишком длинный `q`", body = ErrorBody),
+        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+    )
+)]
+pub async fn countries(
+    State(state): State<AppState>,
+    Query(query): Query<FacetQuery>,
+) -> AppResult<Json<Vec<CountryHit>>> {
+    let q = query.q.as_deref().unwrap_or_default().trim();
+    if q.chars().count() > MAX_STUDIO {
+        return Err(AppError::BadRequest(format!(
+            "q must be at most {MAX_STUDIO} characters"
+        )));
+    }
+    let hits = facet_hits(&state, "countries", q, query.kind, query.limit).await?;
+    Ok(Json(
+        hits.into_iter()
+            .map(|(code, count)| CountryHit { code, count })
             .collect(),
     ))
 }
@@ -1911,18 +1998,49 @@ mod tests {
         let filters = filters_of(
             &query(json!({ "year": 2001 })),
             &[EntityKind::Movie, EntityKind::Game],
+            &[],
         )
         .unwrap();
         assert_eq!(filters, ["(kind = movie OR kind = game)", "year = 2001"]);
         assert_eq!(
-            filters_of(&query(json!({})), &[EntityKind::Movie]).unwrap(),
+            filters_of(&query(json!({})), &[EntityKind::Movie], &[]).unwrap(),
             ["kind = movie"]
         );
     }
 
+    /// Страны запроса — как их видит обработчик.
+    fn countries(raw: &str) -> AppResult<Vec<String>> {
+        countries_of(&Repeated::from_query(raw))
+    }
+
+    #[test]
+    fn several_countries() {
+        assert_eq!(countries("").unwrap(), [] as [String; 0]);
+        // Повтор, запятая и регистр — одно и то же.
+        for raw in [
+            "country=US&country=GB",
+            "country=US,GB",
+            "country=us&country=gb&country=US",
+        ] {
+            assert_eq!(countries(raw).unwrap(), ["US", "GB"], "{raw}");
+        }
+        for bad in ["country=USA", "country=%D0%A1%D0%A8%D0%90", "country=ZZ"] {
+            assert_eq!(countries(bad).unwrap_err().code(), "validation", "{bad}");
+        }
+
+        // В фильтр страны идут как ИЛИ, остальное — через И.
+        let filters = filters_of(
+            &query(json!({ "year": 2001 })),
+            &[],
+            &["US".to_owned(), "GB".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(filters, [r#"countries IN ["US", "GB"]"#, "year = 2001"]);
+    }
+
     #[test]
     fn filters() {
-        let ok = |params| filters_of(&query(params), &[]).unwrap();
+        let ok = |params| filters_of(&query(params), &[], &[]).unwrap();
         assert_eq!(ok(json!({ "year": 2001 })), ["year = 2001"]);
         assert_eq!(
             ok(json!({ "year_from": 2000, "year_to": 2010 })),
@@ -1944,7 +2062,7 @@ mod tests {
             json!({ "person": "Bad Slug" }),
             json!({ "person": "christopher-nolan", "role": "Director" }),
         ] {
-            let error = filters_of(&query(bad.clone()), &[]).unwrap_err();
+            let error = filters_of(&query(bad.clone()), &[], &[]).unwrap_err();
             assert_eq!(error.code(), "validation", "{bad}");
         }
         // Фильтр по людям собирает `person_filter` (по БД), здесь — только проверка.

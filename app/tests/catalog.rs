@@ -1287,6 +1287,12 @@ async fn search_filters_and_sorts(pool: PgPool) {
          WHERE slug = 'witcher-3';
          UPDATE entities SET metadata = metadata || '{\"publisher\": \"АСТ\"}'
          WHERE slug = 'dune-novel';
+         UPDATE entities SET metadata = metadata || '{\"countries\": [\"US\", \"CA\"]}'
+         WHERE slug = 'dune-2021';
+         UPDATE entities SET metadata = metadata || '{\"countries\": [\"US\"]}'
+         WHERE slug = 'dune-part-two-2024';
+         UPDATE entities SET metadata = metadata || '{\"countries\": [\"PL\"]}'
+         WHERE slug = 'witcher-3';
          INSERT INTO entities (kind, slug, title, release_date)
          VALUES ('movie', 'future-film', 'Будущий фильм', current_date + 30);",
     )
@@ -1400,6 +1406,45 @@ async fn search_filters_and_sorts(pool: PgPool) {
         .collect();
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(names.contains(&"CD Projekt"), "{names:?}");
+
+    // Страна: код alpha-2, регистр не важен; несколько — ИЛИ между собой.
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?country=CA").await),
+        ["dune-2021"]
+    );
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?country=us&sort=new").await),
+        ["dune-part-two-2024", "dune-2021"]
+    );
+    for raw in ["country=US,PL", "country=US&country=PL"] {
+        let page = ctx.get_ok(&format!("/search?{raw}&sort=new")).await;
+        assert_eq!(
+            slugs(&page),
+            ["dune-part-two-2024", "dune-2021", "witcher-3"],
+            "{raw}"
+        );
+    }
+    // Вместе с остальными фильтрами — через И.
+    assert_eq!(
+        slugs(&ctx.get_ok("/search?country=US&kind=movie&year=2021").await),
+        ["dune-2021"]
+    );
+    // Неизвестный код — 400, а не молча пустая выдача.
+    for bad in ["USA", "%D0%A1%D0%A8%D0%90", "ZZ"] {
+        assert_eq!(
+            ctx.get(&format!("/search?country={bad}")).await.status,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+    // Подсказки стран: коды со счётчиками, самые частые сверху; `kind` сужает до раздела.
+    let countries = ctx.get_ok("/search/countries").await;
+    assert_eq!(countries[0]["code"], "US", "{countries}");
+    assert_eq!(countries[0]["count"], 2, "{countries}");
+    let countries = ctx.get_ok("/search/countries?kind=game").await;
+    assert_eq!(countries.as_array().unwrap().len(), 1, "{countries}");
+    assert_eq!(countries[0]["code"], "PL", "{countries}");
+    assert_eq!(countries[0]["count"], 1, "{countries}");
 
     // Подсказки тегов — только те, что есть у этого типа: жанры фильмов не лезут в игры.
     let tags = ctx.get_ok("/search/tags?kind=game").await;

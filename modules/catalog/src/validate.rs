@@ -113,6 +113,40 @@ pub fn role(value: &str) -> Result<String, AppError> {
     }
 }
 
+/// Коды стран ISO 3166-1 alpha-2: все назначенные плюс несколько исторических и
+/// исключительно зарезервированных, которые приходят из TMDB и Wikidata (`SU` — СССР, `CS` —
+/// Сербия и Черногория, `YU` — Югославия, `DD` — ГДР, `AN` — Нидерландские Антилы, `XK` —
+/// Косово). Одной строкой через пробел: список статический, перебор 255 значений дешевле карты.
+const COUNTRY_CODES: &str = "\
+AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ \
+BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ \
+CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ \
+DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR \
+GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY \
+HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP \
+KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY \
+MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ \
+NA NC NE NF NG NI NL NO NP NR NU NZ OM \
+PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW \
+SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ \
+TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ \
+VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW \
+AN CS DD SU XK";
+
+/// Код страны ISO 3166-1 alpha-2 (`US`, `gb` → `GB`). Неизвестный — 400, чтобы мусор в адресе не
+/// выдавал пустой результат молча.
+pub fn country(field: &str, value: &str) -> Result<String, AppError> {
+    let code = value.trim().to_ascii_uppercase();
+    let known = code.len() == 2 && COUNTRY_CODES.split(' ').any(|known| known == code.as_str());
+    if known {
+        Ok(code)
+    } else {
+        Err(bad(format!(
+            "{field} must be an ISO 3166-1 alpha-2 code (got {value:?})"
+        )))
+    }
+}
+
 /// Нарушение UNIQUE → 409 с понятным текстом, остальное — как есть (500, детали в лог).
 pub fn conflict(message: &'static str) -> impl Fn(sqlx::Error) -> AppError {
     move |error| match &error {
