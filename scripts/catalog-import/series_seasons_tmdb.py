@@ -25,7 +25,8 @@
     number, title, original_title (en), overview, air_date
     runtime_minutes ← `runtime` TMDB, уже в минутах
     still_url       ← кадр из серии `image.tmdb.org/t/p/w780{still_path}`, 16:9 — не постер
-    still_width/height ← размеры этой копии кадра
+    still_width/height ← размеры этой копии кадра, только с `--still-sizes`: у TMDB они есть
+                      лишь в `/tv/{id}/season/{n}/episode/{m}/images`, то есть запрос на серию
 
 Повторный прогон безопасен: сезон ищется по сериалу и номеру, серия — по сезону и номеру, обе
 строки обновляются на месте. Серии, которых больше нет у TMDB, не удаляются — на них могут
@@ -170,7 +171,19 @@ def image_size(images: list[dict], file_path: str) -> tuple[int | None, int | No
     return None, None
 
 
-def season_rows(tmdb: Tmdb, tv_id: int, number: int, series_status: str | None) -> dict | None:
+def still_size(tmdb: Tmdb, tv_id: int, season: int, episode: int,
+               still_path: str) -> tuple[int | None, int | None]:
+    """Размеры кадра: TMDB отдаёт их только у эпизода (`/images`) — запрос на серию.
+
+    Поэтому и флаг `--still-sizes`: на сотне сериалов это ~10 тысяч лишних запросов. Без него
+    размеры остаются пустыми, и карточка берёт обычное для кадра соотношение 16:9.
+    """
+    data = tmdb.get(f"/tv/{tv_id}/season/{season}/episode/{episode}/images")
+    return image_size((data or {}).get("stills") or [], still_path)
+
+
+def season_rows(tmdb: Tmdb, tv_id: int, number: int, series_status: str | None,
+                with_still_sizes: bool = False) -> dict | None:
     """Сезон и его серии из `GET /tv/{id}/season/{n}`; нечего показывать — `None`.
 
     Второй запрос в en-US — ради оригинальных названий и описаний там, где русских нет:
@@ -201,10 +214,11 @@ def season_rows(tmdb: Tmdb, tv_id: int, number: int, series_status: str | None) 
         en = en_episodes.get(episode_number) or {}
         runtime = episode.get("runtime") or en.get("runtime")
         still_path = episode.get("still_path") or en.get("still_path")
+        # В ответе сезона размеров кадров нет (`images` сезона — только постеры), поэтому
+        # без `--still-sizes` они остаются пустыми.
         still_width, still_height = (None, None)
-        if still_path:
-            still_width, still_height = image_size(
-                (data.get("images") or {}).get("stills") or [], still_path)
+        if still_path and with_still_sizes:
+            still_width, still_height = still_size(tmdb, tv_id, number, episode_number, still_path)
         en_title = clean(en.get("name"), MAX_TITLE)
         episodes.append({
             "number": episode_number,
@@ -348,6 +362,9 @@ def main() -> int:
     parser.add_argument("--slug", nargs="*", default=[],
                         help="только эти сериалы (по умолчанию — все с id TMDB)")
     parser.add_argument("--limit", type=int, help="сколько сериалов обойти")
+    parser.add_argument("--still-sizes", action="store_true",
+                        help="дозапросить размеры кадров (по запросу на серию: ~10 тысяч "
+                             "запросов на сотню сериалов); без него кадр идёт без размеров")
     parser.add_argument("--refresh", action="store_true",
                         help="перезаписать уже заведённые сезоны (по умолчанию — только серии)")
     parser.add_argument("--delay", type=float, default=DELAY,
@@ -389,7 +406,7 @@ def main() -> int:
             })
             log.debug("%s: сезоны %s", series_slug, numbers)
             for number in numbers:
-                row = season_rows(tmdb, tv_id, number, series_status)
+                row = season_rows(tmdb, tv_id, number, series_status, args.still_sizes)
                 if not row:
                     stats["skipped"] += 1
                     continue
