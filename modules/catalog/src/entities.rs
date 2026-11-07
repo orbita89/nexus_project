@@ -3,8 +3,8 @@
 use crate::models::{
     page_bounds, AdminEntitySummary, Entity, EntityCredit, EntityCreditRow, EntityDetail,
     EntityKind, EntitySort, EntitySummary, ListEntitiesQuery, Page, RelatedWork, RelationKind,
-    SimilarQuery, Tag, ENTITY_COLUMNS, ENTITY_STATS_JOIN, ENTITY_SUMMARY_COLUMNS, TAG_COLUMNS,
-    TAG_ORDER, VISIBLE,
+    SimilarQuery, Tag, ENTITY_COLUMNS, ENTITY_STATS_JOIN, ENTITY_SUMMARY_COLUMNS, IN_CATALOG,
+    TAG_COLUMNS, TAG_ORDER, VISIBLE,
 };
 use axum::extract::State;
 use axum::Json;
@@ -127,10 +127,12 @@ pub(crate) async fn list_page(
         None => String::new(),
     };
     // VISIBLE начинается с `e.active`: планировщик берёт частичный индекс `WHERE active`.
+    // IN_CATALOG убирает сезоны сериалов: у них своя страница, но в разделах их быть не должно.
+    // В админском списке (`active` из запроса) сезоны видны — их надо находить и править.
     let filter = |n: u8| {
         if active == Some(true) {
             format!(
-                "{LIST_FILTER}{} AND {VISIBLE}{released}{by_sort}",
+                "{LIST_FILTER}{} AND {VISIBLE} AND {IN_CATALOG}{released}{by_sort}",
                 by_studio(n)
             )
         } else {
@@ -307,7 +309,7 @@ pub(crate) async fn detail_by_id(
     detail(db, entity.ok_or(AppError::NotFound)?, true).await
 }
 
-async fn detail(
+pub(crate) async fn detail(
     db: impl PgExecutor<'_> + Copy,
     entity: Entity,
     with_inactive: bool,

@@ -735,6 +735,13 @@ Meilisearch: комнат десятки, а сообщения ищутся в�
 на пачку): `catalog` не переносит такие в холодный архив, иначе удаление строки `entities` стёрло бы
 их каскадом.
 
+`social` реализует и `UserRatings` (`social::directory::PgUserRatings`, `state.user_ratings`,
+миграция сезонов `20261201100000_catalog_seasons.sql`): `mine(user, entity_ids)` →
+`HashMap<Uuid, i16>` — свои оценки пользователя из `reviews` (рецензия без оценки не считается).
+Читает его `catalog`: на таблетке сезона в шапке сериала стоит и средняя оценка, и своя, а вся
+шапка рисуется одним запросом. Сводки по сущностям — наоборот, `EntityRatings` (их пишет
+`social`), здесь только «что поставил этот пользователь».
+
 `social` реализует и `Chat` (`social::chat::PgChat`, `state.chat`): `send(state, user, ChatRoom,
 body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, message_id)`. Его вызывает
 `realtime` на `chat.send` / `chat.read` — модули не знают друг о друге, запись в таблицы чата
@@ -1137,7 +1144,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `events.rs` | События для `realtime` |
 | `attachments.rs` | Вложения чата: загрузка и пережатие в WebP, раздача с проверкой доступа, привязка к сообщению, уборка сирот |
 | `dm.rs` | Личные переписки 1:1: открытие и удаление у себя, блокировки и их список, `dm_policy`, доступ (`visible`, `peer_of`, `check_not_blocked`) |
-| `directory.rs` | `InterestDirectory` для других модулей |
+| `directory.rs` | Справочники для других модулей: `PgInterestDirectory`, `PgPersonLikes`, `PgUserRatings` (свои оценки — таблетки сезонов в `catalog`) |
 | `collection_links.rs` | Связанные подборки: выдача (`related` для детали), замена списка, добавление на позицию, удаление, перенумерация |
 | `collection_comments.rs` | Обсуждение коллекции: список, запись (ответы — к корню, лимит частоты, закрытое обсуждение), удаление своего, `remove` для модерации |
 | `admin.rs` | Модерация; поиск коллекций (`search_collections`); правка названия и описания любой коллекции; особые коллекции: slug, оформление, состав любой особой (`collections::Editor::Admin`) |

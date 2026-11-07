@@ -31,6 +31,13 @@ macro_rules! release_status_sql {
 
 pub const VISIBLE: &str = visible_sql!();
 
+/// Разделы каталога (SQL, алиас `e`): всё, кроме сезонов сериалов. Сезон — полноценная сущность
+/// со своей страницей и оценкой, но в списках и в общем поиске ему не место: в разделе
+/// «Сериалы» должен быть «Аркейн», а не «Аркейн, сезон 1» и «Аркейн, сезон 2». По прямому
+/// slug'у сезон открывается (`GET /seasons/{slug}`), и `social` работает с ним как с любой
+/// сущностью.
+pub const IN_CATALOG: &str = "e.kind <> 'season'";
+
 /// Статус выхода по сегодняшней дате.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +71,10 @@ impl TryFrom<String> for ReleaseStatus {
 pub enum EntityKind {
     Movie,
     Series,
+    /// Сезон сериала: своя страница, свой slug (`arcane-season-2`) и своя оценка. Сериал —
+    /// `entities.parent_id`. В каталог и общий поиск сезоны не попадают (`IN_CATALOG`): в разделе
+    /// «Сериалы» должен быть «Аркейн», а не «Аркейн, сезон 1» и «Аркейн, сезон 2».
+    Season,
     Book,
     Game,
     /// Живопись: раздел «Картины» (импорт `scripts/catalog-import/paintings_wikidata.py`).
@@ -71,9 +82,10 @@ pub enum EntityKind {
 }
 
 impl EntityKind {
-    pub const ALL: [EntityKind; 5] = [
+    pub const ALL: [EntityKind; 6] = [
         Self::Movie,
         Self::Series,
+        Self::Season,
         Self::Book,
         Self::Game,
         Self::Painting,
@@ -83,6 +95,7 @@ impl EntityKind {
         match self {
             Self::Movie => "movie",
             Self::Series => "series",
+            Self::Season => "season",
             Self::Book => "book",
             Self::Game => "game",
             Self::Painting => "painting",
@@ -99,7 +112,9 @@ impl EntityKind {
     pub fn url_segment(self) -> &'static str {
         match self {
             Self::Movie => "films",
-            Self::Series => "series",
+            // Сезон живёт внутри раздела сериала, но его адрес — `/series/arcane/season-2`:
+            // одного slug'а для него мало, собирает его `publish::season_path`.
+            Self::Series | Self::Season => "series",
             Self::Book => "books",
             Self::Game => "games",
             Self::Painting => "paintings",
@@ -172,6 +187,9 @@ pub struct Entity {
     /// Поля, специфичные для `kind`.
     #[schema(value_type = crate::metadata::Metadata)]
     pub metadata: Value,
+    /// Родительская сущность: у сезона — его сериал. У остальных типов — `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Uuid>,
     /// Включена. Скрытая хранится в БД, но её нет в списках, поиске, похожих и фильмографиях, а
     /// карточка — 404 для всех, кроме админа.
     pub active: bool,
@@ -196,7 +214,8 @@ pub struct Entity {
 
 pub const ENTITY_COLUMNS: &str = concat!(
     "e.id, e.kind, e.slug, e.title, e.original_title, e.description, \
-     e.release_date, e.cover_url, e.cover_width, e.cover_height, e.metadata, e.active, ",
+     e.release_date, e.cover_url, e.cover_width, e.cover_height, e.metadata, e.parent_id, \
+     e.active, ",
     visible_sql!(),
     " AS visible, ",
     release_status_sql!(),
@@ -900,6 +919,10 @@ pub struct CreateEntity {
     pub tags: Vec<String>,
     /// Видна на сайте. По умолчанию `true`.
     pub active: Option<bool>,
+    /// Сериал, к которому относится сезон (`kind = season`): его slug. Обязателен для сезона и
+    /// запрещён остальным типам — 400. Записывается в `entities.parent_id`.
+    #[schema(example = "arcane")]
+    pub series_slug: Option<String>,
 }
 
 /// Изменение сущности: переданные поля заменяются, `null` очищает необязательное поле.
@@ -930,6 +953,10 @@ pub struct UpdateEntity {
     /// Включить (`true`) или скрыть с сайта (`false`). Помечает `active_manual`: «пересобрать
     /// активные» эту сущность больше не трогает.
     pub active: Option<bool>,
+    /// Перенести сезон к другому сериалу: slug сериала. Только для `kind = season` — остальным
+    /// типам 400. Не передан — родитель не меняется.
+    #[schema(example = "arcane")]
+    pub series_slug: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

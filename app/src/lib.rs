@@ -114,6 +114,7 @@ pub fn directories(db: PgPool) -> Directories {
         awards: Arc::new(catalog::directory::PgAwardDirectory::new(db.clone())),
         studios: Arc::new(catalog::directory::PgStudioDirectory::new(db.clone())),
         person_likes: Arc::new(social::directory::PgPersonLikes::new(db.clone())),
+        user_ratings: Arc::new(social::directory::PgUserRatings::new(db.clone())),
     }
 }
 

@@ -122,11 +122,16 @@ impl Touched {
 
     /// Страницы фронтенда по slug'ам, которые сейчас в БД.
     async fn paths(&self, db: &sqlx::PgPool) -> Result<Vec<String>, sqlx::Error> {
-        let entities: Vec<(EntityKind, String)> =
-            sqlx::query_as("SELECT kind, slug FROM entities WHERE id = ANY($1)")
-                .bind(&self.entities)
-                .fetch_all(db)
-                .await?;
+        // У сезона свой адрес внутри сериала (`/series/arcane/season-2`), поэтому берём и slug
+        // родителя с номером сезона.
+        let entities: Vec<(EntityKind, String, Option<String>, Option<i32>)> = sqlx::query_as(
+            "SELECT e.kind, e.slug, p.slug, (e.metadata ->> 'number')::int
+             FROM entities e LEFT JOIN entities p ON p.id = e.parent_id
+             WHERE e.id = ANY($1)",
+        )
+        .bind(&self.entities)
+        .fetch_all(db)
+        .await?;
         let people: Vec<String> = sqlx::query_scalar("SELECT slug FROM people WHERE id = ANY($1)")
             .bind(&self.people)
             .fetch_all(db)
@@ -182,7 +187,7 @@ impl Touched {
 
         Ok(entities
             .iter()
-            .map(|(kind, slug)| entity_path(*kind, slug))
+            .flat_map(|(kind, slug, parent, number)| entity_paths(*kind, slug, parent, *number))
             .chain(people.iter().map(|slug| person_path(slug)))
             .chain(studios.iter().map(|slug| studio_path(slug)))
             .chain(award_slugs.iter().map(|slug| award_path(slug)))
@@ -199,6 +204,34 @@ impl Touched {
 /// Страница сущности на фронтенде: `/films/dune-2021`.
 pub fn entity_path(kind: EntityKind, slug: &str) -> String {
     format!("/{}/{slug}", kind.url_segment())
+}
+
+/// Страница сезона на фронтенде: `/series/arcane/season-2`. Своего раздела у сезона нет — он
+/// живёт внутри сериала, поэтому одного его slug'а (`arcane-season-2`) для адреса мало.
+pub fn season_path(series_slug: &str, number: i32) -> String {
+    format!("/series/{series_slug}/season-{number}")
+}
+
+/// Страницы, которые задевает правка сущности. У сезона их две: его собственная и страница
+/// сериала — в её шапке стоит переключатель сезонов. Сезон без родителя (битые данные) своей
+/// страницы не имеет.
+fn entity_paths(
+    kind: EntityKind,
+    slug: &str,
+    parent: &Option<String>,
+    number: Option<i32>,
+) -> Vec<String> {
+    if kind != EntityKind::Season {
+        return vec![entity_path(kind, slug)];
+    }
+    match (parent, number) {
+        (Some(parent), Some(number)) => vec![
+            season_path(parent, number),
+            entity_path(EntityKind::Series, parent),
+        ],
+        (Some(parent), None) => vec![entity_path(EntityKind::Series, parent)],
+        _ => Vec::new(),
+    }
 }
 
 /// Страница человека на фронтенде.
@@ -368,6 +401,21 @@ mod tests {
             entity_path(EntityKind::Game, "witcher-3"),
             "/games/witcher-3"
         );
+        assert_eq!(season_path("arcane", 2), "/series/arcane/season-2");
+        assert_eq!(
+            entity_paths(
+                EntityKind::Season,
+                "arcane-season-2",
+                &Some("arcane".into()),
+                Some(2)
+            ),
+            ["/series/arcane/season-2", "/series/arcane"]
+        );
+        assert_eq!(
+            entity_paths(EntityKind::Movie, "dune-2021", &None, None),
+            ["/films/dune-2021"]
+        );
+        assert!(entity_paths(EntityKind::Season, "orphan", &None, Some(1)).is_empty());
         assert_eq!(person_path("denis-villeneuve"), "/people/denis-villeneuve");
         assert_eq!(award_path("oscar"), "/awards/oscar");
         assert_eq!(award_edition_path("oscar", 2024), "/awards/oscar/2024");

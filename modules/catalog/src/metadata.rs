@@ -102,6 +102,36 @@ pub struct SeriesMetadata {
     pub trivia: Option<Vec<String>>,
 }
 
+/// Поля сезона сериала (`kind = season`). Сам сериал — `entities.parent_id`, в ответах он
+/// приходит отдельным полем `series`; название, описание, постер и дата премьеры — обычные поля
+/// сущности (`title`, `description`, `cover_url`, `release_date`).
+///
+/// Видео у нас нет: «просмотрено», прогресса и позиции в серии здесь не будет.
+#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SeasonMetadata {
+    /// Номер сезона; 0 — спецвыпуски. Единственное обязательное поле `metadata` во всём каталоге:
+    /// сезон без номера нечем ни назвать, ни упорядочить.
+    #[schema(example = 2, minimum = 0, maximum = 10000)]
+    pub number: u32,
+    /// Сколько серий в сезоне.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 6, minimum = 1, maximum = 100000)]
+    pub episode_count: Option<u32>,
+    /// Как у сериала: `ongoing`, `ended`, `canceled`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<SeriesStatus>,
+    /// Дата выхода последней вышедшей серии. Премьера — `release_date` сущности.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finale_date: Option<chrono::NaiveDate>,
+    /// Награды и номинации: до 50.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awards: Option<Vec<MetadataAward>>,
+    /// Факты: до 30, каждый 1–1000 символов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trivia: Option<Vec<String>>,
+}
+
 /// Поля книги.
 #[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -358,6 +388,7 @@ impl TrailerProvider {
 pub enum Metadata {
     Movie(MovieMetadata),
     Series(SeriesMetadata),
+    Season(SeasonMetadata),
     Book(BookMetadata),
     Game(GameMetadata),
     Painting(PaintingMetadata),
@@ -400,6 +431,15 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             m.countries = countries(m.countries)?;
             m.trailers = trailers(m.trailers)?;
             m.studios = studios(m.studios)?;
+            m.awards = awards(m.awards)?;
+            m.trivia = trivia(m.trivia)?;
+            to_value(m)
+        }
+        EntityKind::Season => {
+            let mut m: SeasonMetadata = parse(kind, metadata)?;
+            // 0 — спецвыпуски, поэтому нижняя граница нулевая, а не единица.
+            range("number", Some(m.number), 0, 10_000)?;
+            range("episode_count", m.episode_count, 1, 100_000)?;
             m.awards = awards(m.awards)?;
             m.trivia = trivia(m.trivia)?;
             to_value(m)
@@ -725,9 +765,40 @@ mod tests {
 
     #[test]
     fn empty_object_is_valid_for_every_kind() {
-        for kind in EntityKind::ALL {
+        // Кроме сезона: без номера сезон нечем ни назвать, ни упорядочить.
+        for kind in EntityKind::ALL
+            .into_iter()
+            .filter(|k| *k != EntityKind::Season)
+        {
             assert_eq!(validate(kind, json!({})).unwrap(), json!({}));
         }
+        assert!(validate(EntityKind::Season, json!({})).is_err());
+    }
+
+    #[test]
+    fn season_needs_a_number() {
+        // 0 — спецвыпуски, это допустимый номер.
+        assert_eq!(
+            validate(EntityKind::Season, json!({ "number": 0 })).unwrap(),
+            json!({ "number": 0 })
+        );
+        assert_eq!(
+            validate(
+                EntityKind::Season,
+                json!({ "number": 2, "episode_count": 6, "status": "ended",
+                        "finale_date": "2024-12-21" })
+            )
+            .unwrap(),
+            json!({ "number": 2, "episode_count": 6, "status": "ended",
+                    "finale_date": "2024-12-21" })
+        );
+        assert!(validate(EntityKind::Season, json!({ "number": -1 })).is_err());
+        assert!(validate(
+            EntityKind::Season,
+            json!({ "number": 1, "episode_count": 0 })
+        )
+        .is_err());
+        assert!(validate(EntityKind::Season, json!({ "number": 1, "seasons": 2 })).is_err());
     }
 
     #[test]
@@ -836,12 +907,21 @@ mod tests {
             })
         );
         // Пустые списки — как отсутствие поля; награды и факты — у всех типов, студии — у кино.
-        for kind in EntityKind::ALL {
+        // Сезон — с номером: он обязателен (см. `season_needs_a_number`).
+        for kind in EntityKind::ALL
+            .into_iter()
+            .filter(|k| *k != EntityKind::Season)
+        {
             let empty = json!({ "awards": [], "trivia": [] });
             assert_eq!(validate(kind, empty).unwrap(), json!({}), "{kind:?}");
             let fact = json!({ "trivia": ["Факт"] });
             assert!(validate(kind, fact).is_ok(), "{kind:?}");
         }
+        let season = json!({ "number": 1, "awards": [], "trivia": ["Факт"] });
+        assert_eq!(
+            validate(EntityKind::Season, season).unwrap(),
+            json!({ "number": 1, "trivia": ["Факт"] })
+        );
         assert!(validate(EntityKind::Series, json!({ "studios": ["HBO"] })).is_ok());
         assert!(validate(EntityKind::Book, json!({ "studios": ["HBO"] })).is_err());
         assert!(validate(EntityKind::Game, json!({ "studios": ["CDPR"] })).is_err());

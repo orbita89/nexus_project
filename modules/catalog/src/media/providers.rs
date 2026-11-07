@@ -299,7 +299,8 @@ impl Finder for HttpFinder {
                 })
             }),
             // Картины приходят из Wikidata вместе с изображением из Commons: искать негде.
-            EntityKind::Painting => None,
+            // Постер сезона ищется не по названию сериала — его кладёт импорт сезонов.
+            EntityKind::Painting | EntityKind::Season => None,
         }?;
         // Найденное проверяем сразу: незачем записывать битую ссылку.
         (self.image_alive(&url).await == Liveness::Alive).then_some(url)
@@ -312,7 +313,7 @@ impl Finder for HttpFinder {
                 .igdb_game(target)
                 .await
                 .and_then(|g| pick::igdb_trailer(&g).map(str::to_string)),
-            EntityKind::Book | EntityKind::Painting => None,
+            EntityKind::Book | EntityKind::Painting | EntityKind::Season => None,
         }?;
         let source = TrailerSource {
             provider: TrailerProvider::Youtube,

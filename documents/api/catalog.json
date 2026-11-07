@@ -3165,6 +3165,97 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/seasons/{id}/episodes": {
+      "put": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Заменить серии сезона целиком. Номера уникальны внутри сезона; строки, которых нет в\nприсланном списке, удаляются.",
+        "operationId": "set_season_episodes",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id сезона (сущность `kind = season`)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetEpisodes"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Серии сезона",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Episode"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля или повтор номера",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сезон не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/tags": {
       "post": {
         "tags": [
@@ -4388,6 +4479,19 @@
               }
             },
             "explode": true
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Страны производства, как в `GET /search`",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "explode": true
           }
         ],
         "responses": {
@@ -4422,6 +4526,66 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/catalog/entities/{slug}/seasons": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Сезоны сериала: переключатель `Весь сериал · 1 сезон · 2 сезон` в шапке.",
+        "description": "Порядок — по номеру, спецвыпуски (0) в конце. `rating` и `my_rating` — те же поля и та же\nсемантика, что у сущности в карточке; гостю `my_rating: null`. Гостю ответ кэшируется.\n\nСериал не найден или скрыт — 404 (админу видны и скрытые, вместе со скрытыми сезонами).",
+        "operationId": "list_entity_seasons",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сериала",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "arcane"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сезоны сериала",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сериал не найден или скрыт",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/catalog/entities/{slug}/similar": {
@@ -4616,7 +4780,7 @@
           "catalog"
         ],
         "summary": "Полнотекстовый поиск по активным сущностям каталога: опечатки, ранжирование, фильтры. Весь\nпоиск на сайте идёт сюда (в `GET /entities` поиска по названию нет).",
-        "description": "Фильтры (через AND): `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `publisher` (издательство книги,\nиздатель или разработчик игры — тоже точное название), `museum` (музей картины),\n`person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`\n(год церемонии) и `awarded` (только с наградой).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;\n`awarded` — больше наград сверху; `random` — случайное окно выдачи (`limit=1` — одна случайная\nработа под те же фильтры: ею заканчивается листание, когда ряд и похожие кончились).\n\nСоседей работы в этой же выдаче отдаёт `GET /entities/{slug}/neighbors`.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
+        "description": "Фильтры (через AND): `tag`, год (`year` — ровно, `year_from` / `year_to` — диапазон\nвключительно), `studio` (точное название, без учёта регистра), `publisher` (издательство книги,\nиздатель или разработчик игры — тоже точное название), `museum` (музей картины),\n`person` (slug участника) и\n`role` (его роль в этой сущности; без `person` — 400), `award` (slug премии), `award_year`\n(год церемонии), `awarded` (только с наградой) и `country` (страна производства, код\nISO 3166-1 alpha-2; несколько — ИЛИ между собой).\n\nСортировка по релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу\n«Рекомендуемые», TMDB popularity, рейтингу IMDb (у кого значения нет — в конце); `new` — только\nвышедшие, новые сверху; `soon` — только не вышедшие, ближайшие сверху; `title` — по названию;\n`awarded` — больше наград сверху; `random` — случайное окно выдачи (`limit=1` — одна случайная\nработа под те же фильтры: ею заканчивается листание, когда ряд и похожие кончились).\n\nСоседей работы в этой же выдаче отдаёт `GET /entities/{slug}/neighbors`.\n\nИндекс обновляется после изменений в админке с задержкой в доли секунды.",
         "operationId": "search",
         "parameters": [
           {
@@ -4802,6 +4966,20 @@
               }
             },
             "explode": true
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Страны производства (`metadata.countries`), коды ISO 3166-1 alpha-2: можно повторить (`country=US&country=GB`) или перечислить через запятую. Несколько — ИЛИ между собой и И с остальными фильтрами. Регистр не важен; неизвестный код — 400",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "explode": true,
+            "example": "US"
           }
         ],
         "responses": {
@@ -4817,6 +4995,81 @@
           },
           "400": {
             "description": "Неверный фильтр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Meilisearch недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/catalog/search/countries": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Подсказки стран для фильтра `country` (facet search по полю `countries`): коды ISO 3166-1\nalpha-2 со счётчиками, самые частые сверху. Названия («США») показывает фронтенд, поэтому\nзапрос `q` по названию бессмыслен — в фасете коды; `kind` сужает до раздела.",
+        "operationId": "search_countries",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Начало или часть названия, опечатки допустимы. Пустой — самые частые.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "аст"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Только у сущностей этого типа: жанры фильмов не предлагаются в книгах.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EntityKind"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–50, по умолчанию 10. Вне диапазона приводится к границам.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страны",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CountryHit"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Слишком длинный `q`",
             "content": {
               "application/json": {
                 "schema": {
@@ -5075,7 +5328,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Подсказки студий для фильтра `studio` (facet search Meilisearch по полю `studios`): по части\nназвания с опечатками; без `q` — самые частые. `count` — сколько видимых сущностей в индексе.",
+        "summary": "Подсказки студий для фильтра `studio` (facet search Meilisearch по полю `studios`): по части\nназвания с опечатками; без `q` — самые частые. `count` — сколько видимых сущностей в индексе,\n`slug` и `logo_url` — из `studios` (одним запросом на ответ), логотип тот же, что на странице\nстудии.",
         "operationId": "search_studios",
         "parameters": [
           {
@@ -5220,6 +5473,145 @@
         }
       }
     },
+    "/api/v1/catalog/seasons/{slug}": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Карточка сезона: поля сущности, сериал для шапки и хлебных крошек и серии сезона.",
+        "description": "Социальное (оценка, рецензия, лайк, отметка, коллекция) — существующими ручками `social` по\nэтому же slug'у: сезон для них обычная сущность.",
+        "operationId": "get_season",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сезона",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "arcane-season-2"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Карточка сезона",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найден или скрыт",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/seasons/{slug}/episodes": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Серии сезона: страница `?limit=1..100&offset=` (по умолчанию 50).",
+        "description": "Серии, которые ещё не вышли (`air_date` в будущем), тоже отдаются: карусель покажет их\nнеактивными с датой. Оценок у серий нет — они не сущности.",
+        "operationId": "list_season_episodes",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сезона",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "arcane-season-2"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Серии сезона",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Episode"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сезон не найден или скрыт",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/studios/{slug}": {
       "get": {
         "tags": [
@@ -5296,6 +5688,7 @@
               "enum": [
                 "movie",
                 "series",
+                "season",
                 "book",
                 "game",
                 "painting"
@@ -6293,6 +6686,24 @@
         },
         "additionalProperties": false
       },
+      "CountryHit": {
+        "type": "object",
+        "description": "Страна в подсказках: код ISO 3166-1 alpha-2 (значение для `country`) и сколько сущностей в\nиндексе. Название страны показывает фронтенд — в индексе только коды.",
+        "required": [
+          "code",
+          "count"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "example": "US"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "CreateAward": {
         "type": "object",
         "description": "Новая премия.",
@@ -6636,6 +7047,14 @@
             ],
             "format": "date"
           },
+          "series_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Сериал, к которому относится сезон (`kind = season`): его slug. Обязателен для сезона и\nзапрещён остальным типам — 400. Записывается в `entities.parent_id`.",
+            "example": "arcane"
+          },
           "slug": {
             "type": "string",
             "description": "Латиница в нижнем регистре, цифры и дефисы.",
@@ -6938,6 +7357,14 @@
             ],
             "example": "Dune"
           },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Родительская сущность: у сезона — его сериал. У остальных типов — `null`."
+          },
           "quality": {
             "type": [
               "number",
@@ -7133,6 +7560,7 @@
         "enum": [
           "movie",
           "series",
+          "season",
           "book",
           "game",
           "painting"
@@ -7236,6 +7664,168 @@
             "example": "Дюна"
           }
         }
+      },
+      "Episode": {
+        "type": "object",
+        "description": "Серия сезона. Своего slug'а, рецензий и подборок у серии нет — она не сущность.",
+        "required": [
+          "id",
+          "number",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "air_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "example": 1
+          },
+          "original_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Welcome to the Playground"
+          },
+          "overview": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Целые минуты.",
+            "example": 42
+          },
+          "still_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "still_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Кадр из серии, 16:9 — не постер сериала и не постер сезона. Кадра нет — `null`, и\nзаглушку (постер сезона, иначе сериала) подставляет фронтенд: пропорции у них другие."
+          },
+          "still_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Размеры кадра в пикселях: карточка держит точное `aspect-ratio` до загрузки."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Тяжёлые времена"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EpisodeInput": {
+        "type": "object",
+        "description": "Серия на входе. Ни «просмотрено», ни прогресса здесь нет и не будет: видео у нас нет.",
+        "required": [
+          "number"
+        ],
+        "properties": {
+          "air_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Номер серии в сезоне, 0–10000; повторы в списке — 400.",
+            "example": 1
+          },
+          "original_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Welcome to the Playground"
+          },
+          "overview": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "До 2000 символов."
+          },
+          "runtime_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Целые минуты, 1–10000.",
+            "example": 42
+          },
+          "still_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "still_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Кадр из серии (16:9), `http(s)://...`. Постер сериала или сезона сюда класть не надо —\nпропорции другие, карточка поедет."
+          },
+          "still_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Размеры кадра в пикселях: только вдвоём и только вместе с `still_url`."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Тяжёлые времена"
+          }
+        },
+        "additionalProperties": false
       },
       "ErrorBody": {
         "type": "object",
@@ -7563,6 +8153,9 @@
           },
           {
             "$ref": "#/components/schemas/SeriesMetadata"
+          },
+          {
+            "$ref": "#/components/schemas/SeasonMetadata"
           },
           {
             "$ref": "#/components/schemas/BookMetadata"
@@ -8372,6 +8965,124 @@
           }
         }
       },
+      "Page_Episode": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Серия сезона. Своего slug'а, рецензий и подборок у серии нет — она не сущность.",
+              "required": [
+                "id",
+                "number",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "air_date": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "number": {
+                  "type": "integer",
+                  "format": "int32",
+                  "example": 1
+                },
+                "original_title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "example": "Welcome to the Playground"
+                },
+                "overview": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "runtime_minutes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "Целые минуты.",
+                  "example": 42
+                },
+                "still_height": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32"
+                },
+                "still_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Кадр из серии, 16:9 — не постер сериала и не постер сезона. Кадра нет — `null`, и\nзаглушку (постер сезона, иначе сериала) подставляет фронтенд: пропорции у них другие."
+                },
+                "still_width": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "Размеры кадра в пикселях: карточка держит точное `aspect-ratio` до загрузки."
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "example": "Тяжёлые времена"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "Page_PersonHit": {
         "type": "object",
         "description": "Страница списка.",
@@ -8897,6 +9608,13 @@
             "type": "integer",
             "format": "int64"
           },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Логотип, если под этим названием есть студия (`studios.logo_url`) — у издателей и музеев\nсвоих логотипов нет, поэтому обычно `null`; карточка тогда без картинки."
+          },
           "name": {
             "type": "string",
             "example": "АСТ"
@@ -9078,6 +9796,29 @@
         },
         "additionalProperties": false
       },
+      "RatingValue": {
+        "type": "object",
+        "description": "Средняя оценка сущности и число оценок: те же числа и та же семантика, что у карточки\n(`entity_ratings`, сводки присылает `social`).",
+        "required": [
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "example": 420
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Среднее, округлённое до 0,1; оценок нет — `null`.",
+            "example": 9.2
+          }
+        }
+      },
       "ReindexResult": {
         "type": "object",
         "required": [
@@ -9176,6 +9917,242 @@
           "awarded",
           "random"
         ]
+      },
+      "SeasonDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EntityDetail"
+          },
+          {
+            "type": "object",
+            "required": [
+              "rating",
+              "episodes"
+            ],
+            "properties": {
+              "episodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Episode"
+                },
+                "description": "Серии сезона по возрастанию номера, не больше [`MAX_PAGE_SIZE`](shared::pagination::MAX_PAGE_SIZE);\nдлиннее — `GET /seasons/{slug}/episodes`."
+              },
+              "my_rating": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Своя оценка зрителя, 1–10; гостю и без оценки — `null`."
+              },
+              "rating": {
+                "$ref": "#/components/schemas/RatingValue"
+              },
+              "series": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/EntitySummary",
+                    "description": "Сериал, которому принадлежит сезон; родителя нет (данные битые) — `null`."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Карточка сезона: поля сущности (`metadata` — [`crate::metadata::SeasonMetadata`]), сериал для\nшапки и хлебных крошек и серии сезона."
+      },
+      "SeasonList": {
+        "type": "object",
+        "description": "Сезоны сериала одним ответом: без `total`, их всегда немного.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SeasonSummary"
+            }
+          }
+        }
+      },
+      "SeasonMetadata": {
+        "type": "object",
+        "description": "Поля сезона сериала (`kind = season`). Сам сериал — `entities.parent_id`, в ответах он\nприходит отдельным полем `series`; название, описание, постер и дата премьеры — обычные поля\nсущности (`title`, `description`, `cover_url`, `release_date`).\n\nВидео у нас нет: «просмотрено», прогресса и позиции в серии здесь не будет.",
+        "required": [
+          "number"
+        ],
+        "properties": {
+          "awards": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/MetadataAward"
+            },
+            "description": "Награды и номинации: до 50."
+          },
+          "episode_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Сколько серий в сезоне.",
+            "example": 6,
+            "maximum": 100000,
+            "minimum": 1
+          },
+          "finale_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Дата выхода последней вышедшей серии. Премьера — `release_date` сущности."
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Номер сезона; 0 — спецвыпуски. Единственное обязательное поле `metadata` во всём каталоге:\nсезон без номера нечем ни назвать, ни упорядочить.",
+            "example": 2,
+            "maximum": 10000,
+            "minimum": 0
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SeriesStatus",
+                "description": "Как у сериала: `ongoing`, `ended`, `canceled`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trivia": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Факты: до 30, каждый 1–1000 символов."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SeasonSummary": {
+        "type": "object",
+        "description": "Таблетка сезона в шапке сериала: `9.5 ★ · 6 серий` рисуется прямо отсюда, второго запроса\nза рейтингами быть не должно.",
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "rating"
+        ],
+        "properties": {
+          "cover_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Постер сезона и размеры файла в пикселях (точное `aspect-ratio` до загрузки)."
+          },
+          "cover_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "episode_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 6
+          },
+          "finale_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Дата выхода последней вышедшей серии."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "my_rating": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Своя оценка зрителя, 1–10; гостю и без оценки — `null`.",
+            "example": 10
+          },
+          "number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Номер сезона; 0 — спецвыпуски.",
+            "example": 2
+          },
+          "original_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "Arcane: Season 2"
+          },
+          "premiere_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Дата выхода первой серии (`release_date` сущности)."
+          },
+          "rating": {
+            "$ref": "#/components/schemas/RatingValue"
+          },
+          "slug": {
+            "type": "string",
+            "example": "arcane-season-2"
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SeriesStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": "string",
+            "example": "Сезон 2"
+          }
+        }
       },
       "SeriesMetadata": {
         "type": "object",
@@ -9291,6 +10268,22 @@
           "ended",
           "canceled"
         ]
+      },
+      "SetEpisodes": {
+        "type": "object",
+        "required": [
+          "episodes"
+        ],
+        "properties": {
+          "episodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EpisodeInput"
+            },
+            "description": "Серии сезона целиком: присланный список заменяет текущий. Пустой — снять все серии."
+          }
+        },
+        "additionalProperties": false
       },
       "SetTags": {
         "type": "object",
@@ -9488,6 +10481,14 @@
           "count": {
             "type": "integer",
             "format": "int64"
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Логотип студии — тот же адрес, что в `GET /studios/{slug}` и `StudioRef` (`null` — у\nстудии его нет).",
+            "example": "https://image.tmdb.org/t/p/w300/xenuUvcunUNpbaDOYGhWZERaym7.png"
           },
           "name": {
             "type": "string",
@@ -10017,6 +11018,14 @@
               "null"
             ],
             "format": "date"
+          },
+          "series_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Перенести сезон к другому сериалу: slug сериала. Только для `kind = season` — остальным\nтипам 400. Не передан — родитель не меняется.",
+            "example": "arcane"
           },
           "slug": {
             "type": [

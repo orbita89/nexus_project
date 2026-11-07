@@ -81,13 +81,14 @@ pub async fn create(
     let (cover_width, cover_height) =
         validate::cover_size(cover_url.is_some(), req.cover_width, req.cover_height)?;
     let metadata = metadata::validate(req.kind, req.metadata.unwrap_or_else(|| json!({})))?;
+    let parent_id = parent_of(&state.db, req.kind, req.series_slug.as_deref()).await?;
 
     let mut tx = state.db.begin().await?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO entities
              (kind, slug, title, original_title, description, release_date, cover_url,
-              cover_width, cover_height, metadata, active, active_manual)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
+              cover_width, cover_height, metadata, active, active_manual, parent_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id",
     )
     .bind(req.kind)
     .bind(&req.slug)
@@ -101,6 +102,7 @@ pub async fn create(
     .bind(metadata)
     .bind(req.active.unwrap_or(true))
     .bind(req.active.is_some())
+    .bind(parent_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(validate::conflict("slug is already taken"))?;
@@ -222,6 +224,11 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
         .metadata
         .map(|value| metadata::validate(kind, value))
         .transpose()?;
+    // Сезон можно перенести к другому сериалу; не передан — родитель остаётся прежним.
+    let parent_id = match &req.series_slug {
+        Some(_) => parent_of(&state.db, kind, req.series_slug.as_deref()).await?,
+        None => None,
+    };
 
     // До записи: старый slug, если он меняется.
     let touched = Touched::collect(&state.db, &[id], &[]).await?;
@@ -237,7 +244,8 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
              cover_height = CASE WHEN $10 THEN $13 ELSE cover_height END,
              metadata = COALESCE($14, metadata),
              active = COALESCE($15, active),
-             active_manual = active_manual OR $15 IS NOT NULL
+             active_manual = active_manual OR $15 IS NOT NULL,
+             parent_id = COALESCE($16, parent_id)
          WHERE id = $1",
     )
     .bind(id)
@@ -255,6 +263,7 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
     .bind(cover_height)
     .bind(metadata)
     .bind(req.active)
+    .bind(parent_id)
     .execute(&state.db)
     .await
     .map_err(validate::conflict("slug is already taken"))?;
@@ -262,6 +271,27 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
         return Err(AppError::NotFound);
     }
     Ok(touched)
+}
+
+/// Родитель сущности по `series_slug`: у сезона — его сериал, обязателен. Остальным типам
+/// родителя не ставят — 400: `parent_id` заведён под сезоны, и молча его проглатывать нельзя.
+async fn parent_of(
+    db: &sqlx::PgPool,
+    kind: EntityKind,
+    series_slug: Option<&str>,
+) -> AppResult<Option<Uuid>> {
+    match (kind, series_slug) {
+        (EntityKind::Season, Some(slug)) => {
+            Ok(Some(crate::seasons::series_id_by_slug(db, slug).await?))
+        }
+        (EntityKind::Season, None) => Err(AppError::BadRequest(
+            "series_slug is required for a season".into(),
+        )),
+        (_, Some(_)) => Err(AppError::BadRequest(
+            "series_slug is only for kind = season".into(),
+        )),
+        (_, None) => Ok(None),
+    }
 }
 
 /// Удалить сущность. Теги, участники, рецензии и элементы коллекций удаляются каскадно.

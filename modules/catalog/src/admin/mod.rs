@@ -5,6 +5,7 @@
 pub mod awards;
 pub mod banners;
 pub mod entities;
+pub mod episodes;
 pub mod people;
 pub mod relations;
 pub mod tags;

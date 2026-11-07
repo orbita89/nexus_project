@@ -730,6 +730,14 @@ Meilisearch: комнат десятки, а сообщения ищутся в�
 на пачку): `catalog` не переносит такие в холодный архив, иначе удаление строки `entities` стёрло бы
 их каскадом.
 
+`social` реализует и `UserRatings` (`social::directory::PgUserRatings`, `state.user_ratings`):
+`mine(user, entity_ids)` отдаёт оценки пользователя из `reviews` для перечисленных работ
+(рецензия без оценки своей оценкой не считается). Читает его `catalog`: на таблетке сезона в
+шапке сериала стоит и средняя оценка, и своя, а вся шапка должна рисоваться одним запросом.
+Сводки по сущностям идут в обратную сторону — их `social` сам присылает каталогу через
+`EntityRatings`; здесь только «что поставил этот пользователь». Появилось вместе с сезонами
+сериалов (миграция `20261201100000_catalog_seasons.sql`).
+
 `social` реализует и `Chat` (`social::chat::PgChat`, `state.chat`): `send(state, user, ChatRoom,
 body, reply_to)` → сообщение (JSON), `read(state, user, ChatRoom, message_id)`. Его вызывает
 `realtime` на `chat.send` / `chat.read` — модули не знают друг о друге, запись в таблицы чата
@@ -1107,7 +1115,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `events.rs` | События для `realtime` |
 | `attachments.rs` | Вложения чата: загрузка и пережатие в WebP, раздача с проверкой доступа, привязка к сообщению, уборка сирот |
 | `dm.rs` | Личные переписки 1:1: открытие и удаление у себя, блокировки и их список, `dm_policy`, доступ (`visible`, `peer_of`, `check_not_blocked`) |
-| `directory.rs` | `InterestDirectory` для других модулей: `entity_ids`, `entities_in_use` |
+| `directory.rs` | Справочники для других модулей: `InterestDirectory` (`entity_ids`, `entities_in_use`), `PersonLikes`, `UserRatings` (свои оценки — таблетки сезонов в каталоге) |
 | `collection_links.rs` | Связанные подборки: выдача (`related` для детали), замена списка, добавление на позицию, удаление, перенумерация |
 | `collection_comments.rs` | Обсуждение коллекции: список, запись (ответы — к корню, лимит частоты, закрытое обсуждение), удаление своего, `remove` для модерации |
 | `admin.rs` | Модерация; поиск коллекций (`search_collections`); правка названия и описания любой коллекции; особые коллекции: slug, оформление, состав любой особой (`collections::Editor::Admin`) |

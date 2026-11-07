@@ -32,7 +32,7 @@ use crate::models::{
     page_bounds, CountryHit, Entity, EntityKind, EntitySummary, FacetQuery, IndexEntities,
     IndexResult, Neighbors, Page, PublisherHit, ReindexQuery, ReindexResult, ReleaseStatus,
     SearchQuery, SearchSort, StudioHit, StudiosQuery, TagHit, ENTITY_COLUMNS, ENTITY_STATS_JOIN,
-    VISIBLE,
+    IN_CATALOG, VISIBLE,
 };
 use crate::people_search;
 use crate::publish::Touched;
@@ -316,7 +316,7 @@ async fn update_entities(state: &AppState, touched: &Touched) -> Result<(), BoxE
     }
     let entities: Vec<Entity> = sqlx::query_as(&format!(
         "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN}
-         WHERE e.id = ANY($1) AND {VISIBLE} ORDER BY e.id"
+         WHERE e.id = ANY($1) AND {VISIBLE} AND {IN_CATALOG} ORDER BY e.id"
     ))
     .bind(&touched.entities)
     .fetch_all(&state.db)
@@ -809,10 +809,11 @@ async fn create_version(
 /// Все видимые сущности из БД пачками по [`BATCH`] (keyset по id) в индекс `version`. Пока Meilisearch
 /// применяет пачку, читается следующая. Возвращает число отправленных документов.
 async fn fill(state: &AppState, version: &str, report: &Reporter) -> Result<usize, BoxError> {
-    let total: i64 =
-        sqlx::query_scalar(&format!("SELECT count(*) FROM entities e WHERE {VISIBLE}"))
-            .fetch_one(&state.db)
-            .await?;
+    let total: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM entities e WHERE {VISIBLE} AND {IN_CATALOG}"
+    ))
+    .fetch_one(&state.db)
+    .await?;
     let total = u64::try_from(total).unwrap_or(0);
     report.progress(Step::Fill, 0, total);
 
@@ -822,7 +823,8 @@ async fn fill(state: &AppState, version: &str, report: &Reporter) -> Result<usiz
     loop {
         let entities: Vec<Entity> = sqlx::query_as(&format!(
             "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN}
-             WHERE {VISIBLE} AND ($1::uuid IS NULL OR e.id > $1) ORDER BY e.id LIMIT $2"
+             WHERE {VISIBLE} AND {IN_CATALOG} AND ($1::uuid IS NULL OR e.id > $1)
+             ORDER BY e.id LIMIT $2"
         ))
         .bind(after)
         .bind(BATCH as i64)
@@ -1867,7 +1869,8 @@ pub async fn index_entities(
     }
     // Сколько из запрошенных реально видимы: остальные из индекса удалены.
     let indexed: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM entities e {ENTITY_STATS_JOIN} WHERE e.id = ANY($1) AND {VISIBLE}"
+        "SELECT count(*) FROM entities e {ENTITY_STATS_JOIN}
+         WHERE e.id = ANY($1) AND {VISIBLE} AND {IN_CATALOG}"
     ))
     .bind(&ids)
     .fetch_one(&state.db)

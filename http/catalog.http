@@ -614,3 +614,52 @@ GET {{host}}/api/v1/catalog/search?kind=movie&kind=comic
         client.assert(response.body.code === "validation");
     });
 %}
+
+### Сезоны сериала: переключатель в шапке одним запросом
+GET {{host}}/api/v1/catalog/entities/arcane/seasons
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const items = response.body.items;
+        client.assert(Array.isArray(items), "items");
+        // Спецвыпуски (0) — в конце.
+        const numbers = items.map((s) => s.number);
+        client.assert(numbers.filter((n) => n === 0).length <= 1, numbers.join());
+        if (items.length) {
+            client.assert("rating" in items[0] && "my_rating" in items[0], "rating fields");
+            client.global.set("season_slug", items[0].slug);
+        }
+    });
+%}
+
+### Карточка сезона: сериал в шапке и серии
+GET {{host}}/api/v1/catalog/seasons/{{season_slug}}
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.kind === "season", response.body.kind);
+        client.assert(Array.isArray(response.body.episodes), "episodes");
+    });
+%}
+
+### Серии сезона: по умолчанию 50 на страницу
+GET {{host}}/api/v1/catalog/seasons/{{season_slug}}/episodes
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.limit === 50, `limit ${response.body.limit}`);
+    });
+%}
+
+### Сезонов нет в разделе «Сериалы»
+GET {{host}}/api/v1/catalog/entities?kind=season
+
+> {%
+    client.test("пусто", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        client.assert(response.body.total === 0, `total ${response.body.total}`);
+    });
+%}

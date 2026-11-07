@@ -25,7 +25,7 @@
 | Колонка | Тип | Ограничения | Описание |
 |---|---|---|---|
 | `id` | `uuid` | PK | Идентификатор |
-| `kind` | `entity_kind` | NOT NULL | Тип: `movie`, `series`, `book`, `game`, `painting` |
+| `kind` | `entity_kind` | NOT NULL | Тип: `movie`, `series`, `season`, `book`, `game`, `painting` |
 | `slug` | `text` | NOT NULL, UNIQUE | Человекочитаемый id для URL: `dune-2021` |
 | `title` | `text` | NOT NULL | Название (локализованное) |
 | `original_title` | `text` | | Оригинальное название |
@@ -34,6 +34,7 @@
 | `cover_url` | `text` | | Постер или обложка |
 | `cover_width`, `cover_height` | `int` | > 0 | Размеры файла обложки в пикселях: карточка получает точное `aspect-ratio` до загрузки картинки (стена картин не перестраивается на лету). Неизвестны — `NULL`. Миграция `20261126100000_entity_cover_size.sql`. Пишет тот, кто кладёт `cover_url`: импорт картин (размер превью Commons) и админка (`cover_width` + `cover_height` только вместе с `cover_url`, иначе 400; `cover_url` без них их стирает — от другого файла они неверны). `make media`, подобрав новый постер, тоже обнуляет |
 | `metadata` | `jsonb` | NOT NULL, default `{}` | Поля, специфичные для типа (см. ниже) |
+| `parent_id` | `uuid` | → `entities(id)` ON DELETE CASCADE | Родительская сущность: у сезона (`kind = season`) — его сериал, у остальных `NULL`. Миграция `20261201100000_catalog_seasons.sql`, индекс `entities_parent_idx` (частичный, `WHERE parent_id IS NOT NULL`). Пишут админка (`series_slug` в `POST`/`PATCH /admin/entities`) и импорт сезонов; читают `GET /entities/{slug}/seasons` и `GET /seasons/{slug}` |
 | `external_ids` | `jsonb` | NOT NULL, default `{}` | Id во внешних сервисах: `{"tmdb": 550}`. Новый сервис — новый ключ, без новой таблицы. Индекс `entities_external_tmdb_uq` — UNIQUE `((external_ids->>'tmdb')::int)` WHERE `external_ids ? 'tmdb'` (запросы пишут то же условие). Игры: `{"steam": 292030}`, индекс `entities_external_steam_uq` — UNIQUE `((external_ids->>'steam')::int)` WHERE `external_ids ? 'steam'` (миграция `20261029100000_external_steam.sql`, пишет `scripts/games-import/steam_games.py`), он же и `wikidata_games.py` из `P1733`). Игры из Wikidata: `{"wikidata": "Q17452"}`, тот же индекс `entities_external_wikidata_uq`, что у картин. Сериалы из TMDB: `{"tmdb_tv": 1396}`, индекс `entities_external_tmdb_tv_uq` (миграция `20261127100000_external_tmdb_tv.sql`) — **не** `tmdb`: id фильмов и сериалов у TMDB независимы, а `external_ids ? 'tmdb'` по всему каталогу значит «фильм из TMDB» (видимость, «Пересобрать активные», архив). Пишут импорт (`merge.py`), сборка горячего слоя и возврат из архива; читают VISIBLE, «Обновить рейтинги», «Пересобрать активные», `nexus archive dump`, demote. Миграция `20261027100000_external_ids.sql` (перенос из `entity_tmdb`) |
 | `active` | `boolean` | NOT NULL, default `true` | Видна на сайте. Миграция `20261016100000_entity_active.sql`, см. ниже |
 | `active_manual` | `boolean` | NOT NULL, default `false` | `active` переключали в админке (`PATCH`, `POST` с `active`) или это сид, привязанный импортом: «Пересобрать активные» не трогает. Миграция `20261017100000_entity_tmdb.sql` |
@@ -75,6 +76,10 @@ TMDB с русским названием (121 371) и 500 самых попул
 | | `age_rating` | строка до 16 символов: `PG-13`, `16+` |
 | | `popularity`, `vote_count` | устарели (теперь `entity_stats`): принимаются и отбрасываются |
 | | `trailers` | трейлер: до 5 источников по приоритету, `[{"provider": "youtube", "id": "n9xhJrPXop4"}, {"provider": "rutube", "id": "0ab1…"}]`. `provider` — `youtube` (id 11 символов) или `rutube` (32 hex). На входе можно дать и просто ссылку на видео (`youtube.com/watch?v=…`, `youtu.be/…`, `rutube.ru/video/…/`, `/embed/…`) — провайдер и id определятся сами; другие сайты — 400. Повторы убираются |
+| `season` | `number` | целое 0–10000, **обязательное** (единственное обязательное поле `metadata` во всём каталоге): номер сезона, 0 — спецвыпуски |
+| | `episode_count` | целое 1–100000 |
+| | `status` | как у `series` |
+| | `finale_date` | дата выхода последней вышедшей серии (`YYYY-MM-DD`); премьера — `release_date` сущности |
 | `series` | `seasons` | целое 1–10000 |
 | | `episodes` | целое 1–100000 |
 | | `status` | `ongoing` (идёт), `ended` (завершён), `canceled` (закрыт) |
@@ -111,6 +116,48 @@ https://query.wikidata.org/sparql`; для всего каталога — не�
 **Новый тип** (комиксы, музыка): миграция `ALTER TYPE entity_kind ADD VALUE '...'`, вариант в
 `EntityKind` (`models.rs`), структура и ветка `validate` в `metadata.rs`.
 
+### Сезоны и серии ✅ — `entities (kind = season)` + `episodes`
+
+Миграция `20261201100000_catalog_seasons.sql`.
+
+**Сезон — сущность, а не вложенный объект.** Строка `entities` с `kind = 'season'`, своим slug'ом
+(`arcane-season-2` = `{slug сериала}-season-{n}`, дальше живёт самостоятельно и не меняется при
+переименовании сериала) и сериалом в `parent_id`. Так оценка, рецензия, лайк, отметка, коллекция,
+комментарии и жалобы работают по `/api/v1/social/entities/{slug}` **без единой новой социальной
+ручки**; вложенным объектом под сезон пришлось бы дублировать весь социальный слой со своим
+хранением голосов и своей модерацией. Оценка сериала и оценки сезонов не смешиваются — это разные
+строки `entities` и разные сводки в `entity_ratings`.
+
+Сезоны **не попадают** в списки каталога и в индекс поиска: условие `IN_CATALOG`
+(`e.kind <> 'season'`, `models.rs`) стоит в `GET /entities` (публичная ветка; админский список
+сезоны показывает — их надо находить и править), в `search::fill`, `update_entities` и счётчике
+`index_entities`. В разделе «Сериалы» должен быть «Аркейн», а не «Аркейн, сезон 1» и «Аркейн,
+сезон 2». По прямому slug'у сезон открывается (`GET /seasons/{slug}`) и индексируется поисковыми
+системами: своя страница `/series/arcane/season-2` (ISR — `publish::season_path`, вместе с ней
+пересобирается страница сериала: в её шапке переключатель сезонов).
+
+### `episodes` ✅ — серии сезона
+
+Серия — **не** сущность: своего slug'а, рецензий и подборок у неё нет (поднимем до сущности тем
+же способом, что сезон, если понадобится обсуждение серий). Видео у нас нет и не будет, поэтому
+полей «просмотрено», прогресса и позиции в серии здесь нет даже на будущее.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK `uuidv7()` | |
+| `season_id` | `uuid` | NOT NULL → `entities(id)` CASCADE | Сезон |
+| `number` | `int` | NOT NULL, ≥ 0 | Номер в сезоне; UNIQUE `(season_id, number)` — повторный импорт обновляет строку |
+| `title`, `original_title` | `text` | до 300 символов (API) | |
+| `overview` | `text` | до 2000 символов (API) | Обрезать на бэке не надо — фронтенд покажет сколько влезет |
+| `air_date` | `date` | | Невышедшие серии тоже отдаются: карусель покажет их неактивными с датой |
+| `runtime_minutes` | `int` | > 0, API 1–10000 | Целые минуты: источник, отдающий секунды, округляет при импорте |
+| `still_url` | `text` | `http(s)://` | **Кадр из серии, 16:9** (`still_path` у TMDB), не постер сериала и не постер сезона. Кадра нет — `NULL`, заглушку (постер сезона, иначе сериала) подставляет фронтенд: молча класть постер сюда нельзя, пропорции 2:3 против 16:9 |
+| `still_width`, `still_height` | `int` | > 0, API 1–100000, только вдвоём и только с `still_url` | Размеры этой копии кадра: карточка держит точное `aspect-ratio` до загрузки, карусель не дёргается. Пишутся один раз при импорте |
+| `external_ids` | `jsonb` | NOT NULL `{}` | |
+| `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер `episodes_set_updated_at` |
+
+Оценок у серий нет (они не сущности): «оценка сезона важнее оценки серии».
+
 ### Сериалы ✅ — `scripts/catalog-import/series_tmdb.py`
 
 Топ сериалов TMDB (`kind = series`). Отдельный маленький скрипт, а не ветка конвейера фильмов
@@ -145,6 +192,30 @@ Wikidata, здесь — сотня-другая прямыми запросам
   `trending`, `new`, `title`.
 - Повторный прогон безопасен: записанные id пропускаются (и не запрашиваются у TMDB). После
   прогона — `scripts/index-entities.sh <slug'и>` (скрипт печатает готовую команду).
+
+### Сезоны сериалов ✅ — `scripts/catalog-import/series_seasons_tmdb.py`
+
+Дополняет `series_tmdb.py`: тот заводит сериалы, этот — их сезоны и серии. Берёт из БД сериалы с
+`external_ids.tmdb_tv` (`--slug` — только эти, `--limit` — сколько обойти) и на каждый делает
+`GET /tv/{id}` (список номеров сезонов), затем `GET /tv/{id}/season/{n}` — один запрос отдаёт
+сезон целиком со всеми сериями. Второй запрос на сезон в `en-US` — ради `original_title` и
+запасных названий/описаний: у TMDB `name` сезона и серии локализованы, оригинала в ответе нет.
+
+- **Сезон**: `title` (`name` ru, иначе en, иначе «Сезон N» / «Спецвыпуски»), `original_title`
+  (en, если отличается), `description` (`overview`), `release_date` — `air_date` сезона (премьера),
+  `cover_url` — постер `image.tmdb.org/t/p/w780` + `cover_width`/`cover_height` этой копии
+  (из `append_to_response=images`), `parent_id` — сериал, `metadata` — `number`, `episode_count`,
+  `status` (все серии вышли → `ended`, иначе статус сериала), `finale_date` (самая поздняя
+  `air_date` среди уже вышедших серий), `external_ids = {"tmdb_tv_season": "1399:2"}`.
+- **Серии**: `number`, `title`, `original_title` (en), `overview`, `air_date`,
+  `runtime_minutes` (`runtime` TMDB, уже минуты), `still_url` — `still_path` в `w780` и размеры
+  этой копии.
+- Повторный прогон безопасен: сезон ищется по `parent_id` и номеру, серия — по `(season_id,
+  number)`, обе строки обновляются на месте. Без `--refresh` уже заведённый сезон не
+  перезаписывается, но серии досылаются (у идущего сезона их прибавляется). Серии, которых
+  больше нет у TMDB, не удаляются — снять их можно `PUT /admin/seasons/{id}/episodes`.
+- После прогона `scripts/index-entities.sh` **не нужен** (сезоны не индексируются) — нужна
+  пересборка статики затронутых сериалов, их список скрипт печатает.
 
 ### Картины ✅ — `scripts/catalog-import/paintings_wikidata.py`
 
@@ -601,6 +672,7 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 | Что | Где | Назначение |
 |---|---|---|
 | `PersonLikes` (реализует **`social`**: `PgPersonLikes`) | `shared::directory`, `state.person_likes` | Лайки людей наоборот — `catalog` читает чужие данные: `counts(ids)` и `mine(user, ids)` для `likes_count` и `liked` в `PersonDetail`. Таблица `person_likes` принадлежит `social`, JOIN к ней из каталога был бы нарушением границ |
+| `UserRatings` (реализует **`social`**: `PgUserRatings`) | `shared::directory`, `state.user_ratings` | Свои оценки зрителя: `mine(user, entity_ids)` → `HashMap<Uuid, i16>` (рецензии без оценки не считаются). Нужен таблеткам сезонов в шапке сериала: на каждой сразу `9.5 ★ · 6 серий` и своя оценка, второго запроса к `social` нет. Таблица `reviews` принадлежит `social` — JOIN к ней из каталога был бы нарушением границ |
 | `StudioDirectory` (реализует `catalog`: `PgStudioDirectory`) | `shared::directory`, `state.studios` | Студии для других модулей: `by_slug`, `by_ids` → `StudioRef` `{id, slug, name, logo_url}`. Скрытых студий нет, поэтому фильтра видимости тоже нет. По нему `social` держит комментарии к странице студии |
 | `EntityDirectory` (реализует `catalog`: `PgEntityDirectory`) | `shared::directory`, `state.entities` | `social`/другие читают сущности без JOIN к `entities`. `by_slug`, `by_slugs` — только активные (адрес пришёл с сайта: скрытая → 404), `by_ids` — все (уже сохранённое: коллекции, ленты, интересы не теряют элементы); `overviews(ids)` — краткие описания (`entities.description` без HTML, до 1000 символов по границе предложения или слова, `catalog::directory::overview`) одним запросом — для детали коллекции; `kind_counts(ids)` → `HashMap<String, i64>` — сколько сущностей каждого типа (`movie`, `series`, `book`, `game`) среди переданных, одним `GROUP BY kind`: разрез аналитики профиля в `social` без JOIN к `entities` |
 | `EntityRatings` (реализует `catalog`: `PgEntityRatings`) | `shared::directory`, `state.ratings` | `social` пишет сводки оценок для сортировок `popular`/`rating` |
@@ -1418,6 +1490,9 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | DELETE | `/admin/awards/nominations/{id}` | admin | Удалить номинацию → 204 |
 | GET | `/studios/{slug}` | Страница студии ([«Студии»](#студии-)): `slug`, `name`, `logo_url`, `origin_country`, `headquarters`, `homepage`, `description`, `parent` (`{slug, name, logo_url}` или `null`), `entities_count`. Данные компании — из TMDB при первом открытии. Фильмы — `GET /entities?studio={slug}`. 404 — нет студии |
 | GET | `/entities/{slug}` | Карточка: все поля (с `active`), `studios` (`[{slug, name, logo_url}]` по порядку `metadata.studios`), теги, участники в порядке титров (`position`), `related` (активные). Из PostgreSQL. Скрытая — 404; с токеном админа — 200 (и скрытые связанные); неверный токен — 401 |
+| GET | `/entities/{slug}/seasons` | Сезоны сериала одним ответом (переключатель `Весь сериал · 1 сезон · 2 сезон`): `{items: [{id, slug, number, title, original_title, premiere_date, finale_date, episode_count, status, cover_url, cover_width, cover_height, rating: {value, count}, my_rating}]}`, без `total` — их всегда немного. Порядок по номеру, спецвыпуски (0) в конце. `rating` — сводка `entity_ratings` (среднее до 0,1), `my_rating` — своя оценка 1–10 через `UserRatings`; гостю `null`. Одним запросом на всю шапку: второго запроса за рейтингами быть не должно. Гостю `Cache-Control: public, s-maxage=600`, вошедшему `private, no-store` (в ответе его оценка). Сериал не найден или скрыт — 404 (админу видны и скрытые сезоны); неверный токен — 401 |
+| GET | `/seasons/{slug}` | Карточка сезона: всё, что у сущности (`metadata` — `SeasonMetadata`), `studios`, теги, участники, `related`, `awards`, плюс `series` (`EntitySummary` сериала — шапка и хлебные крошки; родителя нет — `null`), `rating`, `my_rating` и `episodes` (до 100 серий; длиннее — `/seasons/{slug}/episodes`). Невидимый — 404 для всех, кроме админа. Социальное (оценка, рецензия, лайк, отметка, коллекция) — существующими ручками `social` по этому же slug'у |
+| GET | `/seasons/{slug}/episodes` | Серии сезона: `Page<Episode>`, `?limit=1..100&offset=` (по умолчанию **50** — в сезоне редко больше), порядок по номеру. `Episode`: `id`, `number`, `title`, `original_title`, `overview`, `air_date`, `runtime_minutes`, `still_url`, `still_width`, `still_height`, `created_at`, `updated_at`. Невышедшие серии отдаются тоже. Оценок у серий нет. Кэш — как у `/entities/{slug}/seasons`. 404 — нет сезона или он скрыт |
 | GET | `/entities/{slug}/neighbors` | Соседи работы в той же выдаче, что `GET /search` (2026-11-02): те же фильтры и `sort` (`limit`/`offset` игнорируются) → `{prev, next}` — `EntitySummary` или `null` на краю ряда. Работы нет в этой выдаче — оба `null`, а не 404. `sort=random` — 400. Позиции и длины ряда нет ([«Соседи работы»](#поиск-meilisearch-)) |
 | GET | `/entities/{slug}/similar` | Похожие активные (Meilisearch: тот же тип, хотя бы один общий тег, по баллу «Рекомендуемые», затем новее): `?limit=` 1–24 (по умолчанию 12) → `Page<EntitySummary>` ([«Похожие»](#похожие-)); у скрытой — 404; 503 — Meilisearch недоступен |
 | GET | `/people` | Список публичных людей по алфавиту (с активной работой или без работ), `q` — подстрока в имени |
@@ -1470,10 +1545,11 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | Метод | Путь | Что делает |
 |---|---|---|
 | GET | `/admin/entities` | Все сущности, включая скрытые: фильтры и `sort` как у `/entities` плюс `q` (подстрока в названии или оригинальном, без учёта регистра, по БД) и `active=true\|false` → `Page<AdminEntitySummary>` (`EntitySummary` + `active`) |
-| POST | `/admin/entities` | Создать сущность (можно сразу с `tags`: slug'и; `active`, по умолчанию `true`) → 201, карточка |
-| PATCH | `/admin/entities/{id}` | Изменить: переданные поля заменяются, `null` очищает необязательное, `metadata` заменяется целиком, `active` включает или скрывает (и ставит `active_manual`). `kind` не меняется |
+| POST | `/admin/entities` | Создать сущность (можно сразу с `tags`: slug'и; `active`, по умолчанию `true`) → 201, карточка. `series_slug` — сериал сезона (`kind = season`): обязателен для сезона, запрещён остальным типам и указывает только на сериал — иначе 400. Пишется в `parent_id` |
+| PATCH | `/admin/entities/{id}` | Изменить: переданные поля заменяются, `null` очищает необязательное, `metadata` заменяется целиком, `active` включает или скрывает (и ставит `active_manual`). `kind` не меняется. `series_slug` переносит сезон к другому сериалу (не передан — родитель прежний) |
 | PATCH | `/admin/entities/{id}/stream` | То же, ход публикации потоком `text/event-stream` ([«Публикация»](#публикация-правок-)) |
-| DELETE | `/admin/entities/{id}` | Удалить (каскадно теги, участники, рецензии, элементы коллекций) → 204 |
+| DELETE | `/admin/entities/{id}` | Удалить (каскадно теги, участники, рецензии, элементы коллекций; у сериала — его сезоны, у сезона — его серии) → 204 |
+| PUT | `/admin/seasons/{id}/episodes` | Заменить серии сезона целиком (путь импорта: TMDB отдаёт сезон целиком, на 22 серии руками никто не пойдёт): `{"episodes": [{number, title?, original_title?, overview?, air_date?, runtime_minutes?, still_url?, still_width?, still_height?}]}` → `[Episode]`. Строк, которых нет в списке, не остаётся; пустой список снимает все серии. `number` 0–10000 и уникален в сезоне (повтор — 400), серий до 1000, `overview` до 2000, `runtime_minutes` 1–10000, размеры кадра — только вдвоём и только с `still_url`. Сущность не сезон — 400, нет её — 404 |
 | PUT | `/admin/entities/{id}/tags` | Заменить набор тегов: `{"tags": ["sci-fi"]}` |
 | POST | `/admin/entities/{id}/credits` | Добавить участника: `person_id`, `role`, `character_name`, `position` → 201 |
 | DELETE | `/admin/entities/{id}/credits/{credit_id}` | Удалить участника (`credits[].id` из карточки) → 204 |
@@ -1860,6 +1936,8 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `directory.rs` | `PgEntityDirectory`: справочник сущностей для других модулей (`shared::directory::EntityDirectory`) |
 | `metadata.rs` | Схемы `metadata` по типам и их проверка (у книг — `LibgenSource`, `LibgenFile`) |
 | `validate.rs` | Проверка slug, строк, URL, ролей, размеров обложки (`cover_size`); UNIQUE → 409 |
+| `seasons.rs` | Сезоны и серии: `SeasonSummary`/`SeasonList`/`SeasonDetail`/`Episode`/`RatingValue`, `GET /entities/{slug}/seasons`, `GET /seasons/{slug}`, `GET /seasons/{slug}/episodes`, сводки `ratings_of` и свои оценки `my_ratings` (через `UserRatings`), `series_id_by_slug` для админки |
+| `admin/episodes.rs` | `PUT /admin/seasons/{id}/episodes`: проверка серий и замена списка целиком |
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение (`tags.rs` — `TAG_COUNT_COLUMNS`: `by_kind` подзапросом по `tag_kind_counts`, фильтр `?entity_kind=`) |
 | `search.rs` | Индекс `entities` (`SearchDoc`, `entity_settings`), `update_index` (сущности и люди), перестройка обоих индексов с версиями (в т.ч. по расписанию), точечная индексация `POST /admin/search/entities` (`index_entities`), `GET /search` (фильтры — `filters_of`, общее тело запроса — `request_body`, `sort=random` — `random_window`), соседи `GET /entities/{slug}/neighbors` (`neighbors`), подсказки `GET /search/studios`, `GET /search/publishers`, `GET /search/museums`, `GET /search/tags`, `GET /search/countries` (общий `facet_hits`) |
 | `studios.rs` | Студии: `sync` (из `metadata.studios` и переданных `Company`), `refs` (ссылки в карточке), `GET /studios/{slug}` (данные компании из TMDB при первом открытии), `metadata_filter` для `GET /entities?studio=` |
@@ -1879,7 +1957,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `admin/` | Админские эндпоинты (`relations.rs` — связанные произведения, `banners.rs` — баннеры, `awards.rs` — премии, церемонии, категории и номинации, включая `PUT .../nominations` для импорта) |
 | `media/` | `nexus media` (`media/pick.rs` — фильтр Rutube) |
 
-Тесты — `app/tests/catalog.rs` (данные — `app/tests/fixtures/catalog.sql`), архив —
+Сезоны и серии — `app/tests/seasons.rs` (на тех же фикстурах). Тесты — `app/tests/catalog.rs` (данные — `app/tests/fixtures/catalog.sql`), архив —
 `app/tests/archive.rs` (свой каталог индекса на тест). CLI `nexus archive` и `nexus books` — `app/src/main.rs`, импорт книг — `app/tests/books.rs`. Тесты поиска ходят в
 настоящий Meilisearch из `make up` (в CI — сервис в `ci.yml`), у каждого теста свой префикс
 индексов. Остальные тесты идут с выключенным поиском. Живые проверки — `http/catalog.http`.

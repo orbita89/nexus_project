@@ -5402,6 +5402,189 @@
         ]
       }
     },
+    "/api/v1/social/entities/{slug}/note": {
+      "get": {
+        "tags": [
+          "notes"
+        ],
+        "summary": "Своя заметка о произведении.",
+        "operationId": "get_own_note",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Заметка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Note"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена или заметки нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "notes"
+        ],
+        "summary": "Написать или заменить свою заметку целиком. Одна заметка на произведение.",
+        "operationId": "put_note",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutNote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Заметка сохранена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Note"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пустой или слишком длинный текст",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "notes"
+        ],
+        "summary": "Удалить свою заметку.",
+        "operationId": "delete_note",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug сущности",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "dune-2021"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена или заметки нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/entities/{slug}/rating": {
       "get": {
         "tags": [
@@ -8173,6 +8356,74 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Page_MarkedEntity"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/users/me/notes": {
+      "get": {
+        "tags": [
+          "notes"
+        ],
+        "summary": "Свои заметки, новые сверху: вкладка «Заметки» в личном кабинете. Чужих заметок нет нигде.",
+        "operationId": "list_own_notes",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница заметок",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_NoteWithEntity"
                 }
               }
             }
@@ -11518,6 +11769,66 @@
           }
         }
       },
+      "Note": {
+        "type": "object",
+        "description": "Личная заметка о произведении: видит только автор. Оценка живёт в рецензии и публична.",
+        "required": [
+          "id",
+          "body",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "example": "Пересмотреть перед второй частью"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "NoteWithEntity": {
+        "type": "object",
+        "description": "Заметка в своём списке: то же плюс произведение, к которому она написана.",
+        "required": [
+          "entity",
+          "id",
+          "body",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "example": "Пересмотреть перед второй частью"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entity": {
+            "$ref": "#/components/schemas/EntityRef"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "Page_Collection": {
         "type": "object",
         "description": "Страница списка.",
@@ -12160,6 +12471,69 @@
                 },
                 "kind": {
                   "$ref": "#/components/schemas/MarkKind"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_NoteWithEntity": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Заметка в своём списке: то же плюс произведение, к которому она написана.",
+              "required": [
+                "entity",
+                "id",
+                "body",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "body": {
+                  "type": "string",
+                  "example": "Пересмотреть перед второй частью"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "entity": {
+                  "$ref": "#/components/schemas/EntityRef"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
                 }
               }
             }
@@ -13144,6 +13518,15 @@
             "$ref": "#/components/schemas/MarkCounts",
             "description": "Отметки «посмотрю позже» и «просмотрено»."
           },
+          "notes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Свои личные заметки. Приватны: чужому и админу — `null`, число видит только сам автор.",
+            "example": 7
+          },
           "ratings": {
             "$ref": "#/components/schemas/ProfileRatings",
             "description": "Оценки: среднее, сколько их и распределение по 1–10."
@@ -13178,6 +13561,20 @@
             ],
             "format": "int32",
             "description": "Новый пункт без `position` встаёт в конец; у существующего без `position` порядок не меняется."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PutNote": {
+        "type": "object",
+        "description": "Своя заметка: заменяется целиком. Пустой текст — 400, удаление через `DELETE`.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "example": "Пересмотреть перед второй частью"
           }
         },
         "additionalProperties": false

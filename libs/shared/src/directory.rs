@@ -298,6 +298,17 @@ pub trait PersonLikes: Send + Sync {
     async fn mine(&self, user_id: Uuid, person_ids: &[Uuid]) -> AppResult<HashSet<Uuid>>;
 }
 
+/// Свои оценки пользователя. Реализует `social` (рецензии его), читает `catalog`: на таблетке
+/// сезона в шапке сериала стоит и средняя оценка, и своя — без второго запроса к `social`.
+///
+/// Сводки по сущностям каталог держит у себя (`entity_ratings`, их присылает
+/// [`EntityRatings`]); здесь — только «что поставил этот пользователь».
+#[async_trait]
+pub trait UserRatings: Send + Sync {
+    /// Оценки пользователя для этих сущностей, 1–10. Сущностей без его оценки в ответе нет.
+    async fn mine(&self, user_id: Uuid, entity_ids: &[Uuid]) -> AppResult<HashMap<Uuid, i16>>;
+}
+
 /// Все справочники разом: аргумент [`AppState::new`](crate::AppState::new).
 #[derive(Clone)]
 pub struct Directories {
@@ -311,4 +322,5 @@ pub struct Directories {
     pub awards: Arc<dyn AwardDirectory>,
     pub studios: Arc<dyn StudioDirectory>,
     pub person_likes: Arc<dyn PersonLikes>,
+    pub user_ratings: Arc<dyn UserRatings>,
 }

@@ -19,6 +19,7 @@ pub mod people_search;
 pub mod publish;
 pub mod ranking;
 pub mod search;
+pub mod seasons;
 pub mod studios;
 pub mod tags;
 pub mod tmdb;
@@ -33,6 +34,9 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(entities::list))
         .routes(routes!(entities::get))
         .routes(routes!(entities::similar))
+        .routes(routes!(seasons::list))
+        .routes(routes!(seasons::get))
+        .routes(routes!(seasons::episodes))
         .routes(routes!(search::neighbors))
         .routes(routes!(people::list))
         .routes(routes!(people::get))
@@ -59,6 +63,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::entities::set_tags))
         .routes(routes!(admin::entities::add_credit))
         .routes(routes!(admin::entities::delete_credit))
+        .routes(routes!(admin::episodes::put))
         .routes(routes!(admin::relations::put))
         .routes(routes!(admin::relations::delete))
         .routes(routes!(admin::people::create))

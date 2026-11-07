@@ -3,7 +3,7 @@
 //! `catalog` — не переносит в архив сущности с пользовательскими данными и не удаляет людей,
 //! нужных пользователям.
 
-use shared::directory::{async_trait, InterestDirectory, PersonLikes};
+use shared::directory::{async_trait, InterestDirectory, PersonLikes, UserRatings};
 use shared::AppResult;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -145,5 +145,36 @@ impl PersonLikes for PgPersonLikes {
         .await?
         .into_iter()
         .collect())
+    }
+}
+
+/// Свои оценки пользователя для `catalog` (`shared::directory::UserRatings`): таблица `reviews`
+/// наша, а таблетке сезона в шапке сериала нужна и своя оценка — одним запросом на всю шапку.
+pub struct PgUserRatings {
+    db: PgPool,
+}
+
+impl PgUserRatings {
+    pub fn new(db: PgPool) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl UserRatings for PgUserRatings {
+    async fn mine(&self, user_id: Uuid, entity_ids: &[Uuid]) -> AppResult<HashMap<Uuid, i16>> {
+        if entity_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // Рецензия без оценки (только текст) своей оценкой не считается.
+        let rows: Vec<(Uuid, i16)> = sqlx::query_as(
+            "SELECT entity_id, rating FROM reviews
+             WHERE user_id = $1 AND entity_id = ANY($2) AND rating IS NOT NULL",
+        )
+        .bind(user_id)
+        .bind(entity_ids)
+        .fetch_all(&self.db)
+        .await?;
+        Ok(rows.into_iter().collect())
     }
 }
