@@ -663,3 +663,35 @@ GET {{host}}/api/v1/catalog/entities?kind=season
         client.assert(response.body.total === 0, `total ${response.body.total}`);
     });
 %}
+
+### Фрагменты полотна: лента «Интересные детали»
+GET {{host}}/api/v1/catalog/entities/night-watch/fragments
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        for (const f of response.body) {
+            const c = f.crop;
+            // Кроп — доли исходника и целиком внутри полотна.
+            client.assert(c.x >= 0 && c.y >= 0, JSON.stringify(c));
+            client.assert(c.x + c.width <= 1.0000001, JSON.stringify(c));
+            client.assert(c.y + c.height <= 1.0000001, JSON.stringify(c));
+        }
+    });
+%}
+
+### Исходник для зума: отдельный файл и его размеры
+GET {{host}}/api/v1/catalog/entities/night-watch
+
+> {%
+    client.test("200", () => {
+        client.assert(response.status === 200, `got ${response.status}`);
+        const m = response.body.metadata;
+        // Фрагменты приходят прямо в карточке — второго запроса не надо.
+        client.assert(Array.isArray(response.body.fragments), "fragments");
+        if (m.image_url) {
+            client.assert(m.image_url !== response.body.cover_url, "исходник ≠ обложка");
+            client.assert(m.image_width > 0 && m.image_height > 0, "размеры исходника");
+        }
+    });
+%}

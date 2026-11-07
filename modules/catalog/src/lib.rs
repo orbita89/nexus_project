@@ -10,6 +10,7 @@ pub mod banners;
 pub mod books;
 pub mod directory;
 pub mod entities;
+pub mod fragments;
 pub mod jobs;
 pub mod media;
 pub mod metadata;
@@ -34,6 +35,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(entities::list))
         .routes(routes!(entities::get))
         .routes(routes!(entities::similar))
+        .routes(routes!(fragments::list))
         .routes(routes!(seasons::list))
         .routes(routes!(seasons::get))
         .routes(routes!(seasons::episodes))
@@ -64,6 +66,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::entities::add_credit))
         .routes(routes!(admin::entities::delete_credit))
         .routes(routes!(admin::episodes::put))
+        .routes(routes!(admin::fragments::put))
         .routes(routes!(admin::relations::put))
         .routes(routes!(admin::relations::delete))
         .routes(routes!(admin::people::create))

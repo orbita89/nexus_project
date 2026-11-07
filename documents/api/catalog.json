@@ -2109,6 +2109,97 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/entities/{id}/fragments": {
+      "put": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Заменить фрагменты полотна целиком.",
+        "operationId": "set_entity_fragments",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id картины",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFragments"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Фрагменты полотна",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Fragment"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля, кроп вне полотна или не картина",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Сущность не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/entities/{id}/relations": {
       "put": {
         "tags": [
@@ -4278,6 +4369,68 @@
         ]
       }
     },
+    "/api/v1/catalog/entities/{slug}/fragments": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Фрагменты сущности в порядке `position`.",
+        "operationId": "list_entity_fragments",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug картины",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "night-watch"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Фрагменты полотна",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Fragment"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Неверный токен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Не найдена или скрыта",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/entities/{slug}/neighbors": {
       "get": {
         "tags": [
@@ -5863,6 +6016,24 @@
         ],
         "description": "Сущность в админском списке: как в публичном, плюс флаг активности."
       },
+      "AnalysisPoint": {
+        "type": "object",
+        "required": [
+          "title",
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "example": "Девочка с курицей на поясе — эмблема гильдии…"
+          },
+          "title": {
+            "type": "string",
+            "example": "Тайна золотой девочки"
+          }
+        },
+        "additionalProperties": false
+      },
       "ArchiveDoc": {
         "type": "object",
         "description": "Документ архива — «скелет» фильма: то, что нужно для поиска, страницы фильма в архиве и\nвозврата в каталог.",
@@ -7151,6 +7322,46 @@
         },
         "additionalProperties": false
       },
+      "Crop": {
+        "type": "object",
+        "description": "Прямоугольник на исходнике в долях его ширины и высоты (0–1), а не в пикселях: исходник\nмогут перезалить в другом разрешении, и доли это переживут.",
+        "required": [
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "properties": {
+          "height": {
+            "type": "number",
+            "format": "double",
+            "example": 0.12,
+            "maximum": 1,
+            "minimum": 0
+          },
+          "width": {
+            "type": "number",
+            "format": "double",
+            "example": 0.09,
+            "maximum": 1,
+            "minimum": 0
+          },
+          "x": {
+            "type": "number",
+            "format": "double",
+            "example": 0.412,
+            "maximum": 1,
+            "minimum": 0
+          },
+          "y": {
+            "type": "number",
+            "format": "double",
+            "example": 0.168,
+            "maximum": 1,
+            "minimum": 0
+          }
+        }
+      },
       "DemoteRequest": {
         "type": "object",
         "required": [
@@ -7514,7 +7725,8 @@
               "tags",
               "credits",
               "related",
-              "awards"
+              "awards",
+              "fragments"
             ],
             "properties": {
               "awards": {
@@ -7529,6 +7741,13 @@
                 "items": {
                   "$ref": "#/components/schemas/EntityCredit"
                 }
+              },
+              "fragments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Fragment"
+                },
+                "description": "Фрагменты полотна в порядке `position` (только у картин, у остальных типов — пусто):\nлента «Интересные детали полотна». Их мало и нужны они сразу, поэтому приходят прямо в\nкарточке — второго запроса не надо."
               },
               "related": {
                 "type": "array",
@@ -7866,6 +8085,75 @@
             "minimum": 0
           }
         }
+      },
+      "Fragment": {
+        "type": "object",
+        "description": "Деталь полотна со своим кропом.",
+        "required": [
+          "id",
+          "title",
+          "crop",
+          "position"
+        ],
+        "properties": {
+          "crop": {
+            "$ref": "#/components/schemas/Crop"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "В глубине толпы, между знаменем и шляпой, видно лицо самого Рембрандта."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Порядок рассказа: детали идут по смыслу, а не слева направо.",
+            "example": 3
+          },
+          "title": {
+            "type": "string",
+            "example": "Скрытый автопортрет"
+          }
+        }
+      },
+      "FragmentInput": {
+        "type": "object",
+        "required": [
+          "title",
+          "crop"
+        ],
+        "properties": {
+          "crop": {
+            "$ref": "#/components/schemas/Crop",
+            "description": "Прямоугольник в долях исходника: `x + width` и `y + height` не больше 1."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "До 600 символов."
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Порядок рассказа; не передан — по порядку в списке."
+          },
+          "title": {
+            "type": "string",
+            "example": "Скрытый автопортрет"
+          }
+        },
+        "additionalProperties": false
       },
       "GameMetadata": {
         "type": "object",
@@ -9232,10 +9520,43 @@
           }
         }
       },
+      "PaintingAnalysis": {
+        "type": "object",
+        "description": "Разбор картины. Озвучки здесь нет намеренно: кнопка «Слушать разбор» без звука хуже, чем её\nотсутствие. Понадобится — рядом встанет одно поле `audio_url`.",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AnalysisPoint"
+            },
+            "description": "Тезисы-символы: до 10, `title` до 120 символов, `text` до 600."
+          },
+          "text": {
+            "type": "string",
+            "description": "Связный текст с абзацами, до 10 000 символов. Обычный текст, не HTML: чужую разметку в\nстраницу мы не вставляем.",
+            "example": "Полотно заказала стрелковая рота…"
+          }
+        },
+        "additionalProperties": false
+      },
       "PaintingMetadata": {
         "type": "object",
         "description": "Поля картины. Художник — не здесь, а в титрах (`entity_credits`, роль `artist`): у него своя\nстраница и фильтр поиска, как у режиссёра. Год создания — `entities.release_date`.",
         "properties": {
+          "analysis": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PaintingAnalysis",
+                "description": "Разбор картины: блок «Смысл и анализ». Не то же, что `trivia` — там список любопытных\nфактов, здесь связный текст и тезисы-символы."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "awards": {
             "type": [
               "array",
@@ -9264,6 +9585,41 @@
             "example": 77.0,
             "maximum": 10000,
             "minimum": 0.1
+          },
+          "iiif_base": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Базовый адрес IIIF Image API, если источник его отдаёт (Рейксмюсеум, Лувр, Метрополитен,\nGoogle Arts). Из него фронтенд собирает и тайлы глубокого зума, и кроп фрагмента\n(`{iiif_base}/{x},{y},{w},{h}/600,/0/default.jpg`): режет и хранит куски сервер IIIF, не\nмы. Хвостовой `/` отбрасывается. Есть IIIF — `image_url` можно не заполнять.",
+            "example": "https://iiif.rijksmuseum.nl/public/SK-C-5"
+          },
+          "image_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "example": 5544,
+            "minimum": 0
+          },
+          "image_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Исходник высокого разрешения — тот, по которому работает зум и считаются кропы\nфрагментов. Не `cover_url`: та обложка шириной 1000 px нужна выдаче, а кроп\n0.09 × 0.12 по ней — каша из двенадцати пикселей. Разумный предел по длинной стороне —\n2–4 тыс. px, иначе телефон файл не откроет.",
+            "example": "https://upload.wikimedia.org/.../night-watch.jpg"
+          },
+          "image_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Размеры этого самого файла в пикселях, 1–100000: принимаются только вдвоём и только\nвместе с `image_url`. По ним фронтенд переводит доли кропа в пиксели.",
+            "example": 6720,
+            "minimum": 0
           },
           "museum": {
             "type": [
@@ -10281,6 +10637,22 @@
               "$ref": "#/components/schemas/EpisodeInput"
             },
             "description": "Серии сезона целиком: присланный список заменяет текущий. Пустой — снять все серии."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetFragments": {
+        "type": "object",
+        "required": [
+          "fragments"
+        ],
+        "properties": {
+          "fragments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FragmentInput"
+            },
+            "description": "Фрагменты целиком: присланный список заменяет текущий. Пустой — снять все."
           }
         },
         "additionalProperties": false

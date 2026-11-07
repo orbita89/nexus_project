@@ -92,7 +92,11 @@ TMDB с русским названием (121 371) и 500 самых попул
 | `game` | `platforms` | до 30 строк по 50 символов: `["pc", "ps5", "switch"]` |
 | | `developer`, `publisher` | строки до 200 символов |
 | | `trailers` | как у `movie` |
-| `painting` | `technique` | строка до 200 символов: «холст, масло» |
+| `painting` | `image_url` | исходник высокого разрешения для зума и кропов фрагментов (`http(s)://`, до 2048). Не `cover_url`: обложка выдачи в 1000 px даёт кашу на кропе 0.09 × 0.12. Разумный предел — 2–4 тыс. px по длинной стороне |
+| | `image_width`, `image_height` | целые 1–100000, **только вдвоём и только с `image_url`** (иначе 400): по ним фронтенд переводит доли кропа в пиксели |
+| | `iiif_base` | базовый адрес IIIF Image API (`https://iiif.rijksmuseum.nl/public/SK-C-5`), хвостовой `/` отбрасывается. Из него фронтенд собирает тайлы зума и кроп фрагмента `{iiif_base}/{x},{y},{w},{h}/600,/0/default.jpg` — режет и хранит куски сервер IIIF. Есть он — `image_url` необязателен |
+| | `analysis` | разбор картины: `{"text": "…", "points": [{"title": "…", "text": "…"}]}`. `text` обязателен и не пуст, до 10 000 символов, обычный текст с абзацами (не HTML); `points` до 10, `title` до 120, `text` до 600, пустые — 400. Не то же, что `trivia` (там список фактов). **Озвучки нет намеренно**: `audio_url` не принимается (400), чтобы в интерфейсе не появилась кнопка «Слушать разбор», за которой тишина |
+| | `technique` | строка до 200 символов: «холст, масло» |
 | | `museum` | строка до 200 символов: где хранится; фильтр поиска `museum` |
 | | `city` | строка до 200 символов: город музея |
 | | `height_cm`, `width_cm` | число 0.1–10000, сантиметры (высота × ширина) |
@@ -115,6 +119,34 @@ https://query.wikidata.org/sparql`; для всего каталога — не�
 
 **Новый тип** (комиксы, музыка): миграция `ALTER TYPE entity_kind ADD VALUE '...'`, вариант в
 `EntityKind` (`models.rs`), структура и ветка `validate` в `metadata.rs`.
+
+### `entity_fragments` ✅ — фрагменты полотна
+
+Миграция `20261202100000_catalog_entity_fragments.sql`. Лента «Интересные детали полотна» на
+странице картины: «Скрытый автопортрет», «Аллегория гильдии».
+
+**Фрагмент — прямоугольник на исходнике, а не отдельно залитый файл.** С координатами фронтенд
+из той же ленты перелетает зумом к этому месту на самом холсте; в отдельных JPEG это не
+сохранить — их можно только показать. Фрагмент не сущность: ни оценок, ни рецензий, ни своей
+страницы у «золотой девочки» нет и не будет.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK `uuidv7()` | |
+| `entity_id` | `uuid` | NOT NULL → `entities(id)` CASCADE | Картина (только `kind = painting`, проверяет код) |
+| `title` | `text` | NOT NULL, API до 120 символов | |
+| `description` | `text` | API до 600 символов | |
+| `crop_x`, `crop_y` | `float8` | NOT NULL, 0–1 | Левый верхний угол в **долях** ширины и высоты исходника, не в пикселях: исходник перезальют в другом разрешении, и доли это переживут |
+| `crop_width`, `crop_height` | `float8` | NOT NULL, > 0 и ≤ 1 | Размеры прямоугольника в тех же долях |
+| | | `entity_fragments_crop_inside` | `x + width ≤ 1` и `y + height ≤ 1`: вылезший за край кроп IIIF-сервер молча обрежет, и фронтенд покажет не то место |
+| `position` | `int` | NOT NULL, default 0 | Порядок рассказа, как у титров: детали идут по смыслу, а не слева направо |
+| `created_at`, `updated_at` | `timestamptz` | NOT NULL | Триггер `entity_fragments_set_updated_at` |
+
+**Индекс:** `entity_fragments_entity_idx (entity_id, position, id)` — выбор и порядок одним
+индексом. До 20 фрагментов на картину (`fragments::MAX_FRAGMENTS`).
+
+Отдаются **прямо в карточке** (`EntityDetail.fragments`, `details()` читает их одной выборкой
+на пачку и только у картин): их мало, и нужны они сразу. Отдельный `GET` остаётся для админки.
 
 ### Сезоны и серии ✅ — `entities (kind = season)` + `episodes`
 
@@ -192,6 +224,28 @@ Wikidata, здесь — сотня-другая прямыми запросам
   `trending`, `new`, `title`.
 - Повторный прогон безопасен: записанные id пропускаются (и не запрашиваются у TMDB). После
   прогона — `scripts/index-entities.sh <slug'и>` (скрипт печатает готовую команду).
+
+### Исходники картин и IIIF ✅ — тот же `paintings_wikidata.py`
+
+Исходник для зума (`metadata.image_url`) — копия Commons около **3000 px** (`image_copies`:
+`imageinfo` с `iiurlwidth`, берётся `thumburl` — прямой адрес CDN без редиректа и без служебных
+`utm_*`). Запрошенную ширину MediaWiki округляет вверх до стандартной «корзины» (3000 → 3840) и
+отдаёт файл именно этой ширины, а `thumbwidth` оставляет запрошенным, поэтому `copy_of` читает
+ширину из самого адреса (`3840px-…`), а высоту считает по пропорциям оригинала: в базе должны
+лежать размеры того файла, который скачает браузер, иначе фрагменты получат чужие координаты.
+Файл у́же запрошенного — оригинал с его размерами. Обложка выдачи в 1000 px для кропов мала, а
+оригинал полотна бывает 60-мегабайтным JPEG, который телефон не откроет.
+
+`iiif_base` — из манифеста IIIF в Wikidata (**P6108**): `iiif_bases` читает заявление, скачивает
+манифест и достаёт `service` первого изображения (`@id` у Presentation 2, `id` у Presentation 3),
+хвостовой `/` отбрасывается. Манифест не открылся или без сервиса — остаётся только `image_url`.
+
+Обычный прогон пишет всё это сразу; у записанных раньше картин дозаполняет
+`--fill-images` (`--fill-images --all` — перечитать у всех): имя файла берётся из `cover_url`,
+id Wikidata — из `external_ids`.
+
+Координаты фрагментов и разбор машиной не заполняются — их пишет человек через
+`PUT /admin/entities/{id}/fragments` и `metadata.analysis`.
 
 ### Сезоны сериалов ✅ — `scripts/catalog-import/series_seasons_tmdb.py`
 
@@ -1492,6 +1546,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | DELETE | `/admin/awards/nominations/{id}` | admin | Удалить номинацию → 204 |
 | GET | `/studios/{slug}` | Страница студии ([«Студии»](#студии-)): `slug`, `name`, `logo_url`, `origin_country`, `headquarters`, `homepage`, `description`, `parent` (`{slug, name, logo_url}` или `null`), `entities_count`. Данные компании — из TMDB при первом открытии. Фильмы — `GET /entities?studio={slug}`. 404 — нет студии |
 | GET | `/entities/{slug}` | Карточка: все поля (с `active`), `studios` (`[{slug, name, logo_url}]` по порядку `metadata.studios`), теги, участники в порядке титров (`position`), `related` (активные). Из PostgreSQL. Скрытая — 404; с токеном админа — 200 (и скрытые связанные); неверный токен — 401 |
+| GET | `/entities/{slug}/fragments` | Фрагменты полотна в порядке `position` → `[Fragment]` (`id`, `title`, `description`, `crop {x, y, width, height}` в долях 0–1, `position`). Те же данные уже лежат в карточке (`EntityDetail.fragments`) — ручка для админки и ленивой подгрузки. Скрытая сущность — 404, админу — 200 |
 | GET | `/entities/{slug}/seasons` | Сезоны сериала одним ответом (переключатель `Весь сериал · 1 сезон · 2 сезон`): `{items: [{id, slug, number, title, original_title, premiere_date, finale_date, episode_count, status, cover_url, cover_width, cover_height, rating: {value, count}, my_rating}]}`, без `total` — их всегда немного. Порядок по номеру, спецвыпуски (0) в конце. `rating` — сводка `entity_ratings` (среднее до 0,1), `my_rating` — своя оценка 1–10 через `UserRatings`; гостю `null`. Одним запросом на всю шапку: второго запроса за рейтингами быть не должно. Гостю `Cache-Control: public, s-maxage=600`, вошедшему `private, no-store` (в ответе его оценка). Сериал не найден или скрыт — 404 (админу видны и скрытые сезоны); неверный токен — 401 |
 | GET | `/seasons/{slug}` | Карточка сезона: всё, что у сущности (`metadata` — `SeasonMetadata`), `studios`, теги, участники, `related`, `awards`, плюс `series` (`EntitySummary` сериала — шапка и хлебные крошки; родителя нет — `null`), `rating`, `my_rating` и `episodes` (до 100 серий; длиннее — `/seasons/{slug}/episodes`). Невидимый — 404 для всех, кроме админа. Социальное (оценка, рецензия, лайк, отметка, коллекция) — существующими ручками `social` по этому же slug'у |
 | GET | `/seasons/{slug}/episodes` | Серии сезона: `Page<Episode>`, `?limit=1..100&offset=` (по умолчанию **50** — в сезоне редко больше), порядок по номеру. `Episode`: `id`, `number`, `title`, `original_title`, `overview`, `air_date`, `runtime_minutes`, `still_url`, `still_width`, `still_height`, `created_at`, `updated_at`. Невышедшие серии отдаются тоже. Оценок у серий нет. Кэш — как у `/entities/{slug}/seasons`. 404 — нет сезона или он скрыт |
@@ -1551,6 +1606,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | PATCH | `/admin/entities/{id}` | Изменить: переданные поля заменяются, `null` очищает необязательное, `metadata` заменяется целиком, `active` включает или скрывает (и ставит `active_manual`). `kind` не меняется. `series_slug` переносит сезон к другому сериалу (не передан — родитель прежний) |
 | PATCH | `/admin/entities/{id}/stream` | То же, ход публикации потоком `text/event-stream` ([«Публикация»](#публикация-правок-)) |
 | DELETE | `/admin/entities/{id}` | Удалить (каскадно теги, участники, рецензии, элементы коллекций; у сериала — его сезоны, у сезона — его серии) → 204 |
+| PUT | `/admin/entities/{id}/fragments` | Заменить фрагменты полотна целиком: `{"fragments": [{title, description?, crop: {x, y, width, height}, position?}]}` → `[Fragment]`. До 20 штук, `title` до 120, `description` до 600; `position` не передан — порядок как в списке. Кроп вне полотна (`x + width > 1`), нулевая ширина и не картина — 400; нет сущности — 404 |
 | PUT | `/admin/seasons/{id}/episodes` | Заменить серии сезона целиком (путь импорта: TMDB отдаёт сезон целиком, на 22 серии руками никто не пойдёт): `{"episodes": [{number, title?, original_title?, overview?, air_date?, runtime_minutes?, still_url?, still_width?, still_height?}]}` → `[Episode]`. Строк, которых нет в списке, не остаётся; пустой список снимает все серии. `number` 0–10000 и уникален в сезоне (повтор — 400), серий до 1000, `overview` до 2000, `runtime_minutes` 1–10000, размеры кадра — только вдвоём и только с `still_url`. Сущность не сезон — 400, нет её — 404 |
 | PUT | `/admin/entities/{id}/tags` | Заменить набор тегов: `{"tags": ["sci-fi"]}` |
 | POST | `/admin/entities/{id}/credits` | Добавить участника: `person_id`, `role`, `character_name`, `position` → 201 |
@@ -1938,6 +1994,8 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `directory.rs` | `PgEntityDirectory`: справочник сущностей для других модулей (`shared::directory::EntityDirectory`) |
 | `metadata.rs` | Схемы `metadata` по типам и их проверка (у книг — `LibgenSource`, `LibgenFile`) |
 | `validate.rs` | Проверка slug, строк, URL, ролей, размеров обложки (`cover_size`); UNIQUE → 409 |
+| `fragments.rs` | Фрагменты полотна: `Fragment`/`Crop`, `GET /entities/{slug}/fragments`, `of_entities` (пачкой для карточек), `supported` (только картины) |
+| `admin/fragments.rs` | `PUT /admin/entities/{id}/fragments`: проверка кропов и замена списка целиком |
 | `seasons.rs` | Сезоны и серии: `SeasonSummary`/`SeasonList`/`SeasonDetail`/`Episode`/`RatingValue`, `GET /entities/{slug}/seasons`, `GET /seasons/{slug}`, `GET /seasons/{slug}/episodes`, сводки `ratings_of` и свои оценки `my_ratings` (через `UserRatings`), `series_id_by_slug` для админки |
 | `admin/episodes.rs` | `PUT /admin/seasons/{id}/episodes`: проверка серий и замена списка целиком |
 | `entities.rs`, `people.rs`, `tags.rs` | Чтение (`tags.rs` — `TAG_COUNT_COLUMNS`: `by_kind` подзапросом по `tag_kind_counts`, фильтр `?entity_kind=`) |
@@ -1959,7 +2017,8 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `admin/` | Админские эндпоинты (`relations.rs` — связанные произведения, `banners.rs` — баннеры, `awards.rs` — премии, церемонии, категории и номинации, включая `PUT .../nominations` для импорта) |
 | `media/` | `nexus media` (`media/pick.rs` — фильтр Rutube) |
 
-Сезоны и серии — `app/tests/seasons.rs` (на тех же фикстурах). Тесты — `app/tests/catalog.rs` (данные — `app/tests/fixtures/catalog.sql`), архив —
+Сезоны и серии — `app/tests/seasons.rs`, страница картины — `app/tests/paintings.rs` (на тех
+же фикстурах). Тесты — `app/tests/catalog.rs` (данные — `app/tests/fixtures/catalog.sql`), архив —
 `app/tests/archive.rs` (свой каталог индекса на тест). CLI `nexus archive` и `nexus books` — `app/src/main.rs`, импорт книг — `app/tests/books.rs`. Тесты поиска ходят в
 настоящий Meilisearch из `make up` (в CI — сервис в `ci.yml`), у каждого теста свой префикс
 индексов. Остальные тесты идут с выключенным поиском. Живые проверки — `http/catalog.http`.

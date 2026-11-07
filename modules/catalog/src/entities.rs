@@ -369,6 +369,13 @@ pub(crate) async fn details(
         .collect();
     let studios = crate::studios::refs(db, &names).await?;
     let mut awards = crate::awards::entity_awards(db, &ids).await?;
+    // Фрагменты есть только у картин — ради фильмов и книг лишнего запроса не делаем.
+    let painting_ids: Vec<Uuid> = entities
+        .iter()
+        .filter(|entity| crate::fragments::supported(entity.kind))
+        .map(|entity| entity.id)
+        .collect();
+    let mut fragments = crate::fragments::of_entities(db, &painting_ids).await?;
     Ok(entities
         .into_iter()
         .map(|entity| EntityDetail {
@@ -380,6 +387,7 @@ pub(crate) async fn details(
             credits: credits_by.remove(&entity.id).unwrap_or_default(),
             related: related_by.remove(&entity.id).unwrap_or_default(),
             awards: awards.remove(&entity.id).unwrap_or_default(),
+            fragments: fragments.remove(&entity.id).unwrap_or_default(),
             entity,
         })
         .collect())

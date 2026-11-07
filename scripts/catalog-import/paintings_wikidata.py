@@ -18,8 +18,18 @@ Commons — всё под свободной лицензией и с русск
     cover_width,    ← размеры той самой копии (`imageinfo` Commons с `iiurlwidth`): карточка
     cover_height      получает точное `aspect-ratio` до загрузки файла, и стена картин не
                       перестраивается на лету
-    metadata        ← {"technique", "museum", "city", "height_cm", "width_cm"}
+    metadata        ← {"technique", "museum", "city", "height_cm", "width_cm",
+                      "image_url", "image_width", "image_height", "iiif_base"}
                       (схема `PaintingMetadata` в `catalog::metadata`)
+    image_url       ← копия Commons около 3000 px по ширине (MediaWiki округляет запрос вверх
+                      до стандартной «корзины», обычно 3840): исходник, по которому работает
+                      зум и считаются кропы фрагментов. Обложка выдачи (1000 px) для этого мала —
+                      кроп 0.09 × 0.12 по ней расплывается
+    image_width,    ← размеры именно скачиваемой копии: ширина из адреса (`3840px-…`), высота
+    image_height      по пропорциям оригинала
+    iiif_base       ← базовый адрес IIIF Image API из манифеста Wikidata P6108, где он есть
+                      (Рейксмюсеум, Метрополитен, Лувр): с ним фронтенд строит тайловый зум и
+                      просит кроп у сервера, не скачивая оригинал
     external_ids    ← {"wikidata": "Q12418"}; индекс `entities_external_wikidata_uq`
     художник        ← P170 → `people` + `entity_credits` (role = 'artist'), как режиссёр у фильма
     теги            ← жанр P136 (kind = genre) и направление P135 (kind = tag); нет тега —
@@ -42,6 +52,8 @@ Commons — всё под свободной лицензией и с русск
         [--limit 100] [--min-sitelinks 15] [--pool N] [--dry-run] [-v]
 Дозаполнить размеры обложек у картин, записанных до того, как они стали сохраняться:
     ... paintings_wikidata.py --fill-sizes
+Дозаполнить исходники для зума и IIIF у записанных картин (`--all` — перечитать у всех):
+    ... paintings_wikidata.py --fill-images
 Затем — точечная индексация записанных картин (скрипт печатает готовую команду):
     scripts/index-entities.sh mona-lisa guernica ...
 Полная перестройка (scripts/reindex-search.sh) для этого не нужна: она строит оба индекса
@@ -67,6 +79,10 @@ RUWIKI_API = "https://ru.wikipedia.org/w/api.php"
 COMMONS_FILEPATH = "https://commons.wikimedia.org/wiki/Special:FilePath/"
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 COVER_WIDTH = 1000
+# Исходник для зума и кропов фрагментов (`metadata.image_url`). Не оригинал Commons: у полотен
+# это бывает 60-мегабайтный JPEG, который телефон не откроет. 3000 px по длинной стороне хватает,
+# чтобы кроп 0.09 × 0.12 остался картинкой, а не кашей из двенадцати пикселей.
+IMAGE_WIDTH = 3000
 USER_AGENT = "nexus-catalog-import/1.0 (Nexus dev data import{}) python-requests".format(
     f"; {c}" if (c := os.environ.get("WIKIMEDIA_CONTACT")) else "")
 
@@ -92,6 +108,8 @@ P_MATERIAL = "P186"
 P_GENRE = "P136"
 P_MOVEMENT = "P135"
 P_HEIGHT = "P2048"
+# Манифест IIIF: по нему фронтенд строит глубокий зум и кропы фрагментов, не скачивая оригинал.
+P_IIIF_MANIFEST = "P6108"
 P_WIDTH = "P2049"
 
 # Единицы длины Wikidata → множитель до сантиметров.
@@ -280,6 +298,103 @@ def cover_sizes(session: requests.Session, names: list[str],
     return sizes
 
 
+def image_copies(session: requests.Session, names: list[str],
+                 delay: float = DELAY) -> dict[str, tuple[str, int, int]]:
+    """Адрес и размеры копии около IMAGE_WIDTH, пачками по 50 — исходник для зума.
+
+    Берём `thumburl` (прямой адрес на CDN Викимедиа), а не `Special:FilePath`: это та же копия
+    без лишнего редиректа. Запрошенные `iiurlwidth` пикселей MediaWiki округляет вверх до
+    стандартной «корзины» (3000 → 3840), и отдаёт файл именно этой ширины, а `thumbwidth` при
+    этом остаётся запрошенным. Поэтому ширину читаем из самого адреса (`3840px-…`), а высоту
+    считаем по пропорциям оригинала: в базе должны лежать размеры того файла, который скачает
+    браузер, иначе фрагменты получат чужие координаты.
+
+    Файл у́же запрошенного (миниатюры нет) — отдаём оригинал с его размерами.
+    """
+    copies = {}
+    for start in range(0, len(names), BATCH):
+        chunk = names[start:start + BATCH]
+        data = http(session, "GET", COMMONS_API, delay=delay, params={
+            "action": "query", "prop": "imageinfo", "iiprop": "size|url",
+            "iiurlwidth": IMAGE_WIDTH, "redirects": 1,
+            "titles": "|".join(f"File:{name}" for name in chunk), "format": "json",
+        })
+        for page in ((data.get("query") or {}).get("pages") or {}).values():
+            info = (page.get("imageinfo") or [{}])[0]
+            title = (page.get("title") or "").removeprefix("File:").replace(" ", "_")
+            copy = copy_of(info)
+            if title and copy:
+                copies[title] = copy
+    return copies
+
+
+def copy_of(info: dict) -> tuple[str, int, int] | None:
+    """`imageinfo` одного файла → (адрес, ширина, высота) скачиваемой копии."""
+    full_width, full_height = info.get("width"), info.get("height")
+    url = info.get("thumburl")
+    if not url:
+        # Миниатюры нет: файл и так не шире запрошенного.
+        if info.get("url") and isinstance(full_width, int) and isinstance(full_height, int):
+            return info["url"], full_width, full_height
+        return None
+    # Адрес без служебных параметров (`utm_*`, которые API добавляет к thumburl).
+    url = url.split("?", 1)[0]
+    width, height = info.get("thumbwidth"), info.get("thumbheight")
+    bucket = re.search(r"/(\d+)px-[^/]*$", url)
+    if bucket and isinstance(full_width, int) and isinstance(full_height, int) and full_width > 0:
+        width = int(bucket.group(1))
+        height = max(1, round(full_height * width / full_width))
+    if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+        return url, width, height
+    return None
+
+
+def iiif_base_of(session: requests.Session, manifest_url: str, delay: float) -> str | None:
+    """Базовый адрес IIIF Image API из манифеста: `{base}/{x},{y},{w},{h}/600,/0/default.jpg`.
+
+    В манифесте лежит не он, а описание холстов, поэтому достаём `service` у первого
+    изображения — и у Presentation 2 (`@id`), и у Presentation 3 (`id`). Манифест не открылся
+    или без сервиса изображений — `None`, тогда у картины останется только `image_url`.
+    """
+    try:
+        data = http(session, "GET", manifest_url, delay=delay)
+    except RuntimeError as error:
+        log.debug("манифест %s: %s", manifest_url, error)
+        return None
+    services = []
+    # Presentation 2: sequences → canvases → images → resource.service
+    for sequence in (data.get("sequences") or []):
+        for canvas in (sequence.get("canvases") or []):
+            for image in (canvas.get("images") or []):
+                services.append(((image.get("resource") or {}).get("service")))
+    # Presentation 3: items → items → items → body.service
+    for canvas in (data.get("items") or []):
+        for page in (canvas.get("items") or []):
+            for annotation in (page.get("items") or []):
+                services.append(((annotation.get("body") or {}).get("service")))
+    for service in services:
+        for entry in (service if isinstance(service, list) else [service]):
+            if isinstance(entry, dict):
+                base = entry.get("@id") or entry.get("id")
+                if isinstance(base, str) and base.startswith(("http://", "https://")):
+                    return base.rstrip("/")
+    return None
+
+
+def iiif_bases(session: requests.Session, entities_by_id: dict,
+               delay: float = DELAY) -> dict[str, str]:
+    """qid → базовый адрес IIIF у тех картин, у которых в Wikidata есть манифест (P6108)."""
+    bases = {}
+    for qid, entity in entities_by_id.items():
+        for claim in claims(entity, P_IIIF_MANIFEST):
+            url = value_of(claim)
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                if base := iiif_base_of(session, url, delay):
+                    bases[qid] = base
+                break
+    return bases
+
+
 def ruwiki_titles(entities_by_id: dict) -> dict[str, str]:
     """qid → заголовок статьи ру-Википедии (для описания)."""
     titles = {}
@@ -309,7 +424,9 @@ def extracts(session: requests.Session, titles: dict[str, str],
 
 
 def row_of(qid: str, entity: dict, names: dict[str, str], description: str | None,
-           sizes: dict[str, tuple[int, int]]) -> dict | None:
+           sizes: dict[str, tuple[int, int]],
+           images: dict[str, tuple[str, int, int]] | None = None,
+           iiif: dict[str, str] | None = None) -> dict | None:
     """Строка каталога из записи Wikidata; `None` — нечего показывать."""
     title_ru, title_en = label(entity, "ru"), label(entity, "en")
     title = clean(title_ru or title_en, MAX_TITLE)
@@ -323,7 +440,13 @@ def row_of(qid: str, entity: dict, names: dict[str, str], description: str | Non
     museum = next((names[q] for q in ref_current(entity, P_COLLECTION) if q in names), None)
     city = next((names[q] for q in ref_current(entity, P_LOCATION) if q in names), None)
     materials = [names[q] for q in refs(entity, P_MATERIAL) if q in names]
+    # Исходник для зума и кропов фрагментов — отдельно от обложки выдачи.
+    image_url, image_width, image_height = (images or {}).get(file_name, (None, None, None))
     metadata = {
+        "image_url": image_url,
+        "image_width": image_width,
+        "image_height": image_height,
+        "iiif_base": (iiif or {}).get(qid),
         "technique": clean(", ".join(materials), MAX_TEXT),
         "museum": clean(museum, MAX_TEXT),
         # P276 часто повторяет музей — тогда город не пишем, пусть поле останется пустым.
@@ -456,14 +579,15 @@ def save(conn, row: dict) -> str:
 
 
 def fill_sizes(conn, session: requests.Session, delay: float, dry_run: bool,
-               every: bool = False) -> int:
+               every: bool = False, limit: int | None = None) -> int:
     """Дозаполнить `cover_width`/`cover_height` у картин, записанных до того, как размеры стали
     сохраняться (`every` — перечитать у всех, а не только у пустых). Имя файла Commons берётся
     из самого `cover_url`."""
     with conn.cursor() as cur:
         cur.execute("SELECT id, cover_url FROM entities WHERE kind = 'painting' "
-                    "AND cover_url LIKE %s" + ("" if every else " AND cover_width IS NULL"),
-                    (f"{COMMONS_FILEPATH}%",))
+                    "AND cover_url LIKE %s" + ("" if every else " AND cover_width IS NULL")
+                    + (" LIMIT %s" if limit else ""),
+                    (f"{COMMONS_FILEPATH}%", *((limit,) if limit else ())))
         rows = cur.fetchall()
     by_name: dict[str, list[str]] = {}
     for entity_id, url in rows:
@@ -485,12 +609,58 @@ def fill_sizes(conn, session: requests.Session, delay: float, dry_run: bool,
     return filled
 
 
+def fill_images(conn, session: requests.Session, delay: float, dry_run: bool,
+                every: bool = False, limit: int | None = None) -> int:
+    """Дозаполнить `metadata.image_url` (исходник для зума) и `iiif_base` у записанных картин.
+
+    Имя файла Commons берётся из `cover_url`, как в `fill_sizes`; манифест IIIF — по id Wikidata
+    из `external_ids`. `every` — перечитать у всех, а не только у тех, где исходника ещё нет.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, cover_url, external_ids ->> 'wikidata' FROM entities "
+            "WHERE kind = 'painting' AND cover_url LIKE %s"
+            + ("" if every else " AND NOT (metadata ? 'image_url')")
+            + (" LIMIT %s" if limit else ""),
+            (f"{COMMONS_FILEPATH}%", *((limit,) if limit else ())))
+        rows = cur.fetchall()
+    by_name: dict[str, list[tuple[str, str | None]]] = {}
+    for entity_id, url, qid in rows:
+        name = unquote(urlparse(url).path.rsplit("/", 1)[-1])
+        by_name.setdefault(name, []).append((entity_id, qid))
+    log.info("дозаполнение исходников: %d картин, %d файлов", len(rows), len(by_name))
+    copies = image_copies(session, sorted(by_name), delay)
+    qids = sorted({qid for pairs in by_name.values() for _, qid in pairs if qid})
+    found = entities(session, qids, "claims", delay) if qids else {}
+    bases = iiif_bases(session, found, delay)
+    log.info("IIIF: манифест есть у %d картин из %d", len(bases), len(qids))
+    filled = 0
+    for name, pairs in by_name.items():
+        copy = copies.get(name)
+        if not copy:
+            continue
+        url, width, height = copy
+        for entity_id, qid in pairs:
+            patch = {"image_url": url, "image_width": width, "image_height": height}
+            if base := bases.get(qid or ""):
+                patch["iiif_base"] = base
+            filled += 1
+            if dry_run:
+                continue
+            with conn, conn.cursor() as cur:
+                cur.execute("UPDATE entities SET metadata = metadata || %s::jsonb "
+                            "WHERE id = %s", (json.dumps(patch), entity_id))
+    return filled
+
+
 # ---------------------------------------------------------------- main
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--limit", type=int, default=100, help="сколько картин записать")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="сколько картин записать (по умолчанию 100); с --fill-sizes и "
+                             "--fill-images — сколько картин обойти, по умолчанию все")
     parser.add_argument("--min-sitelinks", type=int, default=15,
                         help="нижняя граница известности: языковых разделов Википедии")
     parser.add_argument("--pool", type=int, default=None,
@@ -501,8 +671,12 @@ def main() -> int:
                         help="пауза между запросами к API Викимедиа, с (429 — увеличить)")
     parser.add_argument("--fill-sizes", action="store_true",
                         help="только дозаполнить cover_width/cover_height у записанных картин")
+    parser.add_argument("--fill-images", action="store_true",
+                        help="только дозаполнить metadata.image_url (исходник для зума) и "
+                             "iiif_base у записанных картин")
     parser.add_argument("--all", action="store_true",
-                        help="с --fill-sizes: перечитать размеры у всех, а не только у пустых")
+                        help="с --fill-sizes или --fill-images: перечитать у всех, а не только "
+                             "у пустых")
     parser.add_argument("--dry-run", action="store_true", help="не писать в БД")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -518,13 +692,14 @@ def main() -> int:
     session = requests.Session()
     session.headers["User-Agent"] = USER_AGENT
     conn = psycopg2.connect(dsn) if dsn else None
-    if args.fill_sizes:
+    if args.fill_sizes or args.fill_images:
         if not conn:
-            log.error("--fill-sizes требует DATABASE_URL")
+            log.error("--fill-sizes и --fill-images требуют DATABASE_URL")
             return 2
+        fill = fill_images if args.fill_images else fill_sizes
         try:
-            log.info("done: размеры у %d картин", fill_sizes(conn, session, args.delay,
-                                                             args.dry_run, args.all))
+            log.info("done: %d картин", fill(conn, session, args.delay,
+                                             args.dry_run, args.all, args.limit))
         except RuntimeError as error:
             log.error("%s", error)
             return 1
@@ -536,11 +711,12 @@ def main() -> int:
     written_slugs: list[str] = []
     try:
         # С запасом: часть картин уже записана, часть отсеется без названия или изображения.
-        ids = top_paintings(session, args.pool or args.limit * 3, args.min_sitelinks)
+        limit = args.limit or 100
+        ids = top_paintings(session, args.pool or limit * 3, args.min_sitelinks)
         log.info("Wikidata: %d картин по известности", len(ids))
         fresh = [qid for qid in ids if qid not in known]
         stats["known"] = len(ids) - len(fresh)
-        fresh = fresh[:max(args.limit * 2, args.limit + 100)]
+        fresh = fresh[:max(limit * 2, limit + 100)]
         found = entities(session, fresh, "labels|claims|sitelinks", args.delay)
         # Названия всего, на что ссылаются картины, — одной пачкой на весь прогон.
         linked = sorted({q for entity in found.values()
@@ -552,13 +728,19 @@ def main() -> int:
         names = {qid: name for qid, name in names.items() if name}
         descriptions = extracts(session, ruwiki_titles(found), args.delay)
         # Размеры превью Commons — одной пачкой на весь прогон, как и названия.
-        sizes = cover_sizes(session, sorted({name for entity in found.values()
-                                             if (name := cover_file(entity))}), args.delay)
+        files = sorted({name for entity in found.values() if (name := cover_file(entity))})
+        sizes = cover_sizes(session, files, args.delay)
+        # Исходники для зума и кропов фрагментов — той же пачкой, другой шириной.
+        images = image_copies(session, files, args.delay)
+        # IIIF там, где он есть у источника: с ним зум идёт тайлами, а кроп считает сервер.
+        iiif = iiif_bases(session, found, args.delay)
+        log.info("IIIF: манифест есть у %d картин из %d", len(iiif), len(found))
         for qid in fresh:
-            if stats["written"] >= args.limit:
+            if stats["written"] >= limit:
                 break
             entity = found.get(qid)
-            row = row_of(qid, entity, names, descriptions.get(qid), sizes) if entity else None
+            row = row_of(qid, entity, names, descriptions.get(qid), sizes, images, iiif) \
+                if entity else None
             if not row:
                 stats["skipped"] += 1
                 continue

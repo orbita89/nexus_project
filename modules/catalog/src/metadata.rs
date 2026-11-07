@@ -238,6 +238,32 @@ pub struct PaintingMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 53.0, minimum = 0.1, maximum = 10000.0)]
     pub width_cm: Option<f64>,
+    /// Исходник высокого разрешения — тот, по которому работает зум и считаются кропы
+    /// фрагментов. Не `cover_url`: та обложка шириной 1000 px нужна выдаче, а кроп
+    /// 0.09 × 0.12 по ней — каша из двенадцати пикселей. Разумный предел по длинной стороне —
+    /// 2–4 тыс. px, иначе телефон файл не откроет.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "https://upload.wikimedia.org/.../night-watch.jpg")]
+    pub image_url: Option<String>,
+    /// Размеры этого самого файла в пикселях, 1–100000: принимаются только вдвоём и только
+    /// вместе с `image_url`. По ним фронтенд переводит доли кропа в пиксели.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 6720)]
+    pub image_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 5544)]
+    pub image_height: Option<u32>,
+    /// Базовый адрес IIIF Image API, если источник его отдаёт (Рейксмюсеум, Лувр, Метрополитен,
+    /// Google Arts). Из него фронтенд собирает и тайлы глубокого зума, и кроп фрагмента
+    /// (`{iiif_base}/{x},{y},{w},{h}/600,/0/default.jpg`): режет и хранит куски сервер IIIF, не
+    /// мы. Хвостовой `/` отбрасывается. Есть IIIF — `image_url` можно не заполнять.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "https://iiif.rijksmuseum.nl/public/SK-C-5")]
+    pub iiif_base: Option<String>,
+    /// Разбор картины: блок «Смысл и анализ». Не то же, что `trivia` — там список любопытных
+    /// фактов, здесь связный текст и тезисы-символы.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<PaintingAnalysis>,
     /// Награды и номинации: до 50 (у картин почти не бывает, но форма админки общая).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub awards: Option<Vec<MetadataAward>>,
@@ -245,6 +271,29 @@ pub struct PaintingMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = json!(["Украдена из Лувра в 1911 году."]))]
     pub trivia: Option<Vec<String>>,
+}
+
+/// Разбор картины. Озвучки здесь нет намеренно: кнопка «Слушать разбор» без звука хуже, чем её
+/// отсутствие. Понадобится — рядом встанет одно поле `audio_url`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaintingAnalysis {
+    /// Связный текст с абзацами, до 10 000 символов. Обычный текст, не HTML: чужую разметку в
+    /// страницу мы не вставляем.
+    #[schema(example = "Полотно заказала стрелковая рота…")]
+    pub text: String,
+    /// Тезисы-символы: до 10, `title` до 120 символов, `text` до 600.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<AnalysisPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisPoint {
+    #[schema(example = "Тайна золотой девочки")]
+    pub title: String,
+    #[schema(example = "Девочка с курицей на поясе — эмблема гильдии…")]
+    pub text: String,
 }
 
 /// Строчка награды в `metadata.awards` — текст блока «Производство и факты», а не раздел
@@ -471,6 +520,10 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             m.city = text("city", m.city, MAX_TEXT)?;
             size("height_cm", m.height_cm)?;
             size("width_cm", m.width_cm)?;
+            m.image_url = image_url("image_url", m.image_url)?;
+            m.iiif_base = image_url("iiif_base", m.iiif_base)?.map(trim_slash);
+            image_size(&m)?;
+            m.analysis = m.analysis.map(analysis).transpose()?;
             m.awards = awards(m.awards)?;
             m.trivia = trivia(m.trivia)?;
             to_value(m)
@@ -486,6 +539,77 @@ fn size(field: &str, value: Option<f64>) -> AppResult<()> {
         ))),
         _ => Ok(()),
     }
+}
+
+/// Наибольший размер исходника в пикселях (как у обложки).
+const MAX_IMAGE_PX: u32 = 100_000;
+/// Разбор картины: связный текст.
+const MAX_ANALYSIS_TEXT: usize = 10_000;
+/// Тезисы-символы разбора.
+const MAX_ANALYSIS_POINTS: usize = 10;
+const MAX_POINT_TITLE: usize = 120;
+const MAX_POINT_TEXT: usize = 600;
+
+/// Адрес картинки в `metadata`: та же проверка, что у `cover_url` в админке.
+fn image_url(field: &str, value: Option<String>) -> AppResult<Option<String>> {
+    crate::validate::url(&format!("metadata.{field}"), value)
+}
+
+/// `https://host/path/` → `https://host/path`: адрес IIIF дальше склеивается через `/`.
+fn trim_slash(value: String) -> String {
+    value.trim_end_matches('/').to_string()
+}
+
+/// Размеры исходника: только вдвоём и только вместе с `image_url` — как `cover_size` у обложки.
+/// Размеры от другого файла дали бы фрагментам чужие координаты, а это хуже, чем их отсутствие.
+fn image_size(m: &PaintingMetadata) -> AppResult<()> {
+    match (m.image_width, m.image_height) {
+        (None, None) => return Ok(()),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(bad(
+                "metadata.image_width and metadata.image_height must be given together",
+            ))
+        }
+        _ => {}
+    }
+    if m.image_url.is_none() {
+        return Err(bad(
+            "metadata.image_width and metadata.image_height are only accepted with image_url",
+        ));
+    }
+    for (field, value) in [
+        ("image_width", m.image_width),
+        ("image_height", m.image_height),
+    ] {
+        range(field, value, 1, MAX_IMAGE_PX)?;
+    }
+    Ok(())
+}
+
+/// Разбор: текст обязателен (пустой блок рисовать нечем), тезисы — до 10 непустых пар.
+fn analysis(mut value: PaintingAnalysis) -> AppResult<PaintingAnalysis> {
+    value.text = text("analysis.text", Some(value.text), MAX_ANALYSIS_TEXT)?
+        .ok_or_else(|| bad("metadata.analysis.text must not be empty"))?;
+    if value.points.len() > MAX_ANALYSIS_POINTS {
+        return Err(bad(format!(
+            "metadata.analysis.points has more than {MAX_ANALYSIS_POINTS} items"
+        )));
+    }
+    for point in &mut value.points {
+        point.title = text(
+            "analysis.points[].title",
+            Some(point.title.clone()),
+            MAX_POINT_TITLE,
+        )?
+        .ok_or_else(|| bad("metadata.analysis.points[].title must not be empty"))?;
+        point.text = text(
+            "analysis.points[].text",
+            Some(point.text.clone()),
+            MAX_POINT_TEXT,
+        )?
+        .ok_or_else(|| bad("metadata.analysis.points[].text must not be empty"))?;
+    }
+    Ok(value)
 }
 
 fn bad(message: impl Into<String>) -> AppError {
