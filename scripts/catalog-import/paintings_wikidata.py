@@ -377,7 +377,10 @@ def iiif_base_of(session: requests.Session, manifest_url: str, delay: float) -> 
             if isinstance(entry, dict):
                 base = entry.get("@id") or entry.get("id")
                 if isinstance(base, str) and base.startswith(("http://", "https://")):
-                    return base.rstrip("/")
+                    # http:// переводим в https://: сайт у нас на https, и браузер заблокировал
+                    # бы такие тайлы как mixed content — зум просто не открылся бы. Хост без
+                    # https не хуже: по http он всё равно не загрузится.
+                    return base.replace("http://", "https://", 1).rstrip("/")
     return None
 
 
