@@ -301,3 +301,100 @@ async fn source_image_is_validated(pool: PgPool) {
         StatusCode::BAD_REQUEST
     );
 }
+
+#[test]
+fn painting_seeds_directory_is_valid() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let candidates = [
+        std::path::PathBuf::from("seeds/paintings"),
+        std::path::PathBuf::from("../seeds/paintings"),
+        std::path::PathBuf::from(manifest_dir).join("../seeds/paintings"),
+    ];
+    let path = candidates
+        .into_iter()
+        .find(|p| p.is_dir())
+        .expect("seeds/paintings directory must exist");
+
+    let entries = std::fs::read_dir(path).expect("read seeds/paintings");
+    let mut count = 0;
+    let mut slugs = std::collections::HashSet::new();
+
+    for entry in entries {
+        let entry = entry.expect("dir entry");
+        let file_path = entry.path();
+        if file_path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&file_path).expect("read json");
+        let val: Value = serde_json::from_str(&content).expect("parse json");
+
+        let slug = val["slug"].as_str().expect("slug string");
+        assert!(slugs.insert(slug.to_string()), "duplicate slug: {slug}");
+
+        let analysis = &val["analysis"];
+        assert!(analysis.is_object(), "[{slug}] analysis must be an object");
+        let text = analysis["text"].as_str().expect("analysis text");
+        assert!(!text.trim().is_empty(), "[{slug}] analysis text non empty");
+        let paragraphs: Vec<&str> = text
+            .split("\n\n")
+            .filter(|p| !p.trim().is_empty())
+            .collect();
+        assert!(
+            paragraphs.len() >= 2 && paragraphs.len() <= 4,
+            "[{slug}] analysis text paragraphs count must be 2..4, got {}",
+            paragraphs.len()
+        );
+
+        let points = analysis["points"]
+            .as_array()
+            .expect("analysis points array");
+        assert!(
+            points.len() >= 2 && points.len() <= 10,
+            "[{slug}] points count must be 2..10, got {}",
+            points.len()
+        );
+        for pt in points {
+            let title = pt["title"].as_str().expect("point title");
+            assert!(!title.trim().is_empty() && title.len() <= 120);
+            let p_text = pt["text"].as_str().expect("point text");
+            assert!(!p_text.trim().is_empty() && p_text.len() <= 600);
+        }
+
+        let fragments = val["fragments"].as_array().expect("fragments array");
+        assert!(
+            fragments.len() >= 3 && fragments.len() <= 20,
+            "[{slug}] fragments count must be 3..20, got {}",
+            fragments.len()
+        );
+        for frag in fragments {
+            let title = frag["title"].as_str().expect("fragment title");
+            assert!(!title.trim().is_empty() && title.len() <= 120);
+            if let Some(desc) = frag.get("description").and_then(|d| d.as_str()) {
+                assert!(desc.len() <= 600);
+            }
+            let crop = &frag["crop"];
+            let x = crop["x"].as_f64().expect("crop x");
+            let y = crop["y"].as_f64().expect("crop y");
+            let w = crop["width"].as_f64().expect("crop width");
+            let h = crop["height"].as_f64().expect("crop height");
+            assert!((0.0..=1.0).contains(&x), "[{slug}:{title}] x={x}");
+            assert!((0.0..=1.0).contains(&y), "[{slug}:{title}] y={y}");
+            assert!(w > 0.0 && w <= 1.0, "[{slug}:{title}] w={w}");
+            assert!(h > 0.0 && h <= 1.0, "[{slug}:{title}] h={h}");
+            assert!(x + w <= 1.00001, "[{slug}:{title}] x+w={}", x + w);
+            assert!(y + h <= 1.00001, "[{slug}:{title}] y+h={}", y + h);
+            assert!(w * h >= 0.025, "[{slug}:{title}] area {} < 0.025", w * h);
+        }
+
+        count += 1;
+    }
+
+    assert!(
+        (15..=20).contains(&count),
+        "must have 15-20 paintings seeded, got {count}"
+    );
+    assert!(slugs.contains("the-night-watch"));
+    assert!(slugs.contains("las-meninas"));
+    assert!(slugs.contains("guernica"));
+}
