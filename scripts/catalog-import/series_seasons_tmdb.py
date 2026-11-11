@@ -169,25 +169,35 @@ def still_size(tmdb: Tmdb, tv_id: int, season: int, episode: int,
 
 
 def season_rows(tmdb: Tmdb, tv_id: int, number: int, series_status: str | None,
-                with_still_sizes: bool = False) -> dict | None:
+                with_still_sizes: bool = False, localized: bool = True) -> dict | None:
     """Сезон и его серии из `GET /tv/{id}/season/{n}`; нечего показывать — `None`.
 
     Второй запрос в en-US — ради оригинальных названий и описаний там, где русских нет:
     у TMDB `name` сезона и серии локализованы, оригинала в ответе нет. Делается, только если
     русского заметно не хватает (пустые имя/описание сезона или больше трети серий без имени) —
     иначе на массовом прогоне он удваивает трафик почти без пользы.
+
+    А если русского перевода у сериала нет вовсе (`localized = False`, видно по его карточке),
+    сезон сразу качается в en-US одним запросом: ru-ответ в этом случае всё равно придёт
+    английским, и второй запрос добавит ровно ноль. На полном каталоге это и есть разница между
+    2,16 и ~1,1 запроса на сезон, то есть вдвое меньше времени.
     """
-    data = tmdb.get(f"/tv/{tv_id}/season/{number}", language=LANGUAGE,
+    language = LANGUAGE if localized else FALLBACK_LANGUAGE
+    data = tmdb.get(f"/tv/{tv_id}/season/{number}", language=language,
                     append_to_response="images", include_image_language="ru,en,null")
     if not data:
         return None
     ru_episodes = data.get("episodes") or []
-    nameless = sum(1 for e in ru_episodes if not clean(e.get("name"), MAX_TITLE))
-    needs_english = (not clean(data.get("name"), MAX_TITLE)
-                     or not clean(data.get("overview"), MAX_DESCRIPTION)
-                     or (ru_episodes and nameless / len(ru_episodes) > ENGLISH_SHARE))
-    english = tmdb.get(f"/tv/{tv_id}/season/{number}",
-                       language=FALLBACK_LANGUAGE) if needs_english else {}
+    if localized:
+        nameless = sum(1 for e in ru_episodes if not clean(e.get("name"), MAX_TITLE))
+        needs_english = (not clean(data.get("name"), MAX_TITLE)
+                         or not clean(data.get("overview"), MAX_DESCRIPTION)
+                         or (ru_episodes and nameless / len(ru_episodes) > ENGLISH_SHARE))
+        english = tmdb.get(f"/tv/{tv_id}/season/{number}",
+                           language=FALLBACK_LANGUAGE) if needs_english else {}
+    else:
+        # Запрошенный ответ уже английский — он же и оригинал.
+        english = data
     english = english or {}
     en_episodes = {e.get("episode_number"): e for e in (english.get("episodes") or [])}
 
@@ -588,21 +598,25 @@ def main() -> int:
             writer.start()
 
         def fetch_head(item):
-            """Только список сезонов и статус — без локализации, ответ меньше."""
+            """Список сезонов, статус и есть ли у сериала русский перевод — один запрос."""
             series_id, series_slug, tv_id = item
-            data = tmdb.get(f"/tv/{tv_id}")
+            data = tmdb.get(f"/tv/{tv_id}", language=LANGUAGE)
             if not data:
-                return series_id, series_slug, tv_id, None, []
+                return series_id, series_slug, tv_id, None, [], False
+            # Нет перевода — TMDB отдаёт `name` равным оригиналу и пустой `overview`.
+            localized = bool(clean(data.get("overview"), MAX_DESCRIPTION)) or (
+                clean(data.get("name"), MAX_TITLE) != clean(data.get("original_name"), MAX_TITLE))
             numbers = sorted({
                 season.get("season_number") for season in (data.get("seasons") or [])
                 if isinstance(season.get("season_number"), int)
                 and 0 <= season["season_number"] <= MAX_SEASON_NUMBER
             })
-            return series_id, series_slug, tv_id, STATUS.get(data.get("status") or ""), numbers
+            return (series_id, series_slug, tv_id, STATUS.get(data.get("status") or ""),
+                    numbers, localized)
 
         def fetch_season(task):
-            series_id, series_slug, tv_id, status, number = task
-            row = season_rows(tmdb, tv_id, number, status, args.still_sizes)
+            series_id, series_slug, tv_id, status, number, localized = task
+            row = season_rows(tmdb, tv_id, number, status, args.still_sizes, localized)
             if row:
                 row["series_slug"] = series_slug
             return series_id, series_slug, tv_id, row
@@ -656,7 +670,7 @@ def main() -> int:
                         stats["skipped"] += 1
                         continue
                     if kind == "head":
-                        series_id, series_slug, tv_id, status, numbers = result
+                        series_id, series_slug, tv_id, status, numbers, localized = result
                         if not numbers:
                             stats["skipped"] += 1
                             processed += 1
@@ -666,7 +680,8 @@ def main() -> int:
                             continue
                         remaining[tv_id] = len(numbers)
                         for number in numbers:
-                            backlog.append((series_id, series_slug, tv_id, status, number))
+                            backlog.append((series_id, series_slug, tv_id, status, number,
+                                            localized))
                     else:
                         series_id, series_slug, tv_id, row = result
                         emit(series_id, series_slug, tv_id, row)
