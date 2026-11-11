@@ -56,17 +56,18 @@ import sys
 import time
 import unicodedata
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg2
-import requests
+
+from tmdb_client import Limiter, Tmdb, append_checkpoint, load_checkpoint, stop_event
 
 ROOT = Path(__file__).resolve().parents[2]
 CACHE = Path(os.path.expanduser("~/.cache/nexus-catalog-import/tmdb"))
+CHECKPOINT = Path(__file__).resolve().parent / "cache" / "series.checkpoint"
 EXPORTS = "https://files.tmdb.org/p/exports"
-TMDB = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w780"
 POSTER_WIDTH = 780
 LANGUAGE = "ru-RU"
@@ -84,8 +85,6 @@ PER_PAGE = 20  # TMDB отдаёт списки страницами по 20
 # Нижняя граница голосов для списков по рейтингу: без неё `vote_average.desc` поднимает наверх
 # сериалы с десятком оценок, а `/tv/top_rated` засоряется свежими премьерами.
 MIN_VOTES = 500
-RETRIES = 5
-DELAY = 0.1  # у TMDB лимит ~50 запросов/с, сотня сериалов укладывается без пауз
 
 # `status` TMDB → `SeriesStatus` каталога. Остальные («In Production», «Planned», «Pilot») —
 # ничего: поле необязательное, а врать «идёт» про неснятое не надо.
@@ -142,44 +141,6 @@ def env(key: str) -> str | None:
 
 
 # ---------------------------------------------------------------- TMDB
-
-
-class Tmdb:
-    """Клиент TMDB с повторами: v4-токен (`eyJ…`) идёт заголовком, v3-ключ — параметром."""
-
-    def __init__(self, key: str, delay: float = DELAY):
-        self.session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(pool_connections=64, pool_maxsize=64)
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
-        self.delay = delay
-        self.params = {}
-        if key.startswith("eyJ"):
-            self.session.headers["Authorization"] = f"Bearer {key}"
-        else:
-            self.params["api_key"] = key
-
-    def get(self, path: str, **params) -> dict | None:
-        """Ответ TMDB; 404 — `None` (сериал скрыт или удалён)."""
-        for attempt in range(RETRIES + 1):
-            if self.delay:
-                time.sleep(self.delay)
-            try:
-                response = self.session.get(
-                    f"{TMDB}{path}", timeout=60, params={**self.params, **params})
-                if response.status_code == 404:
-                    return None
-                if response.status_code == 429 or response.status_code >= 500:
-                    raise RuntimeError(f"HTTP {response.status_code}")
-                response.raise_for_status()
-                return response.json()
-            except (requests.RequestException, ValueError, RuntimeError) as error:
-                if attempt == RETRIES:
-                    raise RuntimeError(f"{path}: {error}") from error
-                pause = 5 * (attempt + 1)
-                log.warning("%s: %s — повтор через %s с", path, error, pause)
-                time.sleep(pause)
-        raise RuntimeError("unreachable")
 
 
 # Что считать «топом»: порядок `/discover/tv` и порог голосов к нему.
@@ -517,10 +478,14 @@ def main() -> int:
                         help="минимальное число голосов (по умолчанию: 500 для rated/popular, 0 для voted)")
     parser.add_argument("--min-popularity", type=float, default=0.0,
                         help="минимальная популярность для дампа экспорта (0 — все сериалы)")
-    parser.add_argument("--workers", type=int, default=16,
+    parser.add_argument("--workers", type=int, default=48,
                         help="число параллельных потоков для загрузки TMDB")
-    parser.add_argument("--delay", type=float, default=0.0,
-                        help="пауза между запросами к TMDB, с (429 — увеличить)")
+    parser.add_argument("--rps", type=float, default=45.0,
+                        help="потолок запросов к TMDB в секунду (у них лимит ~50)")
+    parser.add_argument("--checkpoint", default=str(CHECKPOINT),
+                        help="файл уже обработанных id; '' — не вести")
+    parser.add_argument("--insecure", action="store_true",
+                        help="не проверять сертификат TMDB (MITM-прокси)")
     parser.add_argument("--dry-run", action="store_true", help="не писать в БД")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -537,11 +502,17 @@ def main() -> int:
         log.error("DATABASE_URL is not set")
         return 2
 
-    tmdb = Tmdb(key, args.delay)
+    limiter = Limiter(args.rps)
+    tmdb = Tmdb(key, limiter, workers=args.workers, verify=not args.insecure)
     conn = psycopg2.connect(dsn) if dsn else None
     known = known_ids(conn) if conn else set()
-    stats = {"written": 0, "known": 0, "duplicate": 0, "skipped": 0}
+    checkpoint = Path(args.checkpoint) if args.checkpoint and not args.dry_run else None
+    if checkpoint:
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    stop = stop_event()
+    stats = {"written": 0, "known": 0, "duplicate": 0, "skipped": 0, "failed": 0}
     written_slugs: list[str] = []
+    started = time.monotonic()
     try:
         tags = genre_tags(tmdb)
         log.info("TMDB: %d жанров сериалов", len(tags))
@@ -549,9 +520,14 @@ def main() -> int:
         ids = top_ids(tmdb, args.source, (args.limit * 2) if args.limit > 0 else 0,
                       min_votes=args.min_votes, workers=args.workers, min_popularity=args.min_popularity)
         log.info("TMDB /discover/tv (%s): %d сериалов", args.source, len(ids))
-        fresh = [tv_id for tv_id in ids if tv_id not in known]
+        # Уже записанные отсеиваются по базе, уже просмотренные (без постера, без названия —
+        # их в базе нет и не будет) — по чекпоинту: иначе каждый перезапуск заново качал бы
+        # десятки тысяч заведомо непригодных сериалов.
+        done = load_checkpoint(checkpoint)
+        fresh = [tv_id for tv_id in ids if tv_id not in known and tv_id not in done]
         stats["known"] = len(ids) - len(fresh)
-        log.info("Новых сериалов для обработки: %d (уже в базе: %d)", len(fresh), stats["known"])
+        log.info("Новых сериалов для обработки: %d (уже в базе или в чекпоинте: %d)",
+                 len(fresh), stats["known"])
 
         target_ids = fresh if args.limit <= 0 else fresh[:args.limit * 2]
 
@@ -563,29 +539,71 @@ def main() -> int:
             )
             return tv_id, row_of(data, tags) if data else None
 
+        # Без батчей: пул сам берёт следующий id, как только освобождается поток, и очередь
+        # ограничена — 236 тысяч futures разом съели бы сотни мегабайт до первого запроса.
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            batch_size = args.workers * 2
+            ids_iter = iter(target_ids)
+            pending: dict = {}
+            in_flight = args.workers * 4
             processed = 0
-            for i in range(0, len(target_ids), batch_size):
-                if args.limit > 0 and stats["written"] >= args.limit:
+            last_log = time.monotonic()
+            pending_checkpoint: list[int] = []
+            while True:
+                while len(pending) < in_flight and not stop.is_set():
+                    if args.limit > 0 and stats["written"] >= args.limit:
+                        break
+                    tv_id = next(ids_iter, None)
+                    if tv_id is None:
+                        break
+                    pending[executor.submit(fetch_tv, tv_id)] = tv_id
+                if not pending:
                     break
-                chunk = target_ids[i:i + batch_size]
-                futures = [executor.submit(fetch_tv, tv_id) for tv_id in chunk]
-                for future in as_completed(futures):
-                    tv_id, row = future.result()
+                finished, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                for future in finished:
+                    queued_id = pending.pop(future)
                     processed += 1
+                    try:
+                        tv_id, row = future.result()
+                    except RuntimeError as error:
+                        # Сериал не дался даже после повторов: прогон не роняем, id не
+                        # отмечаем — следующий запуск попробует его снова.
+                        log.warning("%s", error)
+                        stats["failed"] += 1
+                        continue
                     if not row:
                         stats["skipped"] += 1
+                        pending_checkpoint.append(queued_id)
                         continue
                     if args.limit > 0 and stats["written"] >= args.limit:
                         continue
-                    result = "written" if args.dry_run else save(conn, row)
+                    try:
+                        result = "written" if args.dry_run else save(conn, row)
+                    except psycopg2.Error as error:
+                        conn.rollback()
+                        stats["failed"] += 1
+                        log.warning("tv %s: %s", tv_id, error)
+                        continue
                     stats[result] += 1
+                    pending_checkpoint.append(tv_id)
                     if result == "written" and row.get("slug"):
                         written_slugs.append(row["slug"])
-                    if processed % 100 == 0 or processed == len(target_ids):
-                        log.info("Прогресс: %d/%d — записано: %d, пропущено: %d, дубликатов: %d",
-                                 processed, len(target_ids), stats["written"], stats["skipped"], stats["duplicate"])
+                if len(pending_checkpoint) >= 200:
+                    append_checkpoint(checkpoint, pending_checkpoint)
+                    pending_checkpoint.clear()
+                now = time.monotonic()
+                if now - last_log >= 10:
+                    last_log = now
+                    speed = processed / max(0.001, now - started)
+                    log.info(
+                        "обработано %d/%d (%.1f/с) · записано %d, без постера %d, дубликатов %d, "
+                        "ошибок %d · сеть: %d запросов, 429 %d, ssl %d, таймаут %d",
+                        processed, len(target_ids), speed, stats["written"], stats["skipped"],
+                        stats["duplicate"], stats["failed"], tmdb.stats["requests"],
+                        tmdb.stats["retry_429"], tmdb.stats["retry_ssl"],
+                        tmdb.stats["retry_timeout"])
+                if stop.is_set() and not pending:
+                    break
+            append_checkpoint(checkpoint, pending_checkpoint)
     except KeyboardInterrupt:
         log.warning("interrupted")
     except RuntimeError as error:
