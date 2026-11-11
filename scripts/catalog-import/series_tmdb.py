@@ -47,6 +47,7 @@
 """
 
 import argparse
+import gzip
 import json
 import logging
 import os
@@ -54,12 +55,17 @@ import re
 import sys
 import time
 import unicodedata
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg2
 import requests
 
 ROOT = Path(__file__).resolve().parents[2]
+CACHE = Path(os.path.expanduser("~/.cache/nexus-catalog-import/tmdb"))
+EXPORTS = "https://files.tmdb.org/p/exports"
 TMDB = "https://api.themoviedb.org/3"
 POSTER = "https://image.tmdb.org/t/p/w780"
 POSTER_WIDTH = 780
@@ -143,6 +149,9 @@ class Tmdb:
 
     def __init__(self, key: str, delay: float = DELAY):
         self.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=64, pool_maxsize=64)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self.delay = delay
         self.params = {}
         if key.startswith("eyJ"):
@@ -178,21 +187,115 @@ SOURCES = {
     "rated": {"sort_by": "vote_average.desc", "vote_count.gte": MIN_VOTES},
     "voted": {"sort_by": "vote_count.desc"},
     "popular": {"sort_by": "popularity.desc", "vote_count.gte": MIN_VOTES},
+    "all": {},
+    "export": {},
 }
 
 
-def top_ids(tmdb: Tmdb, source: str, limit: int) -> list[int]:
-    """Id сериалов из `/discover/tv` в выбранном порядке."""
+def download_export(cache: Path = CACHE) -> Path:
+    """Дамп публикуется около 08:00 UTC — если сегодняшнего ещё нет, берём вчерашний и т. д."""
+    cache.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(timezone.utc).date()
+    for back in range(4):
+        day = today - timedelta(days=back)
+        name = f"tv_series_ids_{day:%m_%d_%Y}.json.gz"
+        path = cache / name
+        if path.exists():
+            log.info("export: %s (cache)", path)
+            return path
+        url = f"{EXPORTS}/{name}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req) as resp:
+                data = resp.read()
+                tmp = path.with_suffix(".part")
+                tmp.write_bytes(data)
+                tmp.rename(path)
+                log.info("export: downloaded %s (%.1f MB)", name, len(data) / 1e6)
+                return path
+        except Exception as e:
+            log.info("export: %s not published yet (%s)", name, e)
+            continue
+    raise RuntimeError("no TMDB tv_series export for the last 4 days")
+
+
+def select_export_ids(path: Path, min_popularity: float = 0.0, limit: int = 0) -> list[int]:
+    """Строки дампа: {"id":1,"original_name":"...","popularity":4.591}."""
+    rows: list[tuple[float, int]] = []
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            pop = item.get("popularity") or 0.0
+            if pop < min_popularity:
+                continue
+            rows.append((-pop, item["id"]))
+    rows.sort()
+    ids = [item[1] for item in rows]
+    if limit > 0:
+        ids = ids[:limit]
+    log.info("export: %d tv series selected (min_popularity=%g, limit=%d)", len(ids), min_popularity, limit)
+    return ids
+
+
+def top_ids_for_source(tmdb: Tmdb, source: str, limit: int = 0, min_votes: int | None = None,
+                       workers: int = 16) -> list[int]:
+    """Id сериалов из `/discover/tv` в выбранном порядке с параллельной загрузкой страниц."""
+    params = dict(SOURCES.get(source, {}))
+    if min_votes is not None:
+        if min_votes > 0:
+            params["vote_count.gte"] = min_votes
+        elif "vote_count.gte" in params:
+            del params["vote_count.gte"]
+
+    first_page = tmdb.get("/discover/tv", language=LANGUAGE, page=1, **params)
+    if not first_page or not first_page.get("results"):
+        return []
+
+    total_pages = min(first_page.get("total_pages", 1), 500)
+    if limit > 0:
+        target_pages = min((limit + PER_PAGE - 1) // PER_PAGE, total_pages)
+    else:
+        target_pages = total_pages
+
+    page_results = {1: [item["id"] for item in (first_page.get("results") or []) if item.get("id")]}
+    if target_pages > 1:
+        def fetch_p(p):
+            data = tmdb.get("/discover/tv", language=LANGUAGE, page=p, **params)
+            return p, [item["id"] for item in (data or {}).get("results") or [] if item.get("id")]
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for p, p_ids in executor.map(fetch_p, range(2, target_pages + 1)):
+                page_results[p] = p_ids
+
     ids: list[int] = []
-    for page in range(1, limit // PER_PAGE + 2):
-        data = tmdb.get("/discover/tv", language=LANGUAGE, page=page, **SOURCES[source])
-        results = (data or {}).get("results") or []
-        if not results:
+    for p in range(1, target_pages + 1):
+        ids.extend(page_results.get(p, []))
+        if limit > 0 and len(ids) >= limit:
             break
-        ids.extend(item["id"] for item in results if item.get("id"))
-        if len(ids) >= limit:
-            break
-    return ids[:limit]
+    return ids[:limit] if limit > 0 else ids
+
+
+def top_ids(tmdb: Tmdb, source: str, limit: int = 0, min_votes: int | None = None,
+            workers: int = 16, min_popularity: float = 0.0) -> list[int]:
+    """Id сериалов из `/discover/tv` или официального дампа экспорта TMDB."""
+    if source == "export":
+        export_file = download_export()
+        return select_export_ids(export_file, min_popularity, limit)
+    if source == "all":
+        seen = set()
+        all_ids = []
+        for src in ("voted", "popular", "rated"):
+            src_ids = top_ids_for_source(tmdb, src, limit, min_votes, workers)
+            for sid in src_ids:
+                if sid not in seen:
+                    seen.add(sid)
+                    all_ids.append(sid)
+            if limit > 0 and len(all_ids) >= limit:
+                break
+        return all_ids[:limit] if limit > 0 else all_ids
+    return top_ids_for_source(tmdb, source, limit, min_votes, workers)
 
 
 def genre_tags(tmdb: Tmdb) -> dict[int, tuple[str, str]]:
@@ -404,11 +507,19 @@ def save(conn, row: dict) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--limit", type=int, default=100, help="сколько сериалов записать")
+    parser.add_argument("--limit", type=int, default=100,
+                        help="сколько сериалов записать (0 — все доступные)")
     parser.add_argument("--source", choices=tuple(SOURCES), default="rated",
                         help="порядок: rated — по рейтингу среди сериалов с 500+ голосами "
-                             "(по умолчанию), voted — по числу голосов, popular — по популярности")
-    parser.add_argument("--delay", type=float, default=DELAY,
+                             "(по умолчанию), voted — по числу голосов, popular — по популярности, "
+                             "all — объединение всех категорий discover, export — официальный дамп экспорта TMDB (все сериалы)")
+    parser.add_argument("--min-votes", type=int, default=None,
+                        help="минимальное число голосов (по умолчанию: 500 для rated/popular, 0 для voted)")
+    parser.add_argument("--min-popularity", type=float, default=0.0,
+                        help="минимальная популярность для дампа экспорта (0 — все сериалы)")
+    parser.add_argument("--workers", type=int, default=16,
+                        help="число параллельных потоков для загрузки TMDB")
+    parser.add_argument("--delay", type=float, default=0.0,
                         help="пауза между запросами к TMDB, с (429 — увеличить)")
     parser.add_argument("--dry-run", action="store_true", help="не писать в БД")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -435,28 +546,46 @@ def main() -> int:
         tags = genre_tags(tmdb)
         log.info("TMDB: %d жанров сериалов", len(tags))
         # С запасом: часть сериалов уже записана, часть отсеется без постера.
-        ids = top_ids(tmdb, args.source, args.limit * 2)
+        ids = top_ids(tmdb, args.source, (args.limit * 2) if args.limit > 0 else 0,
+                      min_votes=args.min_votes, workers=args.workers, min_popularity=args.min_popularity)
         log.info("TMDB /discover/tv (%s): %d сериалов", args.source, len(ids))
         fresh = [tv_id for tv_id in ids if tv_id not in known]
         stats["known"] = len(ids) - len(fresh)
-        for tv_id in fresh:
-            if stats["written"] >= args.limit:
-                break
+        log.info("Новых сериалов для обработки: %d (уже в базе: %d)", len(fresh), stats["known"])
+
+        target_ids = fresh if args.limit <= 0 else fresh[:args.limit * 2]
+
+        def fetch_tv(tv_id: int):
             data = tmdb.get(
                 f"/tv/{tv_id}", language=LANGUAGE,
                 append_to_response="credits,videos,images",
                 include_image_language="ru,en,null",
             )
-            row = row_of(data, tags) if data else None
-            if not row:
-                stats["skipped"] += 1
-                continue
-            result = "written" if args.dry_run else save(conn, row)
-            stats[result] += 1
-            if result == "written" and row.get("slug"):
-                written_slugs.append(row["slug"])
-            log.debug("%s %s (%s, %s сезонов)", result, row["title"], row["year"],
-                      row["metadata"].get("seasons"))
+            return tv_id, row_of(data, tags) if data else None
+
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            batch_size = args.workers * 2
+            processed = 0
+            for i in range(0, len(target_ids), batch_size):
+                if args.limit > 0 and stats["written"] >= args.limit:
+                    break
+                chunk = target_ids[i:i + batch_size]
+                futures = [executor.submit(fetch_tv, tv_id) for tv_id in chunk]
+                for future in as_completed(futures):
+                    tv_id, row = future.result()
+                    processed += 1
+                    if not row:
+                        stats["skipped"] += 1
+                        continue
+                    if args.limit > 0 and stats["written"] >= args.limit:
+                        continue
+                    result = "written" if args.dry_run else save(conn, row)
+                    stats[result] += 1
+                    if result == "written" and row.get("slug"):
+                        written_slugs.append(row["slug"])
+                    if processed % 100 == 0 or processed == len(target_ids):
+                        log.info("Прогресс: %d/%d — записано: %d, пропущено: %d, дубликатов: %d",
+                                 processed, len(target_ids), stats["written"], stats["skipped"], stats["duplicate"])
     except KeyboardInterrupt:
         log.warning("interrupted")
     except RuntimeError as error:
@@ -467,8 +596,7 @@ def main() -> int:
             conn.close()
     log.info("done: %s", stats)
     if written_slugs and not args.dry_run:
-        # Точечная индексация: полная перестройка ради сотни сериалов не нужна.
-        log.info("index them: scripts/index-entities.sh %s", " ".join(written_slugs))
+        log.info("Записано новых сериалов: %d", len(written_slugs))
     return 0
 
 
