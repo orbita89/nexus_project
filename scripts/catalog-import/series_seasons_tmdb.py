@@ -268,11 +268,23 @@ def season_rows(tmdb: Tmdb, tv_id: int, number: int, series_status: str | None,
 
 
 def series_list(conn, slugs: list[str], limit: int | None, missing_only: bool = False,
-                after_id: str | None = None) -> list[tuple]:
-    """Сериалы с id TMDB: (id, slug, (external_ids->>'tmdb_tv')::int)."""
+                after_id: str | None = None, worth_it: bool = False,
+                min_votes: int = 50, min_popularity: float = 20.0) -> list[tuple]:
+    """Сериалы с id TMDB: (id, slug, (external_ids->>'tmdb_tv')::int).
+
+    `worth_it` — только те, кому серии действительно нужны: с русским названием либо с заметной
+    аудиторией. На полном дампе TMDB (236 тыс. сериалов) сезоны ко всем — это 1,2 млн сезонов и
+    порядка 10 часов у лимита TMDB, причём почти всё это бразильские и турецкие сериалы, которых
+    никто не ищет. Тот же принцип, что у холодного архива: русское — всё, иностранное — заметное.
+    """
     sql = ["SELECT s.id, s.slug, (s.external_ids ->> 'tmdb_tv')::int FROM entities s",
+           "LEFT JOIN entity_stats st ON st.entity_id = s.id",
            "WHERE s.kind = 'series' AND s.external_ids ? 'tmdb_tv'"]
     params: list = []
+    if worth_it:
+        sql.append("AND (s.title ~ '[А-Яа-яЁё]' OR coalesce(st.tmdb_votes, 0) >= %s"
+                   " OR coalesce(st.tmdb_popularity, 0) >= %s)")
+        params.extend([min_votes, min_popularity])
     if slugs:
         sql.append("AND s.slug = ANY(%s)")
         params.append(slugs)
@@ -533,6 +545,13 @@ def main() -> int:
                         help="обойти все сериалы, включая те, у которых уже есть сезоны "
                              "(по умолчанию — только без сезонов)")
     parser.add_argument("--after-id", help="продолжить с сериалов с id больше этого")
+    parser.add_argument("--worth-it", action="store_true",
+                        help="только сериалы с русским названием или заметной аудиторией "
+                             "(--min-votes / --min-popularity): остальным серии не нужны")
+    parser.add_argument("--min-votes", type=int, default=50,
+                        help="порог голосов TMDB для --worth-it")
+    parser.add_argument("--min-popularity", type=float, default=20.0,
+                        help="порог популярности TMDB для --worth-it")
     parser.add_argument("--workers", type=int, default=48,
                         help="число параллельных потоков для загрузки TMDB")
     parser.add_argument("--rps", type=float, default=45.0,
@@ -578,7 +597,8 @@ def main() -> int:
         series = series_list(
             conn, args.slug, args.limit,
             missing_only=args.missing_only and not args.refresh and not args.slug,
-            after_id=args.after_id)
+            after_id=args.after_id, worth_it=args.worth_it, min_votes=args.min_votes,
+            min_popularity=args.min_popularity)
         conn.close()
         if checkpoint:
             done = load_checkpoint(checkpoint)
