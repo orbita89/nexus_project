@@ -3,7 +3,7 @@
 use crate::models::{
     page_bounds, AdminEntitySummary, Entity, EntityCredit, EntityCreditRow, EntityDetail,
     EntityKind, EntitySort, EntitySummary, ListEntitiesQuery, Page, RelatedWork, RelationKind,
-    SimilarQuery, Tag, ENTITY_COLUMNS, ENTITY_STATS_JOIN, ENTITY_SUMMARY_COLUMNS, IN_CATALOG,
+    SimilarQuery, Tag, ENTITY_COLUMNS_LEAN, ENTITY_STATS_JOIN, ENTITY_SUMMARY_COLUMNS, IN_CATALOG,
     TAG_COLUMNS, TAG_ORDER, VISIBLE,
 };
 use axum::extract::State;
@@ -123,7 +123,7 @@ pub(crate) async fn list_page(
     };
     // Параметр студии — последний: в count — $6, в списке — $8 (после LIMIT/OFFSET).
     let by_studio = |n: u8| match studio {
-        Some(_) => format!(" AND e.metadata @> ${n}"),
+        Some(_) => format!(" AND (e.metadata - 'episodes') @> ${n}"),
         None => String::new(),
     };
     // VISIBLE начинается с `e.active`: планировщик берёт частичный индекс `WHERE active`.
@@ -223,7 +223,7 @@ pub async fn get(
 ) -> AppResult<Json<EntityDetail>> {
     let admin = is_admin(viewer.as_ref());
     let entity: Option<Entity> = sqlx::query_as(&format!(
-        "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN} WHERE e.slug = $1"
+        "SELECT {ENTITY_COLUMNS_LEAN} FROM entities e {ENTITY_STATS_JOIN} WHERE e.slug = $1"
     ))
     .bind(&slug)
     .fetch_optional(&state.db)
@@ -301,7 +301,7 @@ pub(crate) async fn detail_by_id(
     id: Uuid,
 ) -> AppResult<EntityDetail> {
     let entity: Option<Entity> = sqlx::query_as(&format!(
-        "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN} WHERE e.id = $1"
+        "SELECT {ENTITY_COLUMNS_LEAN} FROM entities e {ENTITY_STATS_JOIN} WHERE e.id = $1"
     ))
     .bind(id)
     .fetch_optional(db)

@@ -124,6 +124,15 @@ pub struct SeasonMetadata {
     /// Дата выхода последней вышедшей серии. Премьера — `release_date` сущности.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finale_date: Option<chrono::NaiveDate>,
+    /// Серии сезона по возрастанию номера, до [`MAX_EPISODES`].
+    ///
+    /// Серия — не сущность, а данные сезона: её не ищут, не оценивают и не обсуждают, поэтому
+    /// она лежит здесь, а не строкой отдельной таблицы. На полном каталоге TMDB (236 тыс.
+    /// сериалов) строки дали бы порядка 150 млн записей ради списка под карточкой сезона.
+    /// В ответах API серии приходят отдельным полем `episodes`, а из `metadata` вырезаются
+    /// ([`ENTITY_COLUMNS_LEAN`](crate::models::ENTITY_COLUMNS_LEAN)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episodes: Option<Vec<crate::seasons::Episode>>,
     /// Награды и номинации: до 50.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub awards: Option<Vec<MetadataAward>>,
@@ -452,6 +461,14 @@ const MAX_AWARDS: usize = 50;
 const MAX_AWARD_TITLE: usize = 200;
 const MAX_TRIVIA: usize = 30;
 const MAX_TRIVIA_ITEM: usize = 1000;
+/// Серий в сезоне: больше не бывает даже у ежедневных шоу с разбивкой по годам.
+pub const MAX_EPISODES: usize = 1000;
+/// Описание серии — как просил фронтенд: до 2000 символов, обрезать на бэке не надо.
+pub const MAX_OVERVIEW: usize = 2000;
+/// Длительность серии в минутах.
+pub const MAX_RUNTIME: i32 = 10_000;
+/// Размер кадра в пикселях.
+pub const MAX_STILL_PX: i32 = 100_000;
 
 /// Проверяет `metadata` для `kind` и возвращает нормализованное значение для записи в БД.
 pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
@@ -489,6 +506,7 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             // 0 — спецвыпуски, поэтому нижняя граница нулевая, а не единица.
             range("number", Some(m.number), 0, 10_000)?;
             range("episode_count", m.episode_count, 1, 100_000)?;
+            m.episodes = episodes(m.episodes)?;
             m.awards = awards(m.awards)?;
             m.trivia = trivia(m.trivia)?;
             to_value(m)
@@ -695,6 +713,87 @@ fn trivia(values: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> {
     list_of("trivia", values, MAX_TRIVIA, |v| {
         item("trivia", v, MAX_TRIVIA_ITEM)
     })
+}
+
+/// Серии сезона: те же ограничения для обоих путей записи — `PUT /admin/seasons/{id}/episodes`
+/// и `metadata` в `POST`/`PATCH /admin/entities`. Возвращает список, отсортированный по номеру.
+pub fn episodes(
+    values: Option<Vec<crate::seasons::Episode>>,
+) -> AppResult<Option<Vec<crate::seasons::Episode>>> {
+    let Some(mut values) = values else {
+        return Ok(None);
+    };
+    if values.len() > MAX_EPISODES {
+        return Err(bad(format!(
+            "metadata.episodes: no more than {MAX_EPISODES} episodes per season"
+        )));
+    }
+    for episode in &mut values {
+        if !(0..=10_000).contains(&episode.number) {
+            return Err(bad("metadata.episodes: number must be 0-10000"));
+        }
+        if episode
+            .runtime_minutes
+            .is_some_and(|value| !(1..=MAX_RUNTIME).contains(&value))
+        {
+            return Err(bad(format!(
+                "metadata.episodes: runtime_minutes must be 1-{MAX_RUNTIME}"
+            )));
+        }
+        episode.title = text(
+            "episodes.title",
+            episode.title.take(),
+            crate::validate::MAX_TITLE,
+        )?;
+        episode.original_title = text(
+            "episodes.original_title",
+            episode.original_title.take(),
+            crate::validate::MAX_TITLE,
+        )?;
+        episode.overview = text("episodes.overview", episode.overview.take(), MAX_OVERVIEW)?;
+        episode.still_url = crate::validate::url("still_url", episode.still_url.take())?;
+        let (width, height) = still_size(
+            episode.still_url.is_some(),
+            episode.still_width,
+            episode.still_height,
+        )?;
+        episode.still_width = width;
+        episode.still_height = height;
+    }
+    values.sort_by_key(|episode| episode.number);
+    if values
+        .windows(2)
+        .any(|pair| pair[0].number == pair[1].number)
+    {
+        return Err(bad(
+            "metadata.episodes: episode numbers must be unique within a season",
+        ));
+    }
+    Ok(Some(values))
+}
+
+/// Размеры кадра: как `cover_size` у обложки — только вдвоём и только вместе с картинкой.
+pub fn still_size(
+    has_still: bool,
+    width: Option<i32>,
+    height: Option<i32>,
+) -> AppResult<(Option<i32>, Option<i32>)> {
+    let (width, height) = match (width, height) {
+        (None, None) => return Ok((None, None)),
+        (Some(width), Some(height)) => (width, height),
+        _ => return Err(bad("still_width and still_height must be given together")),
+    };
+    if !has_still {
+        return Err(bad(
+            "still_width and still_height are only accepted with still_url",
+        ));
+    }
+    for (field, value) in [("still_width", width), ("still_height", height)] {
+        if !(1..=MAX_STILL_PX).contains(&value) {
+            return Err(bad(format!("{field} must be 1-{MAX_STILL_PX}")));
+        }
+    }
+    Ok((Some(width), Some(height)))
 }
 
 fn awards(values: Option<Vec<MetadataAward>>) -> AppResult<Option<Vec<MetadataAward>>> {

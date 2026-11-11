@@ -389,3 +389,123 @@ async fn deleting_a_series_takes_its_seasons(pool: PgPool) {
         StatusCode::NOT_FOUND
     );
 }
+
+/// Серии лежат в `metadata` сезона, но наружу из неё не торчат: иначе карточка отдавала бы их
+/// дважды, а список сезонов сериала тянул бы сотни килобайт ради четырёх ключей.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn episodes_do_not_leak_into_metadata(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let id = ctx.create_season(1, "no-date-season-1", "Сезон 1").await;
+    let (status, _) = ctx
+        .admin_send(
+            Method::PUT,
+            &format!("/admin/seasons/{id}/episodes"),
+            Some(json!({ "episodes": [{ "number": 1, "title": "Первая" }] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let card = ctx.get_ok("/seasons/no-date-season-1", None).await;
+    assert_eq!(card["episodes"].as_array().unwrap().len(), 1);
+    assert!(card["metadata"].get("episodes").is_none(), "{card:?}");
+
+    let list = ctx.get_ok("/entities/no-date/seasons", None).await;
+    let season = &list["items"][0];
+    assert_eq!(season["episode_count"], 2);
+    assert!(season.get("metadata").is_none() || season["metadata"].get("episodes").is_none());
+}
+
+/// Правка сезона через админку не должна стирать серии: `metadata` присылается целиком, но
+/// серий в ней нет — прежний набор переносится.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn patching_a_season_keeps_its_episodes(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let id = ctx.create_season(1, "no-date-season-1", "Сезон 1").await;
+    let (status, _) = ctx
+        .admin_send(
+            Method::PUT,
+            &format!("/admin/seasons/{id}/episodes"),
+            Some(json!({ "episodes": [
+                { "number": 1, "title": "Первая" },
+                { "number": 2, "title": "Вторая" },
+            ]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/entities/{id}"),
+            Some(json!({
+                "description": "Описание сезона",
+                "metadata": { "number": 1, "episode_count": 2, "status": "ended" },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let page = ctx.get_ok("/seasons/no-date-season-1/episodes", None).await;
+    assert_eq!(page["total"], 2, "серии пережили PATCH: {page:?}");
+}
+
+/// Страница серий — срез массива: номера идут по возрастанию, `total` считает весь набор.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn episodes_are_paginated(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let id = ctx.create_season(1, "no-date-season-1", "Сезон 1").await;
+    let episodes: Vec<Value> = (1..=120)
+        .map(|number| json!({ "number": number, "title": format!("Серия {number}") }))
+        .collect();
+    let (status, body) = ctx
+        .admin_send(
+            Method::PUT,
+            &format!("/admin/seasons/{id}/episodes"),
+            Some(json!({ "episodes": episodes })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let page = ctx
+        .get_ok(
+            "/seasons/no-date-season-1/episodes?limit=50&offset=100",
+            None,
+        )
+        .await;
+    assert_eq!(page["total"], 120);
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items.len(), 20);
+    assert_eq!(items[0]["number"], 101);
+    assert_eq!(items[19]["number"], 120);
+}
+
+/// `id` и `created_at` серии переживают перезапись: на них держится кэш фронтенда, а импорт
+/// гоняет один и тот же сезон много раз.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn episode_ids_survive_a_rewrite(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let id = ctx.create_season(1, "no-date-season-1", "Сезон 1").await;
+    let path = format!("/admin/seasons/{id}/episodes");
+    let (status, first) = ctx
+        .admin_send(
+            Method::PUT,
+            &path,
+            Some(json!({ "episodes": [{ "number": 1, "title": "Первая" }] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let before = first[0].clone();
+
+    let (status, second) = ctx
+        .admin_send(
+            Method::PUT,
+            &path,
+            Some(json!({ "episodes": [{ "number": 1, "title": "Первая серия" }] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{second:?}");
+    let after = second[0].clone();
+    assert_eq!(after["id"], before["id"]);
+    assert_eq!(after["created_at"], before["created_at"]);
+    assert_ne!(after["updated_at"], before["updated_at"], "поля изменились");
+}

@@ -242,7 +242,14 @@ async fn write_update(state: &AppState, id: Uuid, req: UpdateEntity) -> AppResul
              cover_url = CASE WHEN $10 THEN $11 ELSE cover_url END,
              cover_width = CASE WHEN $10 THEN $12 ELSE cover_width END,
              cover_height = CASE WHEN $10 THEN $13 ELSE cover_height END,
-             metadata = COALESCE($14, metadata),
+             -- Серии сезона лежат в metadata, но этой ручкой не правятся: присланный объект
+             -- их не содержит, и без переноса правка описания сезона стёрла бы всю карусель.
+             metadata = CASE
+                 WHEN $14::jsonb IS NULL THEN metadata
+                 WHEN kind = 'season' AND NOT ($14::jsonb ? 'episodes')
+                      AND metadata ? 'episodes'
+                     THEN $14::jsonb || jsonb_build_object('episodes', metadata -> 'episodes')
+                 ELSE $14::jsonb END,
              active = COALESCE($15, active),
              active_manual = active_manual OR $15 IS NOT NULL,
              parent_id = COALESCE($16, parent_id)

@@ -7,26 +7,22 @@
 use crate::jobs::Reporter;
 use crate::models::EntityKind;
 use crate::publish::{self, Touched};
-use crate::seasons::{episodes_page, Episode};
+use crate::seasons::{Episode, EPISODES_JSON};
 use crate::validate::{self, MAX_TITLE};
 use axum::extract::State;
 use axum::Json;
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Utc};
 use serde::Deserialize;
 use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path};
 use shared::{AdminUser, AppError, AppResult, AppState};
+use std::collections::HashMap;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-/// Серий в сезоне: больше не бывает даже у ежедневных шоу с разбивкой по годам.
-const MAX_EPISODES: usize = 1000;
-/// Описание серии — как просил фронтенд: до 2000 символов, обрезать на бэке не надо.
-const MAX_OVERVIEW: usize = 2000;
-/// Длительность серии в минутах.
-const MAX_RUNTIME: i32 = 10_000;
-/// Размер кадра в пикселях.
-const MAX_STILL_PX: i32 = 100_000;
+// Ограничения общие с `metadata.episodes`: набор серий приходит и сюда, и в `metadata`
+// при `PATCH /admin/entities`, правила должны быть одни.
+use crate::metadata::{MAX_EPISODES, MAX_OVERVIEW, MAX_RUNTIME};
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +88,10 @@ pub async fn put(
         .into_iter()
         .map(check)
         .collect::<AppResult<Vec<_>>>()?;
+    // Набор хранится отсортированным по номеру: порядок задаёт запись, чтение его не трогает
+    // (срез страницы режется по позиции в массиве).
+    let mut rows = rows;
+    rows.sort_by_key(|row| row.number);
     let mut numbers: Vec<i32> = rows.iter().map(|row| row.number).collect();
     numbers.sort_unstable();
     let unique = numbers.len();
@@ -103,51 +103,76 @@ pub async fn put(
     }
 
     let mut tx = state.db.begin().await?;
-    // FOR UPDATE: параллельное удаление сезона не проскочит между проверкой и вставкой.
-    let kind: Option<EntityKind> =
-        sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if kind.ok_or(AppError::NotFound)? != EntityKind::Season {
+    // FOR UPDATE: параллельное удаление сезона не проскочит между проверкой и записью, а
+    // одновременные PUT'ы не затрут набор друг друга (он пишется целиком).
+    let found: Option<(EntityKind, serde_json::Value)> = sqlx::query_as(&format!(
+        "SELECT kind, {EPISODES_JSON} FROM entities e WHERE id = $1 FOR UPDATE"
+    ))
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (kind, current) = found.ok_or(AppError::NotFound)?;
+    if kind != EntityKind::Season {
         return Err(AppError::BadRequest("entity is not a season".into()));
     }
-    sqlx::query("DELETE FROM episodes WHERE season_id = $1 AND NOT (number = ANY($2))")
-        .bind(id)
-        .bind(&numbers)
-        .execute(&mut *tx)
-        .await?;
-    for row in &rows {
-        sqlx::query(
-            "INSERT INTO episodes (season_id, number, title, original_title, overview, air_date,
-                                   runtime_minutes, still_url, still_width, still_height)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             ON CONFLICT (season_id, number) DO UPDATE SET
-                 title = EXCLUDED.title, original_title = EXCLUDED.original_title,
-                 overview = EXCLUDED.overview, air_date = EXCLUDED.air_date,
-                 runtime_minutes = EXCLUDED.runtime_minutes, still_url = EXCLUDED.still_url,
-                 still_width = EXCLUDED.still_width, still_height = EXCLUDED.still_height",
-        )
-        .bind(id)
-        .bind(row.number)
-        .bind(&row.title)
-        .bind(&row.original_title)
-        .bind(&row.overview)
-        .bind(row.air_date)
-        .bind(row.runtime_minutes)
-        .bind(&row.still_url)
-        .bind(row.still_width)
-        .bind(row.still_height)
-        .execute(&mut *tx)
-        .await?;
-    }
+    // id и created_at серии переживают перезапись: по ним фронтенд держит кэш, а импорт
+    // гоняет один и тот же сезон много раз.
+    let previous: Vec<Episode> = serde_json::from_value(current).unwrap_or_default();
+    let known: HashMap<i32, &Episode> = previous.iter().map(|row| (row.number, row)).collect();
+    let now = Utc::now();
+    let items: Vec<Episode> = rows
+        .iter()
+        .map(|row| {
+            let old = known.get(&row.number);
+            Episode {
+                id: old.map_or_else(Uuid::new_v4, |old| old.id),
+                number: row.number,
+                title: row.title.clone(),
+                original_title: row.original_title.clone(),
+                overview: row.overview.clone(),
+                air_date: row.air_date,
+                runtime_minutes: row.runtime_minutes,
+                still_url: row.still_url.clone(),
+                still_width: row.still_width,
+                still_height: row.still_height,
+                created_at: old.map_or(now, |old| old.created_at),
+                // Не изменилась — не трогаем `updated_at`: иначе каждый прогон импорта
+                // дёргает ISR и ETag всей карусели.
+                updated_at: match old {
+                    Some(old) if same(old, row) => old.updated_at,
+                    _ => now,
+                },
+            }
+        })
+        .collect();
+    sqlx::query(
+        "UPDATE entities SET metadata = jsonb_set(metadata, '{episodes}', $2) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(
+        serde_json::to_value(&items)
+            .map_err(|error| AppError::Internal(format!("episodes: {error}")))?,
+    )
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     // Страницы сезона и сериала: число серий и карусель на них меняются.
     publish::run(&state, Touched::entities(&[id]), &Reporter::silent()).await;
-    tracing::info!(admin_id = %admin.id, season_id = %id, episodes = rows.len(), "episodes set");
-    let (items, _) = episodes_page(&state.db, id, MAX_EPISODES as i64, 0).await?;
+    tracing::info!(admin_id = %admin.id, season_id = %id, episodes = items.len(), "episodes set");
     Ok(Json(items))
+}
+
+/// Совпадают ли показываемые поля серии: только ради `updated_at`.
+fn same(old: &Episode, new: &Row) -> bool {
+    old.title == new.title
+        && old.original_title == new.original_title
+        && old.overview == new.overview
+        && old.air_date == new.air_date
+        && old.runtime_minutes == new.runtime_minutes
+        && old.still_url == new.still_url
+        && old.still_width == new.still_width
+        && old.still_height == new.still_height
 }
 
 /// Проверенная серия: те же ограничения, что у остальных полей каталога.
@@ -192,31 +217,5 @@ fn check(input: EpisodeInput) -> AppResult<Row> {
 }
 
 /// Размеры кадра: как `cover_size` у обложки — только вдвоём и только вместе с картинкой.
-fn still_size(
-    has_still: bool,
-    width: Option<i32>,
-    height: Option<i32>,
-) -> AppResult<(Option<i32>, Option<i32>)> {
-    let (width, height) = match (width, height) {
-        (None, None) => return Ok((None, None)),
-        (Some(width), Some(height)) => (width, height),
-        _ => {
-            return Err(AppError::BadRequest(
-                "still_width and still_height must be given together".into(),
-            ))
-        }
-    };
-    if !has_still {
-        return Err(AppError::BadRequest(
-            "still_width and still_height are only accepted with still_url".into(),
-        ));
-    }
-    for (field, value) in [("still_width", width), ("still_height", height)] {
-        if !(1..=MAX_STILL_PX).contains(&value) {
-            return Err(AppError::BadRequest(format!(
-                "{field} must be 1-{MAX_STILL_PX}"
-            )));
-        }
-    }
-    Ok((Some(width), Some(height)))
-}
+/// Правило одно на оба пути записи, поэтому живёт в `metadata`.
+use crate::metadata::still_size;

@@ -19,8 +19,9 @@
     parent_id       ← сериал
     external_ids    ← {"tmdb_tv_season": "1399:2"}
 
-Серия — строка `episodes` (не сущность: ни slug'а, ни рецензий). Видео у нас нет, поэтому ни
-«просмотрено», ни прогресса здесь не будет:
+Серия — элемент массива `metadata.episodes` сезона (не сущность: ни slug'а, ни рецензий, ни
+оценок — их не ищут и не оценивают, поэтому отдельной таблицы у серий нет). Видео у нас нет,
+поэтому ни «просмотрено», ни прогресса здесь не будет:
 
     number, title, original_title (en), overview, air_date
     runtime_minutes ← `runtime` TMDB, уже в минутах
@@ -29,7 +30,8 @@
                       лишь в `/tv/{id}/season/{n}/episode/{m}/images`, то есть запрос на серию
 
 Повторный прогон безопасен и идемпотентен: сезон пишется `INSERT ... ON CONFLICT (slug)` по
-детерминированному слагу `{сериал}-season-{n}`, серия — `ON CONFLICT (season_id, number)`.
+детерминированному слагу `{сериал}-season-{n}`, серии — набором внутри его `metadata`, причём
+`id` и `created_at` уже записанной серии сохраняются.
 Занятый чужой сущностью слаг не роняет прогон: такой сезон уходит в «остаток» и получает слаг с
 суффиксом. Серии, которых больше нет у TMDB, не удаляются — на них могут стоять ссылки; снять их
 можно `PUT /admin/seasons/{id}/episodes`.
@@ -71,9 +73,10 @@ import sys
 import threading
 import time
 import unicodedata
+import uuid
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import psycopg2
@@ -409,12 +412,42 @@ SEASON_UPDATE = """ DO UPDATE SET title = EXCLUDED.title,
     WHERE entities.kind = 'season' AND entities.parent_id = EXCLUDED.parent_id"""
 
 
-def season_values(series_id: str, row: dict) -> tuple:
+EPISODE_FIELDS = ("number", "title", "original_title", "overview", "air_date",
+                  "runtime_minutes", "still_url", "still_width", "still_height")
+
+
+def episode_json(episodes: list[dict], previous: list[dict] | None = None) -> list[dict]:
+    """Серии для `metadata.episodes`: без пустых полей, по возрастанию номера.
+
+    `id` и `created_at` серии переживают перезапись (ищутся по номеру в прошлом наборе): по ним
+    фронтенд держит кэш, а импорт гоняет один и тот же сезон много раз. `updated_at` меняется
+    только у серий, у которых реально изменились поля.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    known = {item.get("number"): item for item in (previous or [])}
+    rows = []
+    for episode in sorted(episodes, key=lambda e: e["number"]):
+        fields = {key: episode[key] for key in EPISODE_FIELDS if episode.get(key) is not None}
+        old = known.get(episode["number"])
+        same = old is not None and all(
+            old.get(key) == fields.get(key) for key in EPISODE_FIELDS if key != "number")
+        rows.append({
+            **fields,
+            "id": (old or {}).get("id") or str(uuid.uuid4()),
+            "created_at": (old or {}).get("created_at") or now,
+            "updated_at": old.get("updated_at", now) if same else now,
+        })
+    return rows
+
+
+def season_values(series_id: str, row: dict, previous: list[dict] | None = None) -> tuple:
+    """Строка сезона; серии едут внутри `metadata` — отдельной таблицы у них больше нет."""
+    metadata = {**row["metadata"], "episodes": episode_json(row["episodes"], previous)}
     return (
         f"{row['series_slug']}-season-{row['number']}", series_id,
         row["title"], row["original_title"], row["description"], row["release_date"],
         row["cover_url"], row["cover_width"], row["cover_height"],
-        json.dumps(row["metadata"], ensure_ascii=False), json.dumps(row["external_ids"]),
+        json.dumps(metadata, ensure_ascii=False), json.dumps(row["external_ids"]),
     )
 
 
@@ -525,45 +558,33 @@ class Writer(threading.Thread):
             if rest:
                 self.resolve(cur, rest, ids)
 
-            episodes: list[tuple] = []
             for item, value in zip(items, values):
-                season_id = ids.get(value[0])
-                if not season_id:
-                    continue
-                for episode in item["row"]["episodes"]:
-                    episodes.append((
-                        season_id, episode["number"], episode["title"],
-                        episode["original_title"], episode["overview"], episode["air_date"],
-                        episode["runtime_minutes"], episode["still_url"],
-                        episode["still_width"], episode["still_height"]))
-            if episodes:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO episodes (season_id, number, title, original_title, overview,
-                           air_date, runtime_minutes, still_url, still_width, still_height)
-                       VALUES %s
-                       ON CONFLICT (season_id, number) DO UPDATE SET
-                           title = EXCLUDED.title, original_title = EXCLUDED.original_title,
-                           overview = EXCLUDED.overview, air_date = EXCLUDED.air_date,
-                           runtime_minutes = EXCLUDED.runtime_minutes,
-                           still_url = EXCLUDED.still_url, still_width = EXCLUDED.still_width,
-                           still_height = EXCLUDED.still_height""",
-                    episodes, page_size=500)
-                self.bump("episodes", len(episodes))
+                if value[0] in ids:
+                    self.bump("episodes", len(item["row"]["episodes"]))
         self.conn.commit()
 
     def resolve(self, cur, rest: list[tuple], ids: dict) -> None:
         """Сезоны с занятым слагом: свой — переиспользуем, чужой — заводим с суффиксом."""
         slugs = [value[0] for _, value in rest]
-        cur.execute("SELECT id, slug, parent_id, kind::text FROM entities WHERE slug = ANY(%s)",
-                    (slugs,))
-        existing = {slug: (season_id, parent_id, kind)
-                    for season_id, slug, parent_id, kind in cur.fetchall()}
+        cur.execute(
+            """SELECT id, slug, parent_id, kind::text,
+                      CASE WHEN jsonb_typeof(metadata -> 'episodes') = 'array'
+                           THEN metadata -> 'episodes' ELSE '[]'::jsonb END
+                 FROM entities WHERE slug = ANY(%s)""", (slugs,))
+        existing = {slug: (season_id, parent_id, kind, episodes)
+                    for season_id, slug, parent_id, kind, episodes in cur.fetchall()}
         for item, values in rest:
             slug = values[0]
             found = existing.get(slug)
             if found and found[2] == "season" and str(found[1]) == str(item["series_id"]):
-                ids[slug] = found[0]  # тот же сезон: серии досылаем, сам сезон не трогаем
+                # Тот же сезон: сам он не трогается, но серии досылаем — у идущего сезона их
+                # прибавляется. id и created_at уже записанных серий сохраняются.
+                ids[slug] = found[0]
+                episodes = episode_json(item["row"]["episodes"], found[3])
+                cur.execute(
+                    "UPDATE entities SET metadata = jsonb_set(metadata, '{episodes}', %s::jsonb)"
+                    " WHERE id = %s",
+                    (json.dumps(episodes, ensure_ascii=False), found[0]))
                 self.bump("kept")
                 continue
             # Слаг занят чужой сущностью (бывает: сериал и фильм с одинаковым названием).

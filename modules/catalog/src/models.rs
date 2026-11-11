@@ -223,6 +223,23 @@ pub const ENTITY_COLUMNS: &str = concat!(
      es.quality, es.rank_score, e.created_at, e.updated_at"
 );
 
+/// `ENTITY_COLUMNS` без серий сезона внутри `metadata`.
+///
+/// Серии сезона лежат в `metadata.episodes` и весят десятки КБ: в списке сезонов сериала это
+/// сотни килобайт на запрос ради четырёх ключей, а в карточке сезона — те же серии вторым
+/// экземпляром рядом с полем `episodes`. Везде, где серии не нужны, выбираем metadata без них.
+pub const ENTITY_COLUMNS_LEAN: &str = concat!(
+    "e.id, e.kind, e.slug, e.title, e.original_title, e.description, \
+     e.release_date, e.cover_url, e.cover_width, e.cover_height, \
+     (e.metadata - 'episodes') AS metadata, e.parent_id, \
+     e.active, ",
+    visible_sql!(),
+    " AS visible, ",
+    release_status_sql!(),
+    " AS release_status, es.imdb_rating, es.imdb_votes, es.tmdb_popularity, es.tmdb_votes, \
+     es.quality, es.rank_score, e.created_at, e.updated_at"
+);
+
 /// К `ENTITY_COLUMNS`: `FROM entities e {ENTITY_STATS_JOIN}`.
 pub const ENTITY_STATS_JOIN: &str = "LEFT JOIN entity_stats es ON es.entity_id = e.id";
 

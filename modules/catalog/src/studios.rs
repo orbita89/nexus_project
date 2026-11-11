@@ -290,7 +290,7 @@ pub async fn get(
         None => None,
     };
     let entities_count: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM entities e WHERE e.metadata @> $1 AND {VISIBLE}
+        "SELECT count(*) FROM entities e WHERE (e.metadata - 'episodes') @> $1 AND {VISIBLE}
            AND NOT coalesce(e.release_date > current_date, false)"
     ))
     .bind(metadata_filter(&row.name))

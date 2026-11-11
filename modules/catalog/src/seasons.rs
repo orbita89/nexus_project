@@ -14,7 +14,7 @@
 use crate::entities::is_admin;
 use crate::metadata::SeriesStatus;
 use crate::models::{
-    page_bounds, Entity, EntityDetail, EntityKind, EntitySummary, Page, ENTITY_COLUMNS,
+    page_bounds, Entity, EntityDetail, EntityKind, EntitySummary, Page, ENTITY_COLUMNS_LEAN,
     ENTITY_STATS_JOIN, ENTITY_SUMMARY_COLUMNS, VISIBLE,
 };
 use axum::extract::State;
@@ -102,33 +102,46 @@ pub struct SeasonDetail {
     pub episodes: Vec<Episode>,
 }
 
-/// Серия сезона. Своего slug'а, рецензий и подборок у серии нет — она не сущность.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+/// Серия сезона. Своего slug'а, рецензий и подборок у серии нет — она не сущность, а данные
+/// сезона: хранится элементом массива `entities.metadata.episodes`, а не строкой таблицы.
+///
+/// Пустые поля в хранилище не лежат (`skip_serializing_if`), поэтому все они с `serde(default)`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Episode {
     pub id: Uuid,
     #[schema(example = 1)]
     pub number: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = "Тяжёлые времена")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = "Welcome to the Playground")]
     pub original_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub air_date: Option<NaiveDate>,
     /// Целые минуты.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 42)]
     pub runtime_minutes: Option<i32>,
     /// Кадр из серии, 16:9 — не постер сериала и не постер сезона. Кадра нет — `null`, и
     /// заглушку (постер сезона, иначе сериала) подставляет фронтенд: пропорции у них другие.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub still_url: Option<String>,
     /// Размеры кадра в пикселях: карточка держит точное `aspect-ratio` до загрузки.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub still_width: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub still_height: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-pub(crate) const EPISODE_COLUMNS: &str = "id, number, title, original_title, overview, air_date, \
-     runtime_minutes, still_url, still_width, still_height, created_at, updated_at";
+/// Массив серий сезона из `metadata`, уже отсортированный записью: `'[]'` там, где ключа нет.
+pub(crate) const EPISODES_JSON: &str =
+    "CASE WHEN jsonb_typeof(e.metadata -> 'episodes') = 'array' \
+          THEN e.metadata -> 'episodes' ELSE '[]'::jsonb END";
 
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -171,7 +184,7 @@ pub async fn list(
         .ok_or(AppError::NotFound)?;
 
     let seasons: Vec<Entity> = sqlx::query_as(&format!(
-        "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN}
+        "SELECT {ENTITY_COLUMNS_LEAN} FROM entities e {ENTITY_STATS_JOIN}
          WHERE e.parent_id = $1 AND ($2 OR {VISIBLE}) ORDER BY {SEASON_ORDER}"
     ))
     .bind(series_id)
@@ -312,7 +325,7 @@ pub async fn episodes(
 /// Сезон по slug'у: невидимый — 404 для всех, кроме админа (как любая сущность).
 async fn season_by_slug(db: &PgPool, slug: &str, admin: bool) -> AppResult<Entity> {
     let season: Option<Entity> = sqlx::query_as(&format!(
-        "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN}
+        "SELECT {ENTITY_COLUMNS_LEAN} FROM entities e {ENTITY_STATS_JOIN}
          WHERE e.slug = $1 AND e.kind = 'season'"
     ))
     .bind(slug)
@@ -329,20 +342,29 @@ pub(crate) async fn episodes_page(
     limit: i64,
     offset: i64,
 ) -> AppResult<(Vec<Episode>, i64)> {
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM episodes WHERE season_id = $1")
-        .bind(season_id)
-        .fetch_one(db)
-        .await?;
-    let items: Vec<Episode> = sqlx::query_as(&format!(
-        "SELECT {EPISODE_COLUMNS} FROM episodes WHERE season_id = $1
-         ORDER BY number, id LIMIT $2 OFFSET $3"
+    // Срез режется в SQL: тащить весь массив сезона ради страницы в 50 серий незачем.
+    // Порядок — тот, в котором серии записаны (по номеру), ordinality его сохраняет.
+    let row: Option<(i32, serde_json::Value)> = sqlx::query_as(&format!(
+        "WITH season AS (SELECT {EPISODES_JSON} AS eps FROM entities e WHERE e.id = $1)
+         SELECT jsonb_array_length(eps),
+                coalesce((SELECT jsonb_agg(value ORDER BY ord)
+                            FROM jsonb_array_elements(eps) WITH ORDINALITY t(value, ord)
+                           WHERE ord > $3 AND ord <= $3 + $2), '[]'::jsonb)
+           FROM season"
     ))
     .bind(season_id)
     .bind(limit)
     .bind(offset)
-    .fetch_all(db)
+    .fetch_optional(db)
     .await?;
-    Ok((items, total))
+    let Some((total, items)) = row else {
+        return Ok((Vec::new(), 0));
+    };
+    let items: Vec<Episode> = serde_json::from_value(items).map_err(|error| {
+        tracing::error!(%season_id, %error, "broken episodes in season metadata");
+        AppError::Internal("broken episodes in season metadata".into())
+    })?;
+    Ok((items, i64::from(total)))
 }
 
 const NO_RATING: RatingValue = RatingValue {
