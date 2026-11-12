@@ -152,9 +152,12 @@ pub async fn sync(
         })
         .collect();
     let bases: Vec<&str> = unique_strs(rows.iter().map(|r| r.base.as_str()));
+    // Занятые слаги: сам base и его нумерованные варианты `base-N` — других [`free_slug`] не
+    // делает. `LIKE ANY(...)` здесь был бы вложенным циклом «каждый base × вся таблица»
+    // (2 тыс. × 75 тыс. = 155 млн сравнений, минуты); равенство бьётся по индексу и хэшу.
     let mut taken: HashSet<String> = sqlx::query_scalar(
-        "SELECT slug FROM studios WHERE slug = ANY($1) OR slug LIKE ANY(
-             SELECT b || '-%' FROM unnest($1::text[]) b)",
+        "SELECT slug FROM studios
+          WHERE slug = ANY($1) OR regexp_replace(slug, '-[0-9]+$', '') = ANY($1)",
     )
     .bind(&bases)
     .fetch_all(db)

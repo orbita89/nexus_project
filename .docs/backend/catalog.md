@@ -582,7 +582,14 @@ CHECK: заполнено хотя бы одно из `entity_id`, `person_id`, 
 | `details_fetched_at` | `timestamptz` | | Когда спросили TMDB (и при 404); NULL — спросить при открытии |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
 
-Dev (2026-10-15): 53 125 названий студий в `metadata.studios`, 53 962 компании в сырье.
+Dev (2026-10-15): 53 125 названий студий в `metadata.studios`, 53 962 компании в сырье;
+2026-11-12 после массовой заливки сериалов — 74 615 строк.
+
+`studios::sync` берёт занятые слаги одним запросом
+`WHERE slug = ANY($1) OR regexp_replace(slug, '-[0-9]+$', '') = ANY($1)`: `free_slug` делает только
+`base` и `base-N`, поэтому равенства достаточно. Бывший `slug LIKE ANY(SELECT b || '-%' …)` шёл
+вложенным циклом «каждый base × вся таблица» — на 2 079 базах и 74 615 студиях это 155 млн
+сравнений и минуты на запрос (2026-11-12).
 
 ### `catalog_import.people` ✅ — связь людей с TMDB и Wikidata
 

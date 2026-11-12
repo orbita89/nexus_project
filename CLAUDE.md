@@ -69,3 +69,11 @@ Restate both diffs in your final answer. Code change without the two doc updates
 - Tests: unit next to code; DB via `#[sqlx::test]` (clean DB per test); HTTP via `nexus::build_app` in `app/tests/*.rs`; fixtures `app/tests/fixtures/*.sql`; fake directories `state.entities = Arc::new(Fake)`.
 - While working: run ONLY the affected suite — `make test-one T=<file> [F=<test>]` (seconds–1 min).
 - DoD: code + migration (if schema) + a test per endpoint + BOTH docs synced (rule 4) + `make lint && make boundaries` + REQUIRED tests green: `make test-one T=<suite>` for every `app/tests/<suite>.rs` touched or covering the changed module (+ `cargo test -p <module> --lib`). NEVER run full `make test` locally — the full suite runs in CI on push; run it only if the user asks.
+
+## 8. Оптимизация токенов (Claude Code)
+
+- Поиск по коду делегировать субагенту `finder` (Haiku). Если пользователь указал конкретный файл через `@`, читать только его.
+- Проверка кода: использовать только `cargo check` (через субагента `checker`), не запускать тяжелый `cargo build --release`.
+- ПРАВИЛО ПО ТЕСТАМ: Пиши качественные unit- и интеграционные тесты для новой функциональности (они запускаются в CI/CD), но НИКОГДА не запускай `cargo test` сам — не трать на это токены. Если в CI упадет тест, я сам пришлю тебе текст ошибки.
+- ЛОГИ И КОМАНДЫ: При запуске `docker logs`, `git log` или SQL-запросов всегда ограничивай вывод (`--tail=30`, `-n 10`, `LIMIT 20`), чтобы не засорять контекст.
+- БЕЗОПАСНОСТЬ: Запрещено читать `.env`, `infra/.env*`, `target/`, `Cargo.lock` и удалять любые данные/файлы проекта.

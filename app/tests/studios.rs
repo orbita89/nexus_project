@@ -270,3 +270,51 @@ async fn studio_pages_and_their_films(pool: PgPool) {
         ["dune-part-two-2024"]
     );
 }
+
+/// Одноимённые студии получают слаги `base`, `base-<tmdb_id>`, `base-2`; повторная синхронизация
+/// видит уже занятые нумерованные слаги и не натыкается на них (запрос занятости ищет и `base-N`).
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn same_named_studios_get_free_numbered_slugs(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let company = |id, name: &str| catalog::studios::Company {
+        name: name.into(),
+        tmdb_id: Some(id),
+        logo_path: None,
+        origin_country: None,
+    };
+
+    sqlx::raw_sql(
+        r#"UPDATE entities SET metadata = '{"studios": ["Квартет И"]}' WHERE slug = 'dune-2021';"#,
+    )
+    .execute(&ctx.state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        catalog::studios::sync(&ctx.state.db, None, &[company(11, "Квартет И")])
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Второе и третье название дают тот же base: занятость считается по `base` и `base-N`.
+    sqlx::raw_sql(
+        r#"UPDATE entities SET metadata = '{"studios": ["Квартет  И", "Квартет И."]}'
+           WHERE slug = 'dune-part-two-2024';"#,
+    )
+    .execute(&ctx.state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        catalog::studios::sync(&ctx.state.db, None, &[company(22, "Квартет  И")])
+            .await
+            .unwrap(),
+        2
+    );
+
+    let slugs: Vec<String> =
+        sqlx::query_scalar("SELECT slug FROM studios WHERE slug LIKE 'kvartet-i%' ORDER BY slug")
+            .fetch_all(&ctx.state.db)
+            .await
+            .unwrap();
+    assert_eq!(slugs, ["kvartet-i", "kvartet-i-2", "kvartet-i-22"]);
+}
