@@ -46,6 +46,13 @@ pub async fn get(
             (SELECT count(*) FROM forum_posts WHERE author_id = $1 AND deleted_at IS NULL)
                 AS posts_count,
             (SELECT count(*) FROM user_likes WHERE liked_id = $1) AS likes_count,
+            (SELECT count(*) FROM (
+                SELECT entity_id FROM entity_likes WHERE user_id = $1
+                UNION SELECT entity_id FROM reviews WHERE user_id = $1
+                UNION SELECT entity_id FROM entity_reactions WHERE user_id = $1
+                UNION SELECT entity_id FROM entity_marks WHERE user_id = $1 AND $2
+                UNION SELECT entity_id FROM entity_notes WHERE user_id = $1 AND $2
+            ) j) AS journal_count,
             EXISTS (SELECT 1 FROM user_likes WHERE user_id = $3 AND liked_id = $1) AS liked,
             EXISTS (SELECT 1 FROM follows WHERE follower_id = $3 AND followee_id = $1) AS following,
             EXISTS (SELECT 1 FROM follows WHERE follower_id = $1 AND followee_id = $3) AS followed_by,
@@ -77,6 +84,8 @@ pub async fn get(
         threads_count: row.threads_count,
         posts_count: row.posts_count,
         likes_count: row.likes_count,
+        // Как и сам журнал: закрытая аналитика — число видит только владелец.
+        journal_count: (is_owner || details.stats_public).then_some(row.journal_count),
         reputation,
         // Гостю и самому себе кнопка не нужна: лайк всегда «не поставлен».
         liked: row.liked,
@@ -96,6 +105,7 @@ struct Counts {
     threads_count: i64,
     posts_count: i64,
     likes_count: i64,
+    journal_count: i64,
     liked: bool,
     following: bool,
     followed_by: bool,
