@@ -815,6 +815,45 @@ pub struct PersonHit {
     /// Основная роль: где вклад в известность больше всего.
     #[schema(example = "actor")]
     pub known_for: Option<String>,
+    /// Число работ в активных сущностях (сезоны не считаются).
+    #[serde(default)]
+    pub works_count: i64,
+    /// До 3 самых известных работ (по числу оценок TMDB); пусто, если работ нет.
+    #[serde(default)]
+    pub top_works: Vec<TopWork>,
+}
+
+/// Работа человека в карточке выдачи поиска людей.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TopWork {
+    #[schema(example = "dune-2021")]
+    pub slug: String,
+    #[schema(example = "Дюна")]
+    pub title: String,
+    /// `movie`, `series`, `book`, `game`, `painting`.
+    #[schema(example = "movie")]
+    pub kind: String,
+    pub year: Option<i32>,
+    pub poster_url: Option<String>,
+}
+
+/// Страница поиска людей: как [`Page`] плюс счётчики по ролям.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PeoplePage {
+    pub items: Vec<PersonHit>,
+    /// Точное число найденных людей (с учётом `q` и `known_for`).
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+    pub facets: PeopleFacets,
+}
+
+/// Счётчики поиска людей.
+#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct PeopleFacets {
+    /// Сколько людей с каждой основной ролью среди найденных по `q` (без фильтра `known_for`);
+    /// ролей с нулём нет.
+    pub known_for: std::collections::BTreeMap<String, i64>,
 }
 
 /// Студия в подсказках: название (значение для `studio`) и сколько сущностей в индексе.

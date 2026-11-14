@@ -1032,16 +1032,29 @@ Meilisearch считал и листал только 1000: `total` был 1000,
 
 ### Поиск людей ✅
 
-Индекс `people` (2026-10-14, `people_search.rs`) — публичные люди (с работой в активной сущности
-или без работ). Документ `PersonDoc`: `id`, `slug`, `full_name`, `original_name`, `birth_date`,
-`photo_url`, `known_for`, `fame` (из `person_stats`). Настройки: `searchableAttributes` —
+Индекс `people` (2026-10-14, `people_search.rs`) — только люди хотя бы с одной работой в активной
+сущности (`INDEXED_PERSON`: `person_credit_counts.active_credits > 0`, с 2026-11-14; люди без работ
+в индексе не нужны, `total` честный). Документ `PersonDoc`: `id`, `slug`, `full_name`, `original_name`,
+`birth_date`, `photo_url`, `known_for`, `fame` (из `person_stats`), `works_count` (работ в активных
+сущностях, сезоны не считаются) и `top_works` (до 3 работ по `entity_stats.tmdb_votes`:
+`{slug, title, kind, year, poster_url}`; считаются лежащим `LEFT JOIN LATERAL`). После выкладки нужна
+перестройка поиска: старые документы без `works_count`/`top_works` отдаются как `0` и `[]`. Настройки: `searchableAttributes` —
 `full_name`, `original_name`; `filterableAttributes` — `known_for`; `sortableAttributes` — `fame`,
 `full_name`; `rankingRules` — `words, typo, proximity, attribute, sort, exactness, fame:desc`; `pagination.maxTotalHits` — 500000:
 известность решает среди одинаково подходящих совпадений («Брэд» → Брэд Питт, затем Брэдли Купер,
 Брэд Бёрд …), точное совпадение имени важнее славы; без `q` — по известности.
 
-`GET /search/people?q=&known_for=&limit=&offset=` → `Page<PersonHit>` (`id`, `slug`, `full_name`,
-`original_name`, `birth_date`, `photo_url`, `known_for`; `fame` не отдаётся). `known_for` —
+`GET /search/people?q=&known_for=&limit=&offset=` → `PeoplePage` (`items`, `total`, `limit`, `offset`,
+`facets`); `PersonHit`: `id`, `slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `known_for`,
+`works_count`, `top_works[]`; `fame` не отдаётся.
+**`facets.known_for`** — `{роль: людей}` среди найденных по `q` без фильтра `known_for` (нулевых ролей
+нет): чипы ролей на фронте. При выбранной роли `total` = `facets.known_for[роль]`.
+**Микс ролей:** без `q` и `known_for` выдача — не общий рейтинг (кино перевесило бы книги и игры), а
+чередование ролей по кругу: роли по убыванию числа людей, `actor` — дважды за круг; роль с
+исчерпанными людьми пропускается; внутри роли порядок по `fame` (то есть по перцентилю внутри роли).
+Страница `[offset, offset+limit)` раскладывается детерминированно (`mix_plan`), по роли — один запрос
+к Meilisearch с `offset`/`limit`, запросы параллельно; соседние страницы не пересекаются. С `q`
+порядок прежний (качество совпадения, затем `fame`). Сортировки и подборки («Именинники») не сделаны. `known_for` —
 `a-z`/`_` (иначе 400), фильтр `known_for = <role>`.
 
 Индекс строится и переключается вместе с `entities` ([«Перестройка поиска»](#перестройка-поиска-),
@@ -1221,7 +1234,7 @@ data: {"type":"done","ok":true,"entity":{ ...карточка как в GET /ent
 2. **fill** — все сущности из PostgreSQL пачками по 500 (keyset по `id`, карточки пачки — двумя
    запросами) в теневой индекс. Пока Meilisearch применяет пачку, читается следующая. Событие
    `progress` после каждой пачки: `{"done": 1000, "total": 100000}`.
-2б. **fill_people** — `refresh_fame` всех людей, затем все публичные люди пачками по 2000 в
+2б. **fill_people** — `refresh_fame` всех людей, затем все люди с активной работой пачками по 2000 в
    `people_v<ms>` (`progress` со `step: fill_people`). Dev: 886 993 человека.
 3. **check** — **каждый** новый индекс должен быть **не меньше `SEARCH_REINDEX_MIN_PERCENT`%** текущего
    (`numberOfDocuments`; по умолчанию и в проде — 80, 0–100, иначе приложение не стартует). Меньше —
@@ -1678,7 +1691,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/archive/entities/{slug}` | Фильм из архива для его страницы (только чтение): `ArchiveDoc` (название, оригинальное название, дата, постер). Публичный. 404 — нет в архиве или неверный slug (фильм мог вернуться на сайт — `GET /entities/{slug}`); 503 — архив недоступен |
 | POST | `/archive/entities/{slug}/restore` | Открыли архивную страницу — вернуть фильм на сайт со всеми данными TMDB ([«Возврат из архива открытием страницы»](#возврат-из-архива-открытием-страницы-)) → 201 `EntityDetail`; уже на сайте → 200 `EntityDetail`. Публичный. 404 — нет ни в архиве, ни на сайте; 409 `kept_in_archive` (убран админом) / `not_restorable` (не фильм TMDB); 429 — лимит `ARCHIVE_RESTORE_PER_HOUR` (`Retry-After`); 503 `restore_unavailable` (нет ключа TMDB, лимит 0) / `tmdb_unavailable` (TMDB не ответил; фильм в архиве) / архив недоступен |
 | GET | `/search` | Весь поиск сайта, Meilisearch, по видимым: `q` (название, оригинальное, студии; пустой — все), фильтры `kind` (можно повторить — `kind=movie&kind=game` — или перечислить через запятую: ИЛИ между типами, И с остальными фильтрами; ранжирование общее по всей выдаче), `tag`, `year` (ровно) или `year_from`/`year_to` (диапазон включительно), `studio` (точное название, без учёта регистра), `studio_slug` (slug студии), `country` (страна производства, код ISO 3166-1 alpha-2; можно повторить или через запятую — ИЛИ между странами, 2026-11-06), `person` (slug, в любой роли) и `person`+`role` (в этой роли) ([«Поиск»](#поиск)). По релевантности; `sort=recommended` / `trending` / `top_rated` — по баллу, TMDB popularity, рейтингу IMDb; `new` (вышедшие, новые сверху), `soon` (будущие, ближайшие сверху), `title` (без значения — в конце), `popular` (больше оценок Nexus, затем новее), `rating` (средняя оценка Nexus, затем число оценок, затем новее; без оценок — в конце; оценки доезжают до индекса за ~1 мин), `random` (случайное окно выдачи: `limit=1` — одна случайная работа под теми же фильтрами); другое значение — 400. `total` — точное число совпадений (до 500000), листается весь результат. 400 — неизвестный `kind` (в том числе рядом с верным), `year` вместе с диапазоном, `year_from > year_to`, год вне 1–9998, пустая/длинная (>200) студия, неизвестный код страны в `country`, `role` без `person`, неверный slug тега/человека |
-| GET | `/search/people` | Поиск людей, Meilisearch, индекс `people` ([«Поиск людей»](#поиск-людей-)): `q` (имя по-русски или латиницей, опечатки, начало слова; до 300 символов; пустой — самые известные), `known_for` (основная роль: `actor`, `director`, …), `limit` 1–100 (20), `offset` → `Page<PersonHit>` (`total` точный): `id`, `slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `known_for`. Ранжирование — качество совпадения, затем известность (`person_stats.fame`). 400 — длинный `q`, `known_for` не `a-z`/`_`; 503 — Meilisearch недоступен; индекса нет — пустая страница |
+| GET | `/search/people` | Поиск людей, Meilisearch, индекс `people` ([«Поиск людей»](#поиск-людей-)): `q` (имя по-русски или латиницей, опечатки, начало слова; до 300 символов; пустой — чередование ролей, внутри роли самые известные), `known_for` (основная роль: `actor`, `director`, …), `limit` 1–100 (20), `offset` → `PeoplePage` (`total` точный; `facets.known_for` — людей по ролям среди найденных по `q`): `id`, `slug`, `full_name`, `original_name`, `birth_date`, `photo_url`, `known_for`, `works_count`, `top_works[]` (`slug`, `title`, `kind`, `year`, `poster_url`; до 3). Ранжирование с `q` — качество совпадения, затем известность (`person_stats.fame`). В индексе только люди с работой в активной сущности. 400 — длинный `q`, `known_for` не `a-z`/`_`; 503 — Meilisearch недоступен; индекса нет — пустая страница |
 | GET | `/search/studios` | Подсказки для фильтра `studio` (facet search Meilisearch): `q` — часть названия, опечатки допустимы (пустой — самые частые), `kind`, `limit` 1–50 (10) → `[{"name", "slug", "count", "logo_url"}]` (`slug` — страница студии, значение для `studio_slug`; `null` — страницы нет; `logo_url` — логотип студии, как в `/studios/{slug}`, `null` — его нет; и то и другое из `studios` одним запросом на ответ, 2026-11-06). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` |
 | GET | `/search/publishers` | Подсказки для фильтра `publisher` (facet search по полю `publishers`): издательство книги, издатель или разработчик игры. `q`, `kind`, `limit` 1–50 (10) → `[{"name", "count", "logo_url"}]` (`logo_url` — логотип студии с тем же названием, обычно `null`, 2026-11-06). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |
 | GET | `/search/tags` | Подсказки для фильтра `tag`: теги и жанры, которые есть у сущностей этого `kind` (жанры фильмов не предлагаются в книгах). `q` (по slug'у), `kind`, `limit` 1–50 (10) → `[{"slug", "name", "kind", "count"}]` (название и `kind` — из таблицы `tags`). 400 — `q` длиннее 200; 503 — Meilisearch недоступен; индекса нет — `[]` (2026-10-30) |

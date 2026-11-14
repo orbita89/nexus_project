@@ -2199,7 +2199,7 @@ async fn reindex_stream_reports_progress_rotation_and_isr(pool: PgPool) {
     assert_eq!(done["type"], "done");
     assert_eq!(done["ok"], true);
     assert_eq!(done["reindex"]["indexed"], 5);
-    assert_eq!(done["reindex"]["people_indexed"], 4);
+    assert_eq!(done["reindex"]["people_indexed"], 3);
     assert_eq!(isr.bodies(), [json!({ "all": true })]);
     // Фронтенд пересобирает в фоне: шаг сообщает «запущена», а не «пересобрана».
     let isr_done = events
@@ -2279,7 +2279,8 @@ async fn people_search_ranks_by_fame(pool: PgPool) {
 
     let (status, body) = ctx.reindex("").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["people_indexed"], 5);
+    // «nobody» без работ в индекс не попадает.
+    assert_eq!(body["people_indexed"], 4);
     let stats: Vec<(String, f64, Option<String>)> = sqlx::query_as(
         "SELECT p.slug, s.fame, s.known_for FROM person_stats s JOIN people p ON p.id = s.person_id
          ORDER BY s.fame DESC, p.slug",
@@ -2310,12 +2311,34 @@ async fn people_search_ranks_by_fame(pool: PgPool) {
     assert_eq!(page["items"][0]["original_name"], "Denis Villeneuve");
     assert_eq!(page["items"][0]["known_for"], "director");
     assert!(page["items"][0].get("fame").is_none(), "{page}");
+    // Без запроса и роли — чередование ролей (актёры дважды за круг), а не общий рейтинг.
     let page = ctx.get_ok("/search/people?limit=3").await;
     assert_eq!(
         person_slugs(&page),
-        ["denis-villeneuve", "timothee-chalamet", "frank-herbert"]
+        ["timothee-chalamet", "denis-villeneuve", "frank-herbert"]
     );
-    assert_eq!(page["total"], 5);
+    assert_eq!(page["total"], 4);
+    assert_eq!(
+        page["facets"]["known_for"],
+        json!({ "actor": 2, "author": 1, "director": 1 })
+    );
+    let rest = ctx.get_ok("/search/people?limit=3&offset=3").await;
+    assert_eq!(person_slugs(&rest), ["denis-extra"]);
+    // Счётчики не зависят от выбранной роли и сходятся с её `total`.
+    let actors = ctx.get_ok("/search/people?known_for=actor").await;
+    assert_eq!(actors["total"], actors["facets"]["known_for"]["actor"]);
+    // Карточка: число работ и до 3 известных, по числу оценок.
+    let page = ctx.get_ok("/search/people?q=villenuve").await;
+    let card = &page["items"][0];
+    assert_eq!(card["works_count"], 2);
+    let top: Vec<&str> = card["top_works"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(top, ["dune-2021", "dune-part-two-2024"]);
+    assert_eq!(card["top_works"][0]["kind"], "movie");
     assert_eq!(
         person_slugs(&ctx.get_ok("/search/people?q=villenuve").await),
         ["denis-villeneuve"],
