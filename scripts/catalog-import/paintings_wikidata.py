@@ -66,8 +66,10 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote, unquote, urlparse
 
 import psycopg2
@@ -94,6 +96,22 @@ MIN_SIZE_CM, MAX_SIZE_CM = 0.1, 10_000.0
 MAX_SLUG_BASE = 80
 BATCH = 50
 RETRIES = 5
+# Сколько id брать у WDQS за один запрос и сколько картин обрабатывать за один проход (запрос
+# заявлений, названий связанных сущностей, описаний, размеров и IIIF идёт пачкой на чанк: мельче —
+# лишние round-trip, крупнее — прогон долго не доходит до первой записи в БД).
+SPARQL_PAGE = 10_000
+CHUNK = 150
+# Верхняя полоса обхода: картин с таким числом языковых разделов немного, их берём одним запросом.
+TOP_BAND = 40
+# Потоки на манифесты IIIF: хостов много и они чужие, лимит Wikimedia сюда не относится.
+IIIF_WORKERS = 16
+# Потоки на пачки к API Викимедиа. Пачки независимы, а время уходит не на их счёт, а на дорогу:
+# один round-trip через прокси ~1 с, и последовательные 50 пачек на чанк — это минута ожидания.
+API_WORKERS = 1
+
+# qid → название, на весь прогон. Чанки перекрываются по художникам, музеям и техникам почти
+# полностью, и повторный запрос одного и того же стоил дороже всей остальной заливки.
+NAMES: dict[str, str | None] = {}
 # Пауза между запросами к API Викимедиа: без неё `wbgetentities` отвечает 429 уже на второй
 # пачке. Переопределяется ключом --delay.
 DELAY = 1.5
@@ -141,21 +159,39 @@ def clean(value: str | None, limit: int) -> str | None:
 # ---------------------------------------------------------------- Wikidata
 
 
-def http(session: requests.Session, method: str, url: str, delay: float = 0.0, **kwargs) -> dict:
-    """Запрос с повторами: у Wikimedia бывают 429 и 503. `delay` — пауза перед запросом."""
+def http(session: requests.Session, method: str, url: str, delay: float = 0.0,
+         retries: int = RETRIES, timeout: int = 120, **kwargs) -> dict:
+    """Запрос с повторами: у Wikimedia бывают 429 и 503. `delay` — пауза перед запросом.
+
+    `retries`/`timeout` переопределяются для чужих серверов: лестница пауз рассчитана на то, что
+    Wikimedia пустит нас через минуту, а у музейного хоста с протухшим сертификатом ждать нечего.
+    """
     if delay:
         time.sleep(delay)
-    for attempt in range(RETRIES + 1):
+    wikimedia = ".wikimedia.org" in url or ".wikidata.org" in url or ".wikipedia.org" in url
+    limiter = limiter_for(url) if wikimedia else None
+    retry_after = 0.0
+    for attempt in range(retries + 1):
         try:
-            response = session.request(method, url, timeout=120, **kwargs)
+            if limiter:
+                limiter.take()
+            response = session.request(method, url, timeout=timeout, **kwargs)
+            if response.status_code == 429:
+                # Сервер сам говорит, сколько ждать (обычно ~10 с) — это точнее нашей лестницы.
+                retry_after = min(float(response.headers.get("Retry-After") or 0) or 0, 60)
+                if limiter:
+                    limiter.penalize()
             if response.status_code in (429, 500, 502, 503, 504):
                 raise RuntimeError(f"HTTP {response.status_code}")
             response.raise_for_status()
+            if limiter:
+                limiter.reward()
             return response.json()
         except (requests.RequestException, ValueError, RuntimeError) as error:
-            if attempt == RETRIES:
+            if attempt == retries:
                 raise RuntimeError(f"{url}: {error}") from error
-            pause = 10 * (attempt + 1)
+            pause = retry_after or 10 * (attempt + 1)
+            retry_after = 0.0
             log.warning("%s: %s — повтор через %s с", url, error, pause)
             time.sleep(pause)
     raise RuntimeError("unreachable")
@@ -179,15 +215,177 @@ LIMIT {limit}"""
     return ids
 
 
+class Limiter:
+    """Общий на весь процесс темп запросов к Викимедиа.
+
+    Лимит у них на клиента, а не на хост: 429 прилетает одновременно от wikidata.org,
+    commons.wikimedia.org и ru.wikipedia.org. Поэтому паузы «между пачками» внутри каждого
+    этапа не работали — считать надо все запросы вместе, одним счётчиком. На 429 темп
+    снижается вдвое и затем медленно восстанавливается: так прогон сам находит потолок.
+    """
+
+    def __init__(self, rps: float):
+        self.rps = self.target = rps
+        # Ёмкость корзины — не меньше одного запроса: при темпе 0,5/с корзина на 0,5 токена
+        # никогда не накопит целого, и take() ждёт вечно. Так прогон и зависал.
+        self.allowance = self.capacity = max(1.0, rps)
+        self.last = time.monotonic()
+        self.good = 0
+        self.lock = threading.Lock()
+
+    def take(self) -> None:
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                self.allowance = min(self.capacity,
+                                     self.allowance + (now - self.last) * self.rps)
+                self.last = now
+                if self.allowance >= 1:
+                    self.allowance -= 1
+                    return
+                wait = (1 - self.allowance) / self.rps
+            time.sleep(wait)
+
+    def penalize(self) -> None:
+        with self.lock:
+            self.rps = max(0.5, self.rps / 2)
+            self.good = 0
+            log.info("429: темп снижен до %.1f запросов/с", self.rps)
+
+    def reward(self) -> None:
+        with self.lock:
+            self.good += 1
+            if self.good >= 50 and self.rps < self.target:
+                self.rps = min(self.target, self.rps * 1.2)
+                self.good = 0
+
+
+# Темп на каждую вики отдельно: лимит считает каждая своя, и общий счётчик зря держал бы
+# Commons на скорости самого строгого. Замер (probe_rate): `wbgetentities` по 50 id отдаёт 429
+# уже на 1 запросе в секунду, при 0,5 идёт ровно; imageinfo и extracts терпят вдвое больше.
+LIMITERS = {
+    # Чуть ниже замеренного потолка: 429 стоит 40 секунд ожидания по их Retry-After, и дешевле
+    # не доезжать до него, чем упираться и ждать.
+    "wikidata.org": Limiter(0.4),
+    "commons.wikimedia.org": Limiter(1.0),
+    "ru.wikipedia.org": Limiter(1.5),
+}
+LIMITER = Limiter(1.0)  # всё прочее в домене Викимедиа
+
+
+def limiter_for(url: str) -> Limiter:
+    for host, limiter in LIMITERS.items():
+        if host in url:
+            return limiter
+    return LIMITER
+
+_local = threading.local()
+
+
+def api_session() -> requests.Session:
+    """Сессия потока: `requests.Session` не потокобезопасен, а пул соединений на поток как раз и
+    держит keep-alive к api.wikidata.org."""
+    if not hasattr(_local, "session"):
+        _local.session = requests.Session()
+        _local.session.headers["User-Agent"] = USER_AGENT
+    return _local.session
+
+
+def fan_out(items: list, size: int, call) -> list:
+    """Разбить `items` на пачки по `size` и выполнить на каждой `call(session, chunk)`.
+
+    По умолчанию (`API_WORKERS = 1`) — последовательно, и это не упущение. Лимит Викимедиа
+    считается на клиента, а не на хост и не на соединение: параллельные пачки упираются в тот же
+    потолок, только приходят к нему в виде 429 и лестницы повторов. Темп держит `LIMITER`.
+    """
+    chunks = [items[start:start + size] for start in range(0, len(items), size)]
+    if API_WORKERS <= 1 or len(chunks) <= 1:
+        return [call(api_session(), chunk) for chunk in chunks]
+    with ThreadPoolExecutor(max_workers=min(API_WORKERS, len(chunks))) as pool:
+        return list(pool.map(lambda chunk: call(api_session(), chunk), chunks))
+
+
+def _ids_page(session: requests.Session, where: str, offset: int, delay: float) -> list[str]:
+    """Страница id картин по условию `where`. Порядок — по id: он стабилен между страницами,
+    а `ORDER BY DESC(?sitelinks)` на больших окнах WDQS не доводит до конца (504)."""
+    sparql = f"""SELECT ?item WHERE {{
+  ?item wdt:P31 wd:Q3305213 ; wdt:P18 ?image .
+  {where}
+}}
+ORDER BY ?item
+LIMIT {SPARQL_PAGE} OFFSET {offset}"""
+    data = http(session, "GET", WDQS, delay=delay, params={"query": sparql, "format": "json"})
+    return [row["item"]["value"].rsplit("/", 1)[-1] for row in data["results"]["bindings"]
+            if row["item"]["value"].rsplit("/", 1)[-1].startswith("Q")]
+
+
+def sweep_paintings(session: requests.Session, min_sitelinks: int, ru: bool,
+                    delay: float = 0.0, cache: str | None = None) -> list[str]:
+    """Все картины от известных к неизвестным — для заливки раздела целиком.
+
+    `top_paintings` берёт список одним запросом с `ORDER BY DESC(?sitelinks)`; на десятках тысяч
+    строк WDQS на такой сортировке отваливается по таймауту. Поэтому идём полосами: отдельный
+    запрос на каждое значение sitelinks сверху вниз (внутри полосы — страницами по id). Полосы
+    заодно сохраняют нужный порядок: сначала «Мона Лиза», в конце — безымянные холсты.
+
+    `ru` добавляет хвостом картины с русским названием, не дотянувшие до порога: раздел русский,
+    и полотно из Третьяковки нужнее очередного provincial portrait с одной языковой ссылкой.
+
+    Каждая полоса кладётся в свой файл в `cache`: WDQS на таких запросах регулярно отвечает 504,
+    и сорванный сбор не должен стоить всех уже собранных полос.
+    """
+    ids: list[str] = []
+    seen: set[str] = set()
+
+    def take(where: str, what: str, key: str) -> None:
+        path = os.path.join(cache, f"{key}.txt") if cache else None
+        if path and os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                page_ids = [line.strip() for line in fh if line.strip()]
+        else:
+            page_ids, offset = [], 0
+            while True:
+                page = _ids_page(session, where, offset, delay)
+                page_ids.extend(page)
+                if len(page) < SPARQL_PAGE:
+                    break
+                offset += SPARQL_PAGE
+            if path:
+                os.makedirs(cache, exist_ok=True)
+                tmp = f"{path}.tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write("".join(f"{qid}\n" for qid in page_ids))
+                os.replace(tmp, path)  # атомарно: оборванный файл не станет кэшем
+        fresh = [q for q in page_ids if q not in seen]
+        seen.update(fresh)
+        ids.extend(fresh)
+        log.info("Wikidata: %s — %d, всего %d", what, len(page_ids), len(ids))
+
+    top = max(min_sitelinks, TOP_BAND)
+    take(f"?item wikibase:sitelinks ?s . FILTER(?s >= {top})", f"sitelinks >= {top}", f"top{top}")
+    for value in range(top - 1, min_sitelinks - 1, -1):
+        take(f"?item wikibase:sitelinks ?s . FILTER(?s = {value})",
+             f"sitelinks = {value}", f"s{value}")
+    if ru:
+        take(f'?item rdfs:label ?l . FILTER(lang(?l) = "ru") '
+             f"?item wikibase:sitelinks ?s . FILTER(?s < {min_sitelinks})",
+             "русское название ниже порога", f"ru-below{min_sitelinks}")
+    return ids
+
+
 def entities(session: requests.Session, ids: list[str], props: str, delay: float = DELAY) -> dict:
-    """`wbgetentities` пачками по 50 (предел API), с паузой между пачками."""
-    found = {}
-    for start in range(0, len(ids), BATCH):
-        chunk = ids[start:start + BATCH]
-        data = http(session, "GET", WIKIDATA_API, delay=delay, params={
+    """`wbgetentities` пачками по 50 (предел API), параллельно, с паузой внутри каждой.
+
+    `session` берётся свой на поток (`fan_out`), аргумент оставлен ради вызовов из `fill_*`.
+    """
+    def call(s: requests.Session, chunk: list[str]) -> dict:
+        return http(s, "POST", WIKIDATA_API, delay=delay, data={
             "action": "wbgetentities", "ids": "|".join(chunk), "props": props,
             "languages": "ru|en", "sitefilter": "ruwiki", "format": "json",
         })
+
+    found: dict = {}
+    for data in fan_out(ids, BATCH, call):
         found.update(data.get("entities") or {})
     return found
 
@@ -277,16 +475,17 @@ def cover_sizes(session: requests.Session, names: list[str],
     """Размеры тех самых копий шириной COVER_WIDTH, пачками по 50: `imageinfo` с `iiurlwidth`
     возвращает `thumbwidth`/`thumbheight` — ровно то, что получит браузер. У файла уже этой
     ширины или уже её (панорамы) миниатюры нет, тогда берём размеры оригинала."""
-    sizes = {}
-    for start in range(0, len(names), BATCH):
-        chunk = names[start:start + BATCH]
-        data = http(session, "GET", COMMONS_API, delay=delay, params={
+    def call(s: requests.Session, chunk: list[str]) -> dict:
+        return http(s, "POST", COMMONS_API, delay=delay, data={
             # `thumbwidth`/`thumbheight` приходят только вместе с `iiprop=url`; с одним `size`
             # ответ — размеры оригинала, и в базу попадали бы они, а не скачиваемая копия.
             "action": "query", "prop": "imageinfo", "iiprop": "size|url",
             "iiurlwidth": COVER_WIDTH, "redirects": 1,
             "titles": "|".join(f"File:{name}" for name in chunk), "format": "json",
         })
+
+    sizes = {}
+    for data in fan_out(names, BATCH, call):
         for page in ((data.get("query") or {}).get("pages") or {}).values():
             info = (page.get("imageinfo") or [{}])[0]
             width = info.get("thumbwidth") or info.get("width")
@@ -311,14 +510,15 @@ def image_copies(session: requests.Session, names: list[str],
 
     Файл у́же запрошенного (миниатюры нет) — отдаём оригинал с его размерами.
     """
-    copies = {}
-    for start in range(0, len(names), BATCH):
-        chunk = names[start:start + BATCH]
-        data = http(session, "GET", COMMONS_API, delay=delay, params={
+    def call(s: requests.Session, chunk: list[str]) -> dict:
+        return http(s, "POST", COMMONS_API, delay=delay, data={
             "action": "query", "prop": "imageinfo", "iiprop": "size|url",
             "iiurlwidth": IMAGE_WIDTH, "redirects": 1,
             "titles": "|".join(f"File:{name}" for name in chunk), "format": "json",
         })
+
+    copies = {}
+    for data in fan_out(names, BATCH, call):
         for page in ((data.get("query") or {}).get("pages") or {}).values():
             info = (page.get("imageinfo") or [{}])[0]
             title = (page.get("title") or "").removeprefix("File:").replace(" ", "_")
@@ -326,6 +526,51 @@ def image_copies(session: requests.Session, names: list[str],
             if title and copy:
                 copies[title] = copy
     return copies
+
+
+def commons_sizes(session: requests.Session, names: list[str],
+                  delay: float = DELAY) -> tuple[dict[str, tuple[int, int]],
+                                                 dict[str, tuple[str, int, int]]]:
+    """Размеры обложки и большой копии — из размеров оригинала, одним лёгким запросом на 50 файлов.
+
+    `cover_sizes` и `image_copies` просят `imageinfo` с `iiurlwidth`, а это не чтение, а заказ:
+    Commons рендерит миниатюру каждого полотна и отвечает, только когда готова вся пачка. На
+    свежих файлах (а у нас все свежие) это десятки секунд на пачку и главная статья расходов
+    всего прогона.
+
+    Между тем сами миниатюры при импорте никому не нужны — нужны их размеры, а MediaWiki
+    масштабирует пропорционально, так что они считаются из размеров оригинала. Адреса строим
+    через `Special:FilePath` с нужной шириной: тем же способом, что и `cover_url`, который так
+    работает с первого прогона. Отрендерит их Commons лениво — когда первый читатель откроет
+    картину, по одной, а не 47 тысяч разом.
+    """
+    sizes: dict[str, tuple[int, int]] = {}
+    copies: dict[str, tuple[str, int, int]] = {}
+
+    def call(s: requests.Session, chunk: list[str]) -> dict:
+        return http(s, "POST", COMMONS_API, delay=delay, data={
+            "action": "query", "prop": "imageinfo", "iiprop": "size", "redirects": 1,
+            "titles": "|".join(f"File:{name}" for name in chunk), "format": "json",
+        })
+
+    for data in fan_out(names, BATCH, call):
+        for page in ((data.get("query") or {}).get("pages") or {}).values():
+            info = (page.get("imageinfo") or [{}])[0]
+            title = (page.get("title") or "").removeprefix("File:").replace(" ", "_")
+            full_width, full_height = info.get("width"), info.get("height")
+            if not (title and isinstance(full_width, int) and isinstance(full_height, int)
+                    and full_width > 0 and full_height > 0):
+                continue
+            for width, into in ((COVER_WIDTH, sizes), (IMAGE_WIDTH, copies)):
+                # Оригинал у́же запрошенного — его и отдадут, увеличивать нечего.
+                shown = min(width, full_width)
+                height = max(1, round(full_height * shown / full_width))
+                if into is sizes:
+                    sizes[title] = (shown, height)
+                else:
+                    copies[title] = (f"{COMMONS_FILEPATH}{quote(title)}?width={shown}",
+                                     shown, height)
+    return sizes, copies
 
 
 def copy_of(info: dict) -> tuple[str, int, int] | None:
@@ -357,7 +602,11 @@ def iiif_base_of(session: requests.Session, manifest_url: str, delay: float) -> 
     или без сервиса изображений — `None`, тогда у картины останется только `image_url`.
     """
     try:
-        data = http(session, "GET", manifest_url, delay=delay)
+        # Без повторов и с коротким таймаутом: манифест живёт на сервере музея, а не у Wikimedia.
+        # Половина их отвечает 403, 404 или протухшим сертификатом, и лестница 10+20+30+40+50 с
+        # на каждой такой картине обходилась дороже всей остальной заливки. IIIF — украшение
+        # (зум тайлами), без него остаётся `image_url`; добрать его можно `--fill-images`.
+        data = http(session, "GET", manifest_url, delay=delay, retries=0, timeout=10)
     except RuntimeError as error:
         log.debug("манифест %s: %s", manifest_url, error)
         return None
@@ -386,15 +635,33 @@ def iiif_base_of(session: requests.Session, manifest_url: str, delay: float) -> 
 
 def iiif_bases(session: requests.Session, entities_by_id: dict,
                delay: float = DELAY) -> dict[str, str]:
-    """qid → базовый адрес IIIF у тех картин, у которых в Wikidata есть манифест (P6108)."""
-    bases = {}
+    """qid → базовый адрес IIIF у тех картин, у которых в Wikidata есть манифест (P6108).
+
+    Манифесты тянем параллельно: это десятки разных музейных серверов, очередь к ним не нужна
+    (пауза `delay` существует ради лимитов Wikimedia, а здесь мы не у Wikimedia), а медленный
+    хост не должен задерживать остальные.
+    """
+    wanted: dict[str, str] = {}
     for qid, entity in entities_by_id.items():
         for claim in claims(entity, P_IIIF_MANIFEST):
             url = value_of(claim)
             if isinstance(url, str) and url.startswith(("http://", "https://")):
-                if base := iiif_base_of(session, url, delay):
-                    bases[qid] = base
-                break
+                wanted[qid] = url
+            break
+    if not wanted:
+        return {}
+    bases: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=IIIF_WORKERS) as pool:
+        # `api_session()` зовётся внутри задачи: вычисли её здесь — и все потоки получили бы
+        # одну сессию главного потока, а она не потокобезопасна.
+        futures = {pool.submit(lambda u: iiif_base_of(api_session(), u, 0.0), url): qid
+                   for qid, url in wanted.items()}
+        for future in as_completed(futures):
+            try:
+                if base := future.result():
+                    bases[futures[future]] = base
+            except Exception as error:  # чужой сервер не должен ронять прогон
+                log.debug("манифест %s: %s", wanted[futures[future]], error)
     return bases
 
 
@@ -411,16 +678,15 @@ def ruwiki_titles(entities_by_id: dict) -> dict[str, str]:
 def extracts(session: requests.Session, titles: dict[str, str],
              delay: float = DELAY) -> dict[str, str]:
     """Вступления статей ру-Википедии пачками по 20: это описание карточки."""
-    by_title = {}
-    names = list(titles.values())
-    for start in range(0, len(names), 20):
-        chunk = names[start:start + 20]
-        data = http(session, "GET", RUWIKI_API, delay=delay, params={
+    def call(s: requests.Session, chunk: list[str]) -> dict:
+        return http(s, "POST", RUWIKI_API, delay=delay, data={
             "action": "query", "prop": "extracts", "exintro": 1, "explaintext": 1,
             "redirects": 1, "titles": "|".join(chunk), "format": "json",
         })
-        pages = (data.get("query") or {}).get("pages") or {}
-        for page in pages.values():
+
+    by_title = {}
+    for data in fan_out(list(titles.values()), 20, call):
+        for page in (((data.get("query") or {}).get("pages")) or {}).values():
             if page.get("title") and page.get("extract"):
                 by_title[page["title"]] = page["extract"]
     return {qid: by_title[title] for qid, title in titles.items() if title in by_title}
@@ -659,6 +925,84 @@ def fill_images(conn, session: requests.Session, delay: float, dry_run: bool,
 # ---------------------------------------------------------------- main
 
 
+def read_checkpoint(path: str) -> set[str]:
+    """Пройденные qid. Нужны не вместо `known_qids`, а вместе: в базу попадают только записанные,
+    а отсеянные (без названия, без размеров) иначе перечитывались бы при каждом перезапуске."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return {line.strip() for line in fh if line.strip()}
+    except FileNotFoundError:
+        return set()
+
+
+def append_checkpoint(path: str, qids: list[str]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("".join(f"{qid}\n" for qid in qids))
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def process(conn, session: requests.Session, chunk: list[str], args, limit: int,
+            stats: dict, written_slugs: list[str]) -> None:
+    """Один проход: от заявлений Wikidata до строк в БД. Запросы связанных данных (названия
+    художников и музеев, описания, размеры, IIIF) идут пачками на весь чанк, а не на картину."""
+    spent: dict[str, float] = {}
+
+    def timed(name: str, call):
+        started = time.monotonic()
+        try:
+            return call()
+        finally:
+            spent[name] = round(time.monotonic() - started, 1)
+            log.info("  этап %s: %.1f с", name, spent[name])
+
+    found = timed("картины", lambda: entities(session, chunk, "labels|claims|sitelinks",
+                                              args.delay))
+    linked = sorted({q for entity in found.values()
+                     for prop in (P_CREATOR, P_COLLECTION, P_LOCATION, P_MATERIAL,
+                                  P_GENRE, P_MOVEMENT)
+                     for q in refs(entity, prop)})
+    # Художники, музеи, техники и жанры повторяются от чанка к чанку: «холст, масло» стоит у
+    # каждой второй картины, Лувр — у тысяч. Спрашиваем только тех, кого ещё не видели, —
+    # на этом этапе уходило больше времени, чем на всё остальное вместе.
+    unknown = [q for q in linked if q not in NAMES]
+    files = sorted({name for entity in found.values() if (name := cover_file(entity))})
+    # Этапы идут друг за другом: хосты разные, но лимит Викимедиа — общий, и разводить их по
+    # потокам означало лишь быстрее упереться в 429. Темп держит LIMITER, он один на всех.
+    fetched = timed("связанные", lambda: entities(session, unknown, "labels", args.delay))
+    descriptions = timed("описания", lambda: extracts(session, ruwiki_titles(found), args.delay))
+    sizes, images = timed("картинки", lambda: commons_sizes(session, files, args.delay))
+    # IIIF там, где он есть у источника: с ним зум идёт тайлами, а кроп считает сервер.
+    # В массовом прогоне его не трогаем: это десятки запросов на чанк к чужим музейным
+    # серверам ради 3% попаданий. Добирается потом одним `--fill-images`.
+    iiif = ({} if args.no_iiif
+            else timed("iiif", lambda: iiif_bases(session, found, args.delay)))
+    for qid, entity in fetched.items():
+        NAMES[qid] = clean(label(entity, "ru") or label(entity, "en"), MAX_TEXT)
+    for qid in unknown:  # не нашёлся — помним и это, иначе будем спрашивать его вечно
+        NAMES.setdefault(qid, None)
+    names = {qid: name for qid in linked if (name := NAMES.get(qid))}
+    log.info("этапы, с: %s · IIIF у %d из %d", spent, len(iiif), len(found))
+    write_started = time.monotonic()
+    for qid in chunk:
+        if limit and stats["written"] >= limit:
+            return
+        entity = found.get(qid)
+        row = row_of(qid, entity, names, descriptions.get(qid), sizes, images, iiif) \
+            if entity else None
+        if not row:
+            stats["skipped"] += 1
+            continue
+        result = "written" if args.dry_run else save(conn, row)
+        stats[result] += 1
+        if result == "written" and row.get("slug"):
+            written_slugs.append(row["slug"])
+        log.debug("%s %s (%s, %s)", result, row["title"], row["year"],
+                  row["metadata"].get("museum"))
+    log.info("запись в БД: %.1f с", time.monotonic() - write_started)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--limit", type=int, default=None,
@@ -670,8 +1014,28 @@ def main() -> int:
                         help="сколько id брать у Wikidata (по умолчанию --limit * 3). Нужно для "
                              "добора: самые известные уже записаны, и окно id надо раздвинуть "
                              "дальше них, не поднимая число записываемых")
-    parser.add_argument("--delay", type=float, default=DELAY,
-                        help="пауза между запросами к API Викимедиа, с (429 — увеличить)")
+    parser.add_argument("--sweep", action="store_true",
+                        help="залить раздел целиком: обход полосами сверху вниз вместо одного "
+                             "запроса «топ-N». С ним --limit по умолчанию без ограничения")
+    parser.add_argument("--ru", action="store_true",
+                        help="с --sweep: добрать картины с русским названием, не дотянувшие до "
+                             "--min-sitelinks")
+    parser.add_argument("--no-iiif", action="store_true",
+                        help="не ходить за манифестами IIIF (музейные серверы медленные, "
+                             "попаданий ~3%%); добрать потом ключом --fill-images")
+    parser.add_argument("--ids-cache", default=None,
+                        help="каталог, куда складывать собранные полосы id (обычно "
+                             "cache/paintings-ids): перезапуск не пересобирает их у WDQS")
+    parser.add_argument("--checkpoint", default=None,
+                        help="файл пройденных qid; перезапуск продолжает с него "
+                             "(обычно cache/paintings.checkpoint)")
+    parser.add_argument("--delay", type=float, default=0.0,
+                        help="дополнительная пауза перед каждым запросом, с (обычно не нужна: "
+                             "темп держит общий лимитер --rps)")
+    parser.add_argument("--rps", type=float, default=1.0,
+                        help="множитель к темпу запросов (1 — замеренный потолок Викимедиа: "
+                             "0,5 запроса/с к Wikidata, 1,5 к Commons и Википедии). На 429 "
+                             "скрипт снижает темп сам и слушает Retry-After")
     parser.add_argument("--fill-sizes", action="store_true",
                         help="только дозаполнить cover_width/cover_height у записанных картин")
     parser.add_argument("--fill-images", action="store_true",
@@ -687,6 +1051,10 @@ def main() -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    if args.rps:  # --rps масштабирует все лимиты разом, сохраняя их соотношение
+        for limiter in (*LIMITERS.values(), LIMITER):
+            limiter.rps = limiter.target = limiter.target * args.rps
+            limiter.allowance = limiter.capacity = max(1.0, limiter.rps)
     dsn = os.environ.get("DATABASE_URL")
     if not dsn and not args.dry_run:
         log.error("DATABASE_URL is not set")
@@ -710,49 +1078,31 @@ def main() -> int:
             conn.close()
         return 0
     known = known_qids(conn) if conn else set()
+    done = read_checkpoint(args.checkpoint) if args.checkpoint else set()
     stats = {"written": 0, "known": 0, "duplicate": 0, "skipped": 0}
     written_slugs: list[str] = []
     try:
-        # С запасом: часть картин уже записана, часть отсеется без названия или изображения.
-        limit = args.limit or 100
-        ids = top_paintings(session, args.pool or limit * 3, args.min_sitelinks)
+        limit = args.limit if args.limit is not None else (0 if args.sweep else 100)
+        if args.sweep:
+            ids = sweep_paintings(session, args.min_sitelinks, args.ru, args.delay,
+                                  args.ids_cache)
+        else:
+            # С запасом: часть картин уже записана, часть отсеется без названия или изображения.
+            ids = top_paintings(session, args.pool or (limit or 100) * 3, args.min_sitelinks)
         log.info("Wikidata: %d картин по известности", len(ids))
-        fresh = [qid for qid in ids if qid not in known]
+        fresh = [qid for qid in ids if qid not in known and qid not in done]
         stats["known"] = len(ids) - len(fresh)
-        fresh = fresh[:max(limit * 2, limit + 100)]
-        found = entities(session, fresh, "labels|claims|sitelinks", args.delay)
-        # Названия всего, на что ссылаются картины, — одной пачкой на весь прогон.
-        linked = sorted({q for entity in found.values()
-                         for prop in (P_CREATOR, P_COLLECTION, P_LOCATION, P_MATERIAL,
-                                      P_GENRE, P_MOVEMENT)
-                         for q in refs(entity, prop)})
-        names = {qid: clean(label(e, "ru") or label(e, "en"), MAX_TEXT)
-                 for qid, e in entities(session, linked, "labels", args.delay).items()}
-        names = {qid: name for qid, name in names.items() if name}
-        descriptions = extracts(session, ruwiki_titles(found), args.delay)
-        # Размеры превью Commons — одной пачкой на весь прогон, как и названия.
-        files = sorted({name for entity in found.values() if (name := cover_file(entity))})
-        sizes = cover_sizes(session, files, args.delay)
-        # Исходники для зума и кропов фрагментов — той же пачкой, другой шириной.
-        images = image_copies(session, files, args.delay)
-        # IIIF там, где он есть у источника: с ним зум идёт тайлами, а кроп считает сервер.
-        iiif = iiif_bases(session, found, args.delay)
-        log.info("IIIF: манифест есть у %d картин из %d", len(iiif), len(found))
-        for qid in fresh:
-            if stats["written"] >= limit:
+        if not args.sweep:
+            fresh = fresh[:max(limit * 2, limit + 100)]
+        log.info("в работе: %d (уже в базе или пройдено: %d)", len(fresh), stats["known"])
+        for start in range(0, len(fresh), CHUNK):
+            if limit and stats["written"] >= limit:
                 break
-            entity = found.get(qid)
-            row = row_of(qid, entity, names, descriptions.get(qid), sizes, images, iiif) \
-                if entity else None
-            if not row:
-                stats["skipped"] += 1
-                continue
-            result = "written" if args.dry_run else save(conn, row)
-            stats[result] += 1
-            if result == "written" and row.get("slug"):
-                written_slugs.append(row["slug"])
-            log.debug("%s %s (%s, %s)", result, row["title"], row["year"],
-                      row["metadata"].get("museum"))
+            chunk = fresh[start:start + CHUNK]
+            process(conn, session, chunk, args, limit, stats, written_slugs)
+            if args.checkpoint and not args.dry_run:
+                append_checkpoint(args.checkpoint, chunk)
+            log.info("обработано %d/%d · %s", min(start + CHUNK, len(fresh)), len(fresh), stats)
     except KeyboardInterrupt:
         log.warning("interrupted")
     except RuntimeError as error:
