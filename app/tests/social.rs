@@ -1718,6 +1718,112 @@ async fn notes_errors(pool: PgPool) {
     .await;
 }
 
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn person_notes_are_private_and_listed(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let (alice, bob) = (ctx.user("alice").await, ctx.user("bob").await);
+    let path = "/people/denis-villeneuve/note";
+    let put =
+        |user, body: Value| ctx.expect(StatusCode::OK, Method::PUT, path, Some(body), Some(user));
+
+    ctx.expect(StatusCode::NOT_FOUND, Method::GET, path, None, Some(&alice))
+        .await;
+    let created = put(&alice, json!({ "body": "Разобрать фильмографию" })).await;
+    assert_eq!(created["body"], "Разобрать фильмографию");
+    let replaced = put(&alice, json!({ "body": "  Новая  " })).await;
+    assert_eq!(replaced["id"], created["id"]);
+    assert_eq!(replaced["body"], "Новая");
+    put(&bob, json!({ "body": "Заметка bob" })).await;
+
+    // Чужую не прочитать: у bob своя, у третьего человека без заметки — 404.
+    assert_eq!(ctx.get_ok(path, Some(&alice)).await["body"], "Новая");
+    assert_eq!(ctx.get_ok(path, Some(&bob)).await["body"], "Заметка bob");
+    ctx.expect(
+        StatusCode::OK,
+        Method::PUT,
+        "/entities/dune-2021/note",
+        Some(json!({ "body": "О работе" })),
+        Some(&alice),
+    )
+    .await;
+
+    // Список: по умолчанию — о работах, `kind=person` — о людях; друг другу не мешают.
+    let entities = ctx.get_ok("/users/me/notes", Some(&alice)).await;
+    assert_eq!(entities["total"], 1);
+    assert_eq!(entities["items"][0]["entity"]["slug"], "dune-2021");
+    let people = ctx
+        .get_ok("/users/me/notes?kind=person", Some(&alice))
+        .await;
+    assert_eq!(people["total"], 1);
+    assert_eq!(people["items"][0]["person"]["slug"], "denis-villeneuve");
+    assert_eq!(people["items"][0]["body"], "Новая");
+    let bobs = ctx.get_ok("/users/me/notes?kind=person", Some(&bob)).await;
+    assert_eq!(bobs["items"][0]["body"], "Заметка bob");
+    ctx.expect(
+        StatusCode::BAD_REQUEST,
+        Method::GET,
+        "/users/me/notes?kind=x",
+        None,
+        Some(&alice),
+    )
+    .await;
+
+    // Ошибки: пустой/длинный текст, без токена, нет человека.
+    for body in [
+        json!({ "body": "  " }),
+        json!({ "body": "я".repeat(10_001) }),
+    ] {
+        ctx.expect(
+            StatusCode::BAD_REQUEST,
+            Method::PUT,
+            path,
+            Some(body),
+            Some(&alice),
+        )
+        .await;
+    }
+    for method in [Method::GET, Method::PUT, Method::DELETE] {
+        let body = (method == Method::PUT).then(|| json!({ "body": "текст" }));
+        ctx.expect(
+            StatusCode::UNAUTHORIZED,
+            method.clone(),
+            path,
+            body.clone(),
+            None,
+        )
+        .await;
+        ctx.expect(
+            StatusCode::NOT_FOUND,
+            method,
+            "/people/no-such/note",
+            body,
+            Some(&alice),
+        )
+        .await;
+    }
+
+    // Удаление: 204, повторное — 404; у bob заметка осталась.
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        path,
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        path,
+        None,
+        Some(&alice),
+    )
+    .await;
+    ctx.expect(StatusCode::NOT_FOUND, Method::GET, path, None, Some(&alice))
+        .await;
+    assert_eq!(ctx.get_ok(path, Some(&bob)).await["body"], "Заметка bob");
+}
+
 // ---------------------------------------------------------------- подписки
 
 #[sqlx::test(migrator = "nexus::MIGRATOR")]

@@ -1024,6 +1024,60 @@ pub struct NoteWithEntity {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Заметка о человеке в своём списке: то же плюс человек, к которому она написана.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NoteWithPerson {
+    pub person: PersonRef,
+    pub id: Uuid,
+    #[schema(example = "Пересмотреть всё, что он снял")]
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Чьи заметки показывает `/users/me/notes`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteKind {
+    /// О произведениях (по умолчанию, как было до заметок о людях).
+    #[default]
+    Entity,
+    /// О людях каталога.
+    Person,
+}
+
+/// Страница своих заметок: форма элементов зависит от `kind`.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum OwnNotesPage {
+    Entities(Page<NoteWithEntity>),
+    People(Page<NoteWithPerson>),
+}
+
+/// Запрос `/users/me/notes`.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct NotesQuery {
+    /// `entity` (по умолчанию) — заметки о произведениях, `person` — о людях.
+    #[param(inline)]
+    pub kind: Option<NoteKind>,
+    /// 1–100, по умолчанию 20.
+    pub limit: Option<i64>,
+    /// С 0.
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct PersonNoteRow {
+    pub id: Uuid,
+    pub person_id: Uuid,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub const PERSON_NOTE_COLUMNS: &str = "id, person_id, body, created_at, updated_at";
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct NoteRow {
     pub id: Uuid,

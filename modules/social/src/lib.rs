@@ -94,6 +94,11 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(marks::list_own))
         .routes(routes!(notes::get_own, notes::put_own, notes::delete_own))
         .routes(routes!(notes::list_own))
+        .routes(routes!(
+            notes::get_own_person,
+            notes::put_own_person,
+            notes::delete_own_person
+        ))
         .routes(routes!(follows::follow, follows::unfollow))
         .routes(routes!(follows::followers))
         .routes(routes!(follows::following))

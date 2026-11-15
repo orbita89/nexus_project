@@ -712,6 +712,22 @@ Meilisearch: комнат десятки, а сообщения ищутся в�
 Одна заметка на пару «пользователь + произведение». **Индексы:** PK; UNIQUE (`user_id`,
 `entity_id`) — свой `GET`/`PUT`; (`user_id`, `created_at DESC`) — вкладка «Заметки» в профиле.
 
+### `person_notes` ✅ — личные заметки о людях каталога
+
+Как `entity_notes`, только цель — человек. Миграция `20261205100000_social_person_notes.sql`.
+
+| Колонка | Тип | Ограничения | Описание |
+|---|---|---|---|
+| `id` | `uuid` | PK, `uuidv7()` | |
+| `user_id` | `uuid` | NOT NULL, FK → `users`, CASCADE | Автор; UNIQUE с `person_id` |
+| `person_id` | `uuid` | NOT NULL, FK → `people`, CASCADE | UNIQUE с `user_id` |
+| `body` | `text` | NOT NULL | До 10 000 символов, пустой не записывается |
+| `created_at` | `timestamptz` | NOT NULL | |
+| `updated_at` | `timestamptz` | NOT NULL | Триггер `set_updated_at()` |
+
+Одна заметка на пару «пользователь + человек». **Индексы:** PK; UNIQUE (`user_id`, `person_id`) —
+свой `GET`/`PUT`; (`user_id`, `created_at DESC`) — `GET /users/me/notes?kind=person`.
+
 </tables>
 
 <deps>
@@ -1022,7 +1038,10 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | GET | `/entities/{slug}/note` | user | Своя заметка `{id, body, created_at, updated_at}`, нет — 404 |
 | PUT | `/entities/{slug}/note` | user | `{"body": "…"}` → 200 `Note`; заменяет текст целиком. 400 — пустой текст (удаление — через `DELETE`) или длиннее 10 000 символов |
 | DELETE | `/entities/{slug}/note` | user | Удалить свою → 204; заметки нет — 404 |
-| GET | `/users/me/notes` | user | Свои заметки, новые сверху: `limit`, `offset` → `Page<{entity, id, body, created_at, updated_at}>` |
+| GET | `/people/{slug}/note` | user | Своя заметка о человеке `{id, body, created_at, updated_at}`, нет — 404 |
+| PUT | `/people/{slug}/note` | user | `{"body": "…"}` → 200 `Note`; как у работ: 400 — пустой текст или длиннее 10 000 символов; 404 — нет человека |
+| DELETE | `/people/{slug}/note` | user | Удалить свою → 204; заметки нет — 404 |
+| GET | `/users/me/notes` | user | Свои заметки, новые сверху: `kind=entity\|person` (по умолчанию `entity` — как раньше), `limit`, `offset` → `Page<{entity, id, body, created_at, updated_at}>`; при `kind=person` — `Page<{person: {id, slug, full_name, photo_url}, id, body, created_at, updated_at}>` из `person_notes`. Неизвестный `kind` — 400. Контракт не ломается, поэтому выдача не смешана (общего `total` нет) |
 
 Заметка — отдельная запись, а не приватная рецензия: человеку нужны обе сразу (публичный отзыв и
 своя пометка). Приватность серверная: заметки не попадают ни в `/entities/{slug}/reviews`, ни в
@@ -1129,7 +1148,7 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `collection_search.rs` | Индекс коллекций в Meilisearch: документ и настройки, наполнение при старте (`fill`, `spawn_fill`), правка после записи (`update`), поиск по `?q=` для `GET /collections` |
 | `votes.rs`, `comments.rs` | Голоса и комментарии к рецензиям |
 | `reactions.rs`, `marks.rs` | Реакции произведений и коллекций, личные отметки |
-| `notes.rs` | Личные заметки о произведениях: своя заметка на карточке (`GET`/`PUT`/`DELETE`), свой список `/users/me/notes`; чужих заметок нет нигде |
+| `notes.rs` | Личные заметки о произведениях (`entity_notes`) и людях (`person_notes`): своя заметка на карточке (`GET`/`PUT`/`DELETE` у `/entities/{slug}/note` и `/people/{slug}/note`), свой список `/users/me/notes?kind=`; чужих заметок нет нигде |
 | `target_comments.rs` | Комментарии к произведениям, людям и студиям: разбор цели `kind:slug` через справочники, лента, запись (лимит частоты, ответы — к корню), мягкое удаление, `remove` для модерации |
 | `reputation.rs` | Рейтинг пользователя: веса, пересчёт одним запросом, суточная задача с advisory-блокировкой, ручной запуск |
 | `likes.rs` | Лайки профилей, подборок (с дизлайком) и людей каталога; лента «Что нравится» |

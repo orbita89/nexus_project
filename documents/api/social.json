@@ -6934,6 +6934,189 @@
         }
       }
     },
+    "/api/v1/social/people/{slug}/note": {
+      "get": {
+        "tags": [
+          "notes"
+        ],
+        "summary": "Своя заметка о человеке каталога.",
+        "operationId": "get_own_person_note",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug человека",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "denis-villeneuve"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Заметка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Note"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Человек не найден или заметки нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "notes"
+        ],
+        "summary": "Написать или заменить свою заметку о человеке целиком. Одна заметка на человека.",
+        "operationId": "put_person_note",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug человека",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "denis-villeneuve"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutNote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Заметка сохранена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Note"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пустой или слишком длинный текст",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Человек не найден",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "notes"
+        ],
+        "summary": "Удалить свою заметку о человеке.",
+        "operationId": "delete_person_note",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug человека",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "denis-villeneuve"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Человек не найден или заметки нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/posts/{id}": {
       "delete": {
         "tags": [
@@ -8393,9 +8576,23 @@
         "tags": [
           "notes"
         ],
-        "summary": "Свои заметки, новые сверху: вкладка «Заметки» в личном кабинете. Чужих заметок нет нигде.",
+        "summary": "Свои заметки, новые сверху: вкладка «Заметки» в личном кабинете. Чужих заметок нет нигде.\n`kind=entity` (по умолчанию) — о произведениях, `kind=person` — о людях.",
         "operationId": "list_own_notes",
         "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "`entity` (по умолчанию) — заметки о произведениях, `person` — о людях.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Чьи заметки показывает `/users/me/notes`.",
+              "enum": [
+                "entity",
+                "person"
+              ]
+            }
+          },
           {
             "name": "limit",
             "in": "query",
@@ -8419,11 +8616,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Страница заметок",
+            "description": "Страница заметок: `NoteWithEntity` или, при `kind=person`, `NoteWithPerson`",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page_NoteWithEntity"
+                  "$ref": "#/components/schemas/OwnNotesPage"
                 }
               }
             }
@@ -11797,37 +11994,16 @@
           }
         }
       },
-      "NoteWithEntity": {
-        "type": "object",
-        "description": "Заметка в своём списке: то же плюс произведение, к которому она написана.",
-        "required": [
-          "entity",
-          "id",
-          "body",
-          "created_at",
-          "updated_at"
-        ],
-        "properties": {
-          "body": {
-            "type": "string",
-            "example": "Пересмотреть перед второй частью"
+      "OwnNotesPage": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Page_NoteWithEntity"
           },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "entity": {
-            "$ref": "#/components/schemas/EntityRef"
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
+          {
+            "$ref": "#/components/schemas/Page_NoteWithPerson"
           }
-        }
+        ],
+        "description": "Страница своих заметок: форма элементов зависит от `kind`."
       },
       "Page_Collection": {
         "type": "object",
@@ -12530,6 +12706,69 @@
                 "id": {
                   "type": "string",
                   "format": "uuid"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_NoteWithPerson": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Заметка о человеке в своём списке: то же плюс человек, к которому она написана.",
+              "required": [
+                "person",
+                "id",
+                "body",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "body": {
+                  "type": "string",
+                  "example": "Пересмотреть всё, что он снял"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "person": {
+                  "$ref": "#/components/schemas/PersonRef"
                 },
                 "updated_at": {
                   "type": "string",
@@ -14153,6 +14392,15 @@
             "type": "integer",
             "format": "int64",
             "example": 3
+          },
+          "journal_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Записей в журнале: произведений, с которыми что-то делали (лайк, оценка/рецензия, реакция;\nвладельцу — ещё отметка и заметка). Одно произведение — одна запись. `null` — аналитика\nзакрыта (`stats_public = false`), а смотрит не владелец.",
+            "example": 24
           },
           "liked": {
             "type": "boolean",
