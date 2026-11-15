@@ -29,11 +29,11 @@ use axum::Json;
 use chrono::NaiveDate;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
 use shared::error::ErrorBody;
 use shared::extract::Query;
 use shared::search::SearchError;
 use shared::{AppError, AppResult, AppState};
+use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
 /// Имя индекса людей (без префикса).
@@ -262,8 +262,15 @@ pub(crate) async fn update_index(state: &AppState, people: &[Uuid]) -> Result<()
 }
 
 const RETRIEVE: [&str; 9] = [
-    "id", "slug", "full_name", "original_name", "birth_date", "photo_url", "known_for",
-    "works_count", "top_works",
+    "id",
+    "slug",
+    "full_name",
+    "original_name",
+    "birth_date",
+    "photo_url",
+    "known_for",
+    "works_count",
+    "top_works",
 ];
 
 /// Порядок ролей в чередовании: по убыванию числа людей, затем по имени; актёры — дважды
@@ -365,18 +372,21 @@ pub async fn search(
     let facets_body = json!({
         "q": q, "facets": ["known_for"], "page": 1, "hitsPerPage": 0, "attributesToRetrieve": [],
     });
-    let counts: BTreeMap<String, i64> =
-        match state.search.call(Method::POST, &path, Some(&facets_body)).await {
-            Ok(response) => serde_json::from_value::<BTreeMap<String, i64>>(
-                response["facetDistribution"]["known_for"].clone(),
-            )
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|(_, n)| *n > 0)
-            .collect(),
-            Err(error) if error.code() == Some("index_not_found") => BTreeMap::new(),
-            Err(error) => return Err(fail(error)),
-        };
+    let counts: BTreeMap<String, i64> = match state
+        .search
+        .call(Method::POST, &path, Some(&facets_body))
+        .await
+    {
+        Ok(response) => serde_json::from_value::<BTreeMap<String, i64>>(
+            response["facetDistribution"]["known_for"].clone(),
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .collect(),
+        Err(error) if error.code() == Some("index_not_found") => BTreeMap::new(),
+        Err(error) => return Err(fail(error)),
+    };
     let facets = PeopleFacets { known_for: counts };
 
     let (hits, total) = if let (None, true) = (&role, q.is_empty()) {
@@ -400,7 +410,9 @@ pub async fn search(
                 Ok::<_, SearchError>((*role, response["hits"].clone()))
             }
         });
-        let found = futures_util::future::try_join_all(searches).await.map_err(fail)?;
+        let found = futures_util::future::try_join_all(searches)
+            .await
+            .map_err(fail)?;
         let mut by_role: HashMap<&str, std::vec::IntoIter<Value>> = found
             .into_iter()
             .map(|(role, hits)| {
@@ -447,7 +459,12 @@ mod tests {
 
     #[test]
     fn mix_alternates_roles_and_actors_get_double_share() {
-        let counts = counts(&[("actor", 100), ("author", 50), ("director", 40), ("game", 30)]);
+        let counts = counts(&[
+            ("actor", 100),
+            ("author", 50),
+            ("director", 40),
+            ("game", 30),
+        ]);
         let order = mix_order(&counts);
         assert_eq!(order, ["actor", "author", "director", "actor", "game"]);
         let (slots, windows) = mix_plan(&order, &counts, 10, 0);

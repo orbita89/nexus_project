@@ -2,7 +2,7 @@
 
 use super::nullable_param;
 use crate::jobs::Reporter;
-use crate::models::{CreatePerson, Person, UpdatePerson, PERSON_COLUMNS};
+use crate::models::{CreatePerson, Person, UpdatePerson, MAX_PERSON_PHOTOS, PERSON_COLUMNS};
 use crate::publish::{self, Touched};
 use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
 use axum::extract::State;
@@ -35,11 +35,12 @@ pub async fn create(
     let full_name = validate::required("full_name", &req.full_name, MAX_TITLE)?;
     let original_name = validate::optional("original_name", req.original_name, MAX_TITLE)?;
     let photo_url = validate::url("photo_url", req.photo_url)?;
+    let photos = validate::https_urls("photos", req.photos.unwrap_or_default(), MAX_PERSON_PHOTOS)?;
     let bio = validate::optional("bio", req.bio, MAX_LONG_TEXT)?;
 
     let person: Person = sqlx::query_as(&format!(
-        "INSERT INTO people AS p (slug, full_name, birth_date, photo_url, bio, original_name)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING {PERSON_COLUMNS}"
+        "INSERT INTO people AS p (slug, full_name, birth_date, photo_url, bio, original_name, photos)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {PERSON_COLUMNS}"
     ))
     .bind(&req.slug)
     .bind(full_name)
@@ -47,6 +48,7 @@ pub async fn create(
     .bind(photo_url)
     .bind(bio)
     .bind(original_name)
+    .bind(photos)
     .fetch_one(&state.db)
     .await
     .map_err(validate::conflict("slug is already taken"))?;
@@ -95,6 +97,16 @@ pub async fn update(
             .map(|v| validate::url("photo_url", v))
             .transpose()?,
     );
+    // `photos` главнее `photo_url`: триггер `people_sync_photos` выводит второе из первого.
+    let photos = req
+        .photos
+        .map(|v| validate::https_urls("photos", v, MAX_PERSON_PHOTOS))
+        .transpose()?;
+    let photo_url = if photos.is_some() {
+        (false, None)
+    } else {
+        photo_url
+    };
     let bio = nullable_param(
         req.bio
             .map(|v| validate::optional("bio", v, MAX_LONG_TEXT))
@@ -109,7 +121,8 @@ pub async fn update(
              birth_date = CASE WHEN $4 THEN $5 ELSE birth_date END,
              photo_url = CASE WHEN $6 THEN $7 ELSE photo_url END,
              bio = CASE WHEN $8 THEN $9 ELSE bio END,
-             original_name = CASE WHEN $10 THEN $11 ELSE original_name END
+             original_name = CASE WHEN $10 THEN $11 ELSE original_name END,
+             photos = COALESCE($12, photos)
          WHERE id = $1 RETURNING {PERSON_COLUMNS}"
     ))
     .bind(id)
@@ -123,6 +136,7 @@ pub async fn update(
     .bind(bio.1)
     .bind(original_name.0)
     .bind(original_name.1)
+    .bind(photos)
     .fetch_optional(&state.db)
     .await
     .map_err(validate::conflict("slug is already taken"))?;

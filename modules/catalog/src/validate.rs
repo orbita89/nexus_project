@@ -68,6 +68,28 @@ pub fn url(field: &str, value: Option<String>) -> Result<Option<String>, AppErro
     Ok(value)
 }
 
+/// Список ссылок на изображения: только `https://`, не больше `max`, порядок сохраняется.
+pub fn https_urls(field: &str, values: Vec<String>, max: usize) -> Result<Vec<String>, AppError> {
+    if values.len() > max {
+        return Err(bad(format!("{field} must have at most {max} items")));
+    }
+    values
+        .into_iter()
+        .map(|value| {
+            let value = value.trim().to_owned();
+            let ok = value.len() <= MAX_URL
+                && value
+                    .strip_prefix("https://")
+                    .is_some_and(|rest| !rest.is_empty() && !rest.contains(char::is_whitespace));
+            if ok {
+                Ok(value)
+            } else {
+                Err(bad(format!("{field} must contain only https URLs")))
+            }
+        })
+        .collect()
+}
+
 /// Наибольший размер файла обложки в пикселях.
 pub const MAX_COVER_PX: i32 = 100_000;
 

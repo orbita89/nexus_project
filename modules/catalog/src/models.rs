@@ -430,15 +430,39 @@ pub struct Person {
     #[schema(example = "Denis Villeneuve")]
     pub original_name: Option<String>,
     pub birth_date: Option<NaiveDate>,
+    /// Главное фото: всегда равно первому из `photos`.
     pub photo_url: Option<String>,
+    /// Галерея в порядке показа (до 20); первое — главное.
+    #[serde(serialize_with = "serialize_photos")]
+    #[schema(value_type = Vec<PersonPhoto>)]
+    pub photos: Vec<String>,
     pub bio: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
+/// Фото человека в галерее.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PersonPhoto {
+    #[schema(example = "https://image.tmdb.org/t/p/h632/abc.jpg")]
+    pub url: String,
+    /// С 0; 0 — главное фото.
+    pub position: i32,
+}
+
+fn serialize_photos<S: serde::Serializer>(photos: &[String], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(photos.iter().enumerate().map(|(i, url)| PersonPhoto {
+        url: url.clone(),
+        position: i as i32,
+    }))
+}
+
+/// Сколько фото можно сохранить у человека.
+pub const MAX_PERSON_PHOTOS: usize = 20;
+
 pub const PERSON_COLUMNS: &str =
-    "p.id, p.slug, p.full_name, p.original_name, p.birth_date, p.photo_url, p.bio, p.created_at, \
-     p.updated_at";
+    "p.id, p.slug, p.full_name, p.original_name, p.birth_date, p.photo_url, p.photos, p.bio, \
+     p.created_at, p.updated_at";
 
 /// Страница списка премий.
 #[derive(Debug, Deserialize, IntoParams)]
@@ -1052,7 +1076,11 @@ pub struct CreatePerson {
     #[schema(example = "Denis Villeneuve")]
     pub original_name: Option<String>,
     pub birth_date: Option<NaiveDate>,
+    /// Одно главное фото. Не передавайте вместе с `photos`: тогда главным станет `photos[0]`.
     pub photo_url: Option<String>,
+    /// Галерея: только https-ссылки, порядок = порядок массива, до 20; первая — главная,
+    /// `photo_url` становится равным ей. Пустой массив — фото нет.
+    pub photos: Option<Vec<String>>,
     pub bio: Option<String>,
 }
 
@@ -1071,6 +1099,10 @@ pub struct UpdatePerson {
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<String>)]
     pub photo_url: Option<Option<String>>,
+    /// Заменяет галерею целиком (https, до 20, порядок массива); первая — главная. Пустой
+    /// массив убирает все фото. Если передан, `photo_url` из запроса игнорируется. Одно
+    /// `photo_url` без `photos` делает галерею из одного этого фото.
+    pub photos: Option<Vec<String>>,
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<String>)]
     pub bio: Option<Option<String>>,

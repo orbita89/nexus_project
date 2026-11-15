@@ -5324,7 +5324,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Поиск людей: по имени (русскому и латиницей) с опечатками и по началу слова. Из одинаково\nподходящих выше известные (`fame`: работы в фильмах с большим числом оценок); без `q` — самые\nизвестные. `known_for` — основная роль (`actor`, `director`, ...).",
+        "summary": "Поиск людей: по имени (русскому и латиницей) с опечатками и по началу слова. Из одинаково\nподходящих выше известные (`fame`: работы в фильмах с большим числом оценок). Без `q` и\n`known_for` — чередование ролей, внутри роли по известности. `known_for` — основная роль\n(`actor`, `director`, ...). `facets.known_for` — счётчики ролей среди найденных по `q`.",
         "operationId": "search_people",
         "parameters": [
           {
@@ -5369,11 +5369,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Страница людей. `total` — всего найдено (точно)",
+            "description": "Страница людей. `total` — всего найдено (точно), `facets.known_for` — людей по ролям",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page_PersonHit"
+                  "$ref": "#/components/schemas/PeoplePage"
                 }
               }
             }
@@ -7284,7 +7284,18 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Одно главное фото. Не передавайте вместе с `photos`: тогда главным станет `photos[0]`."
+          },
+          "photos": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Галерея: только https-ссылки, порядок = порядок массива, до 20; первая — главная,\n`photo_url` становится равным ей. Пустой массив — фото нет."
           },
           "slug": {
             "type": "string",
@@ -7886,7 +7897,7 @@
       },
       "Episode": {
         "type": "object",
-        "description": "Серия сезона. Своего slug'а, рецензий и подборок у серии нет — она не сущность.",
+        "description": "Серия сезона. Своего slug'а, рецензий и подборок у серии нет — она не сущность, а данные\nсезона: хранится элементом массива `entities.metadata.episodes`, а не строкой таблицы.\n\nПустые поля в хранилище не лежат (`skip_serializing_if`), поэтому все они с `serde(default)`.",
         "required": [
           "id",
           "number",
@@ -9267,7 +9278,7 @@
             "type": "array",
             "items": {
               "type": "object",
-              "description": "Серия сезона. Своего slug'а, рецензий и подборок у серии нет — она не сущность.",
+              "description": "Серия сезона. Своего slug'а, рецензий и подборок у серии нет — она не сущность, а данные\nсезона: хранится элементом массива `entities.metadata.episodes`, а не строкой таблицы.\n\nПустые поля в хранилище не лежат (`skip_serializing_if`), поэтому все они с `serde(default)`.",
               "required": [
                 "id",
                 "number",
@@ -9349,88 +9360,6 @@
                 "updated_at": {
                   "type": "string",
                   "format": "date-time"
-                }
-              }
-            }
-          },
-          "limit": {
-            "type": "integer",
-            "format": "int64",
-            "example": 20
-          },
-          "offset": {
-            "type": "integer",
-            "format": "int64",
-            "example": 0
-          },
-          "total": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
-            "example": 137
-          }
-        }
-      },
-      "Page_PersonHit": {
-        "type": "object",
-        "description": "Страница списка.",
-        "required": [
-          "items",
-          "total",
-          "limit",
-          "offset"
-        ],
-        "properties": {
-          "items": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "description": "Человек в выдаче поиска людей.",
-              "required": [
-                "id",
-                "slug",
-                "full_name"
-              ],
-              "properties": {
-                "birth_date": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "format": "date"
-                },
-                "full_name": {
-                  "type": "string",
-                  "example": "Брэд Питт"
-                },
-                "id": {
-                  "type": "string",
-                  "format": "uuid"
-                },
-                "known_for": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Основная роль: где вклад в известность больше всего.",
-                  "example": "actor"
-                },
-                "original_name": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "example": "Brad Pitt"
-                },
-                "photo_url": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "slug": {
-                  "type": "string",
-                  "example": "brad-pitt"
                 }
               }
             }
@@ -9663,6 +9592,61 @@
         },
         "additionalProperties": false
       },
+      "PeopleFacets": {
+        "type": "object",
+        "description": "Счётчики поиска людей.",
+        "required": [
+          "known_for"
+        ],
+        "properties": {
+          "known_for": {
+            "type": "object",
+            "description": "Сколько людей с каждой основной ролью среди найденных по `q` (без фильтра `known_for`);\nролей с нулём нет.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PeoplePage": {
+        "type": "object",
+        "description": "Страница поиска людей: как [`Page`] плюс счётчики по ролям.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset",
+          "facets"
+        ],
+        "properties": {
+          "facets": {
+            "$ref": "#/components/schemas/PeopleFacets"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonHit"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Точное число найденных людей (с учётом `q` и `known_for`)."
+          }
+        }
+      },
       "Person": {
         "type": "object",
         "description": "Человек целиком (строка `people`).",
@@ -9670,6 +9654,7 @@
           "id",
           "slug",
           "full_name",
+          "photos",
           "created_at",
           "updated_at"
         ],
@@ -9711,7 +9696,15 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Главное фото: всегда равно первому из `photos`."
+          },
+          "photos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonPhoto"
+            },
+            "description": "Галерея в порядке показа (до 20); первое — главное."
           },
           "slug": {
             "type": "string",
@@ -9841,6 +9834,37 @@
           "slug": {
             "type": "string",
             "example": "brad-pitt"
+          },
+          "top_works": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopWork"
+            },
+            "description": "До 3 самых известных работ (по числу оценок TMDB); пусто, если работ нет."
+          },
+          "works_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Число работ в активных сущностях (сезоны не считаются)."
+          }
+        }
+      },
+      "PersonPhoto": {
+        "type": "object",
+        "description": "Фото человека в галерее.",
+        "required": [
+          "url",
+          "position"
+        ],
+        "properties": {
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "description": "С 0; 0 — главное фото."
+          },
+          "url": {
+            "type": "string",
+            "example": "https://image.tmdb.org/t/p/h632/abc.jpg"
           }
         }
       },
@@ -10362,6 +10386,16 @@
             "example": 6,
             "maximum": 100000,
             "minimum": 1
+          },
+          "episodes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Episode"
+            },
+            "description": "Серии сезона по возрастанию номера, до [`MAX_EPISODES`].\n\nСерия — не сущность, а данные сезона: её не ищут, не оценивают и не обсуждают, поэтому\nона лежит здесь, а не строкой отдельной таблицы. На полном каталоге TMDB (236 тыс.\nсериалов) строки дали бы порядка 150 млн записей ради списка под карточкой сезона.\nВ ответах API серии приходят отдельным полем `episodes`, а из `metadata` вырезаются\n([`ENTITY_COLUMNS_LEAN`](crate::models::ENTITY_COLUMNS_LEAN))."
           },
           "finale_date": {
             "type": [
@@ -11032,6 +11066,43 @@
           }
         }
       },
+      "TopWork": {
+        "type": "object",
+        "description": "Работа человека в карточке выдачи поиска людей.",
+        "required": [
+          "slug",
+          "title",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`movie`, `series`, `book`, `game`, `painting`.",
+            "example": "movie"
+          },
+          "poster_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string",
+            "example": "dune-2021"
+          },
+          "title": {
+            "type": "string",
+            "example": "Дюна"
+          },
+          "year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "TrailerProvider": {
         "type": "string",
         "description": "Видеосервис трейлера. Фронтенд сам строит адрес плеера по провайдеру и id, поэтому в БД не\nпопадает произвольный URL (и чужой домен в iframe).",
@@ -11448,6 +11519,16 @@
               "string",
               "null"
             ]
+          },
+          "photos": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Заменяет галерею целиком (https, до 20, порядок массива); первая — главная. Пустой\nмассив убирает все фото. Если передан, `photo_url` из запроса игнорируется. Одно\n`photo_url` без `photos` делает галерею из одного этого фото."
           },
           "slug": {
             "type": [

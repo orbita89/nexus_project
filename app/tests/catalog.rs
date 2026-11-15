@@ -1025,6 +1025,86 @@ async fn people_crud(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn people_photos_gallery(pool: PgPool) {
+    let ctx = Ctx::new(pool).await;
+    let (a, b, c) = (
+        "https://img.example/a.jpg",
+        "https://img.example/b.jpg",
+        "https://img.example/c.jpg",
+    );
+
+    let (status, person) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/people",
+            Some(json!({ "slug": "gallery-man", "full_name": "Галерея", "photos": [a, b] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{person}");
+    assert_eq!(person["photo_url"], a);
+    assert_eq!(
+        person["photos"],
+        json!([{ "url": a, "position": 0 }, { "url": b, "position": 1 }])
+    );
+    let id = person["id"].as_str().unwrap();
+
+    // Карточка отдаёт галерею в порядке админки, `photo_url` — первое фото.
+    let card = ctx.get_ok("/people/gallery-man").await;
+    assert_eq!(card["photo_url"], a);
+    assert_eq!(card["photos"][1]["url"], b);
+
+    // Порядок меняется целиком: главным становится первое.
+    let (status, person) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/people/{id}"),
+            Some(json!({ "photos": [c, a], "photo_url": "https://img.example/ignored.jpg" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{person}");
+    assert_eq!(person["photo_url"], c);
+    assert_eq!(person["photos"][1]["url"], a);
+
+    // Одно `photo_url` — галерея из одного фото; `null` очищает.
+    let (_, person) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/people/{id}"),
+            Some(json!({ "photo_url": b })),
+        )
+        .await;
+    assert_eq!(person["photos"], json!([{ "url": b, "position": 0 }]));
+    let (_, person) = ctx
+        .admin_send(
+            Method::PATCH,
+            &format!("/admin/people/{id}"),
+            Some(json!({ "photos": [] })),
+        )
+        .await;
+    assert_eq!(person["photos"], json!([]));
+    assert_eq!(person["photo_url"], Value::Null);
+
+    // Валидация: не https, пробелы, лишнее количество — 400.
+    for photos in [
+        json!(["http://img.example/a.jpg"]),
+        json!(["https://img.example/a b.jpg"]),
+        json!([""]),
+        json!((0..21)
+            .map(|i| format!("https://img.example/{i}.jpg"))
+            .collect::<Vec<_>>()),
+    ] {
+        let (status, body) = ctx
+            .admin_send(
+                Method::PATCH,
+                &format!("/admin/people/{id}"),
+                Some(json!({ "photos": photos })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn genres_are_tags_with_kind(pool: PgPool) {
     let mut ctx = Ctx::without_search(pool);
     let isr = FakeIsr::start(StatusCode::OK).await;
