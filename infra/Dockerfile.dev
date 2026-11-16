@@ -2,7 +2,7 @@
 # Им пользуются два сервиса compose: app (hot-reload) и tools (make ci-docker, make test-docker).
 # Исходники не копируются — они монтируются volume'ом из compose, чтобы работал hot-reload.
 # Версия совпадает с rust-toolchain.toml, иначе rustup докачивает тулчейн при каждом старте контейнера.
-FROM rust:1.98-bookworm
+FROM rust:1.100-bookworm
 
 # Пакеты для линковки нативных зависимостей (pq/ssl подтягиваются транзитивно у части крейтов).
 # jq — для scripts/check-module-boundaries.sh.
