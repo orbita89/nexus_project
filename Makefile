@@ -13,7 +13,7 @@ COMPOSE = docker compose -f infra/docker-compose.yml
 # Контейнер с тулчейном (сервис tools) от пользователя хоста: Rust на машине не нужен.
 TOOLS = $(COMPOSE) run --rm --user $(shell id -u):$(shell id -g) tools
 
-.PHONY: up down logs run seed media fmt lint boundaries test test-fast test-one deny ci image http ci-docker test-docker shell
+.PHONY: up down logs run seed media fmt lint boundaries test test-fast test-one deny ci image http ci-docker test-docker shell bench-books
 
 up:          ## Поднять dev-окружение
 	$(COMPOSE) up -d --build
@@ -93,3 +93,8 @@ test-docker: ## Тесты в контейнере
 
 shell:       ## Shell в контейнере с тулчейном (cargo, clippy, cargo deny)
 	$(TOOLS) bash
+
+bench-books: ## Нагрузка на поиск книг (Tantivy), отчёт в консоль. Нужен make up. [SECONDS=5] [THREADS=1,8,32] [LIMIT=24] [PROFILE=release — точные цифры]
+	@$(COMPOSE) ps --status running --services | grep -qx app || { echo "Окружение не запущено — сначала: make up"; exit 1; }
+	@$(COMPOSE) exec -e RUST_LOG=error app cargo run -q $(if $(filter release,$(PROFILE)),--release) -p nexus -- books load \
+		$(if $(SECONDS),--seconds $(SECONDS)) $(if $(THREADS),--threads $(THREADS)) $(if $(LIMIT),--limit $(LIMIT)) $(ARGS)

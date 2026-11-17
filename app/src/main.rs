@@ -10,6 +10,7 @@
 //! `nexus search bench [ROUNDS]` — замер поиска: книги (Tantivy) против фильмов (Meilisearch).
 
 mod bench;
+mod books_load;
 
 use shared::mail::Mailer;
 use shared::{db, telemetry, AppState, Config};
@@ -61,6 +62,14 @@ async fn main() -> anyhow::Result<()> {
                 println!("books indexed: {books} in {:.1?}", started.elapsed());
             }
             BooksCommand::Search(query) => run_books_search(&state, query)?,
+            BooksCommand::Load(options) => {
+                let dir = state
+                    .config
+                    .books_index_dir
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("BOOKS_INDEX_DIR is not set"))?;
+                tokio::task::spawn_blocking(move || books_load::run(&dir, &options)).await??;
+            }
         }
         state.cache.wait_pending().await;
         return Ok(());
@@ -216,9 +225,12 @@ fn archive_command(args: &[String]) -> Result<ArchiveCommand, String> {
 const BOOKS_USAGE: &str = "usage: nexus books import --dump FILE.sql[.gz] [--table updated|fiction] [--batch-size N] [--limit N]\n       \
      nexus books cassandra DIR [--batch-size N] [--limit N]\n       \
      nexus books index\n       \
-     nexus books search QUERY";
+     nexus books search QUERY\n       \
+     nexus books load [--seconds N] [--threads 1,4,16] [--limit N]";
 
 enum BooksCommand {
+    /// Нагрузка на индекс Tantivy с отчётом в консоль.
+    Load(books_load::Options),
     /// Дамп LibGen.
     Import(catalog::books::ImportOptions),
     /// Библиотека Cassandra: каталог с `metadata/` и `covers/`.
@@ -234,6 +246,9 @@ fn books_command(args: &[String]) -> Result<BooksCommand, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     if args == ["index"] {
         return Ok(BooksCommand::Index);
+    }
+    if let ["load", rest @ ..] = &args[..] {
+        return books_load::parse(rest).map(BooksCommand::Load);
     }
     if let ["search", query] = &args[..] {
         return Ok(BooksCommand::Search((*query).to_string()));
