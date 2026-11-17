@@ -89,6 +89,12 @@ TMDB с русским названием (121 371) и 500 самых попул
 | | `pages` | целое 1–100000 |
 | | `publisher` | строка до 200 символов |
 | | `libgen` | источник LibGen (пишет `nexus books import`): `{"work": "мастер и маргарита\|булгаков михаил афанасьевич", "files": [{"md5": "<32 hex, нижний регистр>", "extension": "fb2", "id": 1}]}`. `work` 1–1000 символов (ключ произведения), `files` 1–200 (`MAX_LIBGEN_FILES`) без повторов md5, `extension` 1–20 символов, `id` — `ID` строки дампа. Сохранение `metadata` без `libgen` его удаляет — повторный импорт создаст книгу заново |
+| | `series`, `series_number` | серия книг (до 300 символов) и номер в ней, как в источнике (`1`, `2.5`; до 20 символов) |
+| | `language`, `original_language` | код языка книги и языка оригинала (`ru`, `en`): до 20 символов, приводится к нижнему регистру |
+| | `keywords` | ключевые слова: до 50, каждое до 100 символов, без повторов |
+| | `written` | когда написана, как в источнике (`2002`, `1865–1869`): до 50 символов |
+| | `words` | объём текста в словах |
+| | `file` | файл книги в хранилище (пишет `nexus books cassandra`): `{"archive": "104215-113436.arx", "path": "113037.epub", "size": 3085912}`; `archive` до 200 символов, `path` до 300, `size` — байты, необязателен |
 | `game` | `platforms` | до 30 строк по 50 символов: `["pc", "ps5", "switch"]` |
 | | `developer`, `publisher` | строки до 200 символов |
 | | `trailers` | как у `movie` |
@@ -460,6 +466,31 @@ Wikimedia Commons (решение пользователя 2026-10-30): у ни�
 показывает жанры в шапке карточки, остальные теги — над «О фильме». В карточке `tags` — все теги,
 жанры первыми. Какие теги жанры, решает админка (`kind` в `/admin/tags`); жанры TMDB импорт
 создаёт сразу с `kind = genre`.
+
+### Кураторские теги (2026-11-15)
+
+Миграция `20261207100000_catalog_curated_tags.sql` заводит 70 тегов `kind = tag` (арт-направления,
+«вайб», сюжетные приёмы, форма повествования: «Артхаус», «Слоубёрнер», «Временная петля» …;
+slug — транслит, `avtorskoe-kino`, `festivalnyy-khit`). «Сюрреализм» уже был (`syurrealizm`) —
+не дублируется; `ON CONFLICT (slug) DO NOTHING`. Схема не менялась. Привязки к фильмам — не
+миграция, а `scripts/catalog-import/tags_llm.py`. Порядок обхода — по убыванию
+`entity_stats.tmdb_votes` (есть и у фильмов, и у сериалов; `metadata.popularity` и `rank_score`
+у сериалов пусты, по ним сериалы не попадают в выборку). Шаги: `export --dir cache/tags_llm
+--offset N --limit M --chunk 100` (пачки `in_NNNN.json`, готовые `out_*.jsonl` пропускаются,
+номера продолжают занятые — завтрашний `--offset 10000` не затирает сделанное) → разметка
+(`classify` через Claude API либо агенты на Haiku: каждый пишет `out_NNNN.jsonl`) → `apply`
+(сухой прогон; запись `--apply`; `--replace` сначала снимает кураторские теги у обработанных
+тайтлов, жанры и прочие теги не трогает). `apply` не доверяет ответу модели: теги вне списка
+отбрасываются, максимум 3 на тайтл. Теги строгие и редкие: 0–3 на тайтл, пустой список —
+обычный ответ; «Авторское кино» / «Артхаус» — только личное высказывание автора, не работа по
+найму и не франшиза; теги повода просмотра — не больше одного и 3–5% тайтлов на тег.
+Кураторские теги ищутся по имени без учёта регистра и вида: «сюрреализм» (tag) и «магический
+реализм» (genre) заведены раньше строчными. Запуск 2026-11-15: топ-10 000 по `tmdb_votes`
+(8699 фильмов, 1301 сериал), Haiku; 66% без тегов, 30% с одним; записано 4760 связей.
+`cleaned_title`, `is_anime`, `is_valid_title`, `restore_from_archive` остаются в отчёте
+(`cache/tags_llm/`, в `.gitignore`) и в БД не пишутся. После записи — `scripts/reindex-search.sh`
+(нужен `DEV_LOGIN=true`, иначе 404 на `dev/login`) или кнопка в админке. Список разрешённых
+тегов — `TAGS` в скрипте; новый тег = строка в миграции + строка в `TAGS`.
 
 ### `entity_tags` ✅ — теги сущностей
 
@@ -861,6 +892,7 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 | Санитизация HTML баннеров | `ammonia` 4 (транзитивно `cssparser`, `dtoa-short` — MPL-2.0, точечное исключение в `deny.toml`) | `banners::sanitize_html`: allowlist для `content_html`; `banners::sanitize_custom_html` (отдельный, мягкий builder + `sanitize_css`) для `custom_html` |
 | Ошибка с полем | `shared::error::AppError::Invalid { field, message }` / `AppError::on_field` → 400 `{error, code:"validation", field}` (`ErrorBody.field`) | валидация баннеров |
 | Дамп LibGen | локальный файл (`flate2` для `.gz`); обложки — `https://libgen.is/covers/` (`books::COVERS`) | `nexus books import` |
+| Книжный поиск | `tantivy` 0.26 (+ `stemmer`); каталог `BOOKS_INDEX_DIR` (`Config::books_index_dir`; не задан — книги в Meilisearch); обложки — `BOOK_COVERS_DIR` (`Config::book_covers_dir`), gateway `/covers/books/` | `catalog::books::{index,sync,search,cassandra}`, `nexus books cassandra\|index\|search` |
 | Блокировки перестройки | Redis (`shared::cache`): `nexus:v1:catalog:reindex-running`, `nexus:v1:catalog:reindex-lock` | «одна перестройка за раз» между инстансами |
 
 </deps>
@@ -874,6 +906,11 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 по `kind`, тегу, году (точно или диапазоном), студии; сортировки — см. ниже. Ищется по названию,
 оригинальному названию и студиям, в таком порядке важности. Клиент — тонкая обёртка над HTTP API в
 `shared::search`, без SDK.
+
+**Книги — в своём индексе Tantivy** (2026-11-17, [«Книжный поиск на Tantivy»](#книжный-поиск-на-tantivy--2026-11-17)): при заданном
+`BOOKS_INDEX_DIR` запросы только про книги (`kind=book`) отвечает он, в общей выдаче книги
+чередуются с работами Meilisearch. Новый параметр `GET /search` — `has_cover` (только книги),
+новое поле `EntitySummary.authors` (только в книжной выдаче).
 
 **Весь поиск на сайте — только через Meilisearch** (решение пользователя 2026-10-14): `GET /search`
 и подсказки `GET /search/studios`. Публичный `GET /entities` поиска по названию не делает (`q` →
@@ -1568,6 +1605,140 @@ Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `cov
 Тесты: `app/tests/books.rs` — `imports_russian_books_with_authors_and_is_idempotent`,
 `limit_and_dump_without_schema`; разбор дампа и полей — модульные тесты `books::dump`, `books`.
 
+## Книги из библиотеки Cassandra ✅ (2026-11-17)
+
+`nexus books cassandra DIR [--batch-size 1000] [--limit N]` (`catalog::books::cassandra`; dev:
+`docker compose run --rm --no-deps -v /path/to/library/data:/import:ro app /target/debug/nexus books cassandra /import`).
+Библиотека — каталог настольного приложения Cassandra: `metadata/*.jsonl` (книга на строку) и
+`covers/` (в старых библиотеках `convers/`; обложки AVIF `<пачка>/<id>.avif`).
+
+Что пишется (миграция `20261208100000_catalog_books_cassandra.sql` — только индексы, своих таблиц нет):
+
+- `entities` (`kind = 'book'`): `title` (до 300 символов), аннотация → `description` (до 20 000
+  символов, длиннее — обрезается), год издания (или год написания, если издания нет) →
+  `release_date` (1 января), `cover_url` / `cover_width` / `cover_height`, `metadata` — `isbn`
+  (с проверкой контрольной цифры; невалидный отбрасывается, книга остаётся), `publisher`,
+  `series`, `series_number`, `language`, `original_language`, `keywords`, `written`, `words`,
+  `file`; `external_ids.cassandra` — номер книги в библиотеке (уникальный индекс
+  `entities_external_cassandra_uq`).
+- Slug: `sobache-serdtse` → `sobache-serdtse-bulgakov` (фамилия первого автора) →
+  `sobache-serdtse-<fnv1a32 от "cassandra:<id>">`; без кириллицы и латиницы — `book-<hash>`.
+- Люди: авторы (`role = 'author'`, до 10) и переводчики (`role = 'translator'`, до 5) —
+  `people` + `entity_credits`, `position` сквозной (сначала авторы). Человек ищется по имени
+  (`replace(lower(full_name), 'ё', 'е')`) среди тех, у кого уже есть работа автором или
+  переводчиком; иначе создаётся (`slug` из имени, занят — с хешем). «Неизвестен автор» и
+  подобные не заводятся.
+- Жанры: коды FB2 (`sf_fantasy`) → русские названия по таблице `books::genres::GENRES`
+  (219 названий) → теги `tags.kind = 'genre'` + `entity_tags` (до 8 на книгу). Тег с таким
+  названием уже есть (жанр фильмов «Фэнтези», «Ужасы») — книга получает его же; кода нет в
+  таблице — жанр пропускается.
+- Обложки: файл копируется в `BOOK_COVERS_DIR/<пачка>/<id>.avif` (через временный файл; уже
+  лежит такой же — не копируется), размеры читаются из бокса `ispe`; `cover_url` =
+  `{PUBLIC_URL}/covers/books/<пачка>/<id>.avif`, раздаёт gateway (`infra/nginx.conf`, том
+  `archivedata` смонтирован в nginx только для чтения). `BOOK_COVERS_DIR` не задан — книги без
+  обложек.
+- Не переносятся: оглавление, программа, версия и дата документа, город, ID FB2, источник, OCR.
+
+Повторный запуск: книга с известным `external_ids.cassandra` пропускается целиком (её могли
+править в админке). Пачка — одна транзакция; прерванный импорт продолжается повторным запуском.
+После импорта: `nexus books index` (книжный индекс) и `POST /admin/search/reindex` (новые люди
+в индексе людей Meilisearch). Замер (dev, 417 161 книга): ≈5 с на 1000 книг.
+
+Тесты: модульные `books::cassandra` (разбор строки, slug'и, размеры AVIF, языки, путь обложки),
+`books::genres`.
+
+## Книжный поиск на Tantivy ✅ (2026-11-17)
+
+Книги (`kind = 'book'`) ищутся в собственном индексе Tantivy, а не в Meilisearch
+(`catalog::books::{index,sync,search}`). Включается каталогом `BOOKS_INDEX_DIR`
+(`Config::books_index_dir`; dev/prod — `/var/lib/nexus/books-index` в томе `archivedata`);
+пустое значение возвращает книги в Meilisearch (после `POST /admin/search/reindex`). Остальные
+разделы остаются в Meilisearch.
+
+**Маршрутизация** (`books::search::routed`, `search::books_query`, `search::blended`):
+
+- `GET /search?kind=book`, `GET /entities/{slug}/neighbors?kind=book`, похожие книги
+  (`GET /entities/{slug}/similar`), `GET /search/tags?kind=book`,
+  `GET /search/publishers?kind=book` — отвечает Tantivy. Параметры и ответы те же.
+- Запрос без `kind` или `kind=book` вместе с другими типами — общая выдача: работы Meilisearch
+  и книги чередуются («две работы — книга», пока есть обе стороны; оценки двух движков
+  несравнимы), `total` — сумма. `sort=random`, фильтры, которых у книг не бывает, или книг под
+  запрос нет — отвечает один Meilisearch.
+- В индекс Meilisearch книги при включённом книжном поиске не попадают
+  (`books::search::in_meili`: `e.kind NOT IN ('season', 'book')` в перестройке и досылке).
+
+**Отличия от Meilisearch для книг:** `q` ищет по названию, оригинальному названию, авторам и
+серии; в `EntitySummary` есть `authors: [{slug, name}]` (только в книжной выдаче); работает
+фильтр `has_cover=true|false`; `sort=trending` = `popular`, `sort=awarded` = `recommended`
+(статистики TMDB и наград у книг нет); фильтры `studio`, `studio_slug`, `museum`, `country`,
+`award`, `award_year`, `awarded=true` дают пустую выдачу; `GET /search/tags?kind=book` отдаёт до
+300 тегов (жанров FB2 больше двухсот), `q` там игнорируется, как и раньше.
+
+**Как ищет** (логика перенесена из настольной библиотеки Cassandra, `books/index.rs`):
+
+- слова запроса — через И, поля одного слова (название, автор, серия) — через ИЛИ; до 16 слов,
+  до 200 символов;
+- анализатор `ru_stem`: слова, нижний регистр, `ё` → `е`, русский стеммер; токены длиннее 80
+  байт отбрасываются;
+- автодополнение последнего слова, если запрос не кончается пробелом или знаком: единственное
+  слово — от 3 букв, при нескольких словах — от первой. Слово раскрывается по словарю
+  `title_raw` / `author_raw` в ИЛИ не более 64 самых частых слов (просмотр не дальше 4000 слов на
+  сегмент) — цена запроса ограничена при любом префиксе; edge n-gram и `RegexQuery` не
+  используются;
+- опечатка в имени автора (одна правка, слова от 4 букв) — всегда; опечатка в названии — только
+  если строгий запрос ничего не нашёл (резервный запрос: одна правка в одном слове);
+- веса: точное название целиком (12, для одного слова — 4) > точное имя автора (6) > точная
+  фраза (4) > слово в названии (2) > автодополнение (1,5) > слово в имени автора (1) > серия
+  (0,8) > опечатка (0,5 / 0,3);
+- релевантность умножается на известность автора: `1 + ln(1 + работ у автора) / 15`
+  (`person_credit_counts.active_credits`, максимум по авторам книги) — из книг с одинаковым
+  названием первой встаёт книга известного автора.
+
+**Что в индексе** (схема `books-3`, файл `nexus-schema` рядом с индексом; другая версия — индекс
+пересоздаётся пустым и строится заново): хранится одно поле `card` — строка выдачи в JSON
+(`id`, `slug`, `title`, `original_title`, `release_date`, `cover_url`, размеры обложки,
+`authors`); выдача отдаётся без похода в PostgreSQL. Аннотации в индексе нет — карточка книги
+читается из БД (`GET /entities/{slug}`) и раздаётся фронтендом как статическая страница.
+Только для фильтров и сортировок: `tags`, `credits` (`<slug>` и `<role>:<slug>`), `publisher` /
+`publisher_key`, `language`, `has_cover`, `year`, `release_day` (колонка) и `release_day_term` (терм), `popularity`, `sort_rank`,
+`sort_rating`, `sort_popular`, `sort_title`.
+
+**Сортировки:** без `sort` и с текстом — релевантность; без текста и `recommended` —
+`sort_rank` (число оценок Nexus, затем обложка / аннотация / автор, затем известность автора,
+затем год); `new` — только вышедшие, по дате; `soon` — только не вышедшие; `title` — по первым 9
+знакам ключа названия; `popular` — число оценок Nexus; `rating` (и `top_rated`) — средняя
+оценка Nexus. `total` точный, `offset` до 100 000.
+
+**Подсказки** — из словаря термов, без чтения документов: теги и издательства со счётчиками
+считаются раз на состояние индекса. Издательства — по части названия без учёта регистра и `ё`,
+сначала начинающиеся с неё.
+
+**Кэш:** до 512 ответов поиска в памяти процесса (страницы до 100 карточек), ключ — запрос,
+`limit`, `offset` и отпечаток сегментов индекса; сбрасывается сам при любом коммите. Номер
+поколения читателя для ключа не годится: он растёт на каждой перезагрузке читателя.
+
+**Синхронизация** (`books/sync.rs`):
+
+- `nexus books index` — полная перестройка из БД: видимые книги пачками по 2000 (keyset по `id`,
+  индекс `entities_book_id_idx`), один коммит — до него поиск читает прежний индекс. Писатель —
+  50 МБ, один поток. Замер (dev, отладочная сборка): ≈50 000 книг в минуту.
+- Сервер при старте: индекс пуст (первый запуск, новая схема) — строит его в фоне
+  (`sync::spawn_initial`); до конца сборки книжная выдача пуста.
+- Правка книги в админке, `POST /admin/search/entities` и новые оценки Nexus
+  (`search::sync_ratings`) — `sync::update` из `search::update_entities`: книги из затронутых
+  сущностей удаляются из индекса и добавляются заново одним коммитом. Писатель один на каталог:
+  пока идёт перестройка, досылка получает `Busy` (в лог; оценки досылаются следующим проходом,
+  правку админки подберёт следующая перестройка).
+- Читатель следит за коммитами сам (`ReloadPolicy::OnCommitWithDelay`), поэтому перестройку
+  можно запускать отдельным процессом при работающем сервере.
+
+`nexus books search QUERY` — запрос к индексу из терминала: всего найдено, время холодного
+запроса и повтора из кэша, первые 10 книг.
+
+Тесты: модульные `books::index` (И между словами, стеммер, точное название, автодополнение, `ё`,
+опечатки, автор и серия, фильтры, сортировки, страницы, обновление, перестройка, подсказки),
+`books::search` (параметры → запрос), `search::tests::blend_alternates_two_others_and_a_book_then_drains`.
+
 ## Игры из Steam ✅
 
 Без своих таблиц, без кода в `catalog` и без ключей: `scripts/games-import/steam_games.py`
@@ -2141,6 +2312,11 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `archive/mod.rs` | `GET /archive/search`, `GET /archive/entities/{slug}`, `POST /archive/entities/{slug}/restore` (лимит, `IN_FLIGHT`), `POST /admin/archive/promote/{slug}`, `POST /admin/archive/demote`, `archive::open` |
 | `books/mod.rs` | `nexus books import`: отбор русских строк, `Book`, `work_key`, авторы, запись пачками (`entities` с `metadata.libgen`, `people`, `entity_credits`) |
 | `books/dump.rs` | Потоковый разбор дампа MySQL: `Statements`, `create_table`, `insert` |
+| `books/cassandra.rs` | `nexus books cassandra`: строки `metadata/*.jsonl` → `Book`, slug'и, люди (авторы, переводчики), жанры-теги, копия обложек и размеры AVIF, запись пачками |
+| `books/genres.rs` | Жанры FB2: код → русское название (`GENRES`), `name`, `names` |
+| `books/index.rs` | Книжный индекс Tantivy: схема, анализаторы `ru_stem` / `ru_raw` (`YoFilter`), `BookDoc`, `BookQuery`, строгий и резервный запросы, автодополнение, фильтры, сортировки, кэш, подсказки (`tags`, `publishers`), `update`, `Rebuild` |
+| `books/sync.rs` | Книжный индекс ← PostgreSQL: `rebuild`, `update`, `spawn_initial`, `open`, `enabled` |
+| `books/search.rs` | Книжный поиск в API: `routed`, `in_meili`, `query_of`, `search`, `count`, `neighbors`, `similar`, `tags`, `publishers` |
 | `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
 | `publish.rs` | Публикация правки: `Touched` (+`collect_awards` — страницы премий и церемоний), поиск, ISR, поток `.../stream` |
 | `jobs.rs` | Шаги и события потоков (`JobEvent`), `Reporter`, ответ `text/event-stream` |

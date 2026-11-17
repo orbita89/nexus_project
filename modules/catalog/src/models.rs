@@ -156,6 +156,20 @@ pub struct EntitySummary {
     #[serde(default)]
     #[schema(example = 912_000)]
     pub imdb_votes: Option<i32>,
+    /// Авторы книги по порядку — только в выдаче книжного поиска (`GET /search` с `kind=book`
+    /// при включённом индексе Tantivy); в остальных списках поля нет.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[sqlx(skip)]
+    pub authors: Vec<SummaryAuthor>,
+}
+
+/// Автор в строке выдачи: имя и slug страницы человека.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+pub struct SummaryAuthor {
+    #[schema(example = "mikhail-bulgakov")]
+    pub slug: String,
+    #[schema(example = "Михаил Булгаков")]
+    pub name: String,
 }
 
 pub const ENTITY_SUMMARY_COLUMNS: &str = concat!(
@@ -960,6 +974,9 @@ pub struct SearchQuery {
     pub award_year: Option<i32>,
     /// `true` — только полученные награды (у работы есть хотя бы одна победа).
     pub awarded: Option<bool>,
+    /// Только книги: `true` — с обложкой, `false` — без. Работает в книжном поиске (`kind=book`
+    /// при включённом индексе Tantivy), в остальных случаях игнорируется.
+    pub has_cover: Option<bool>,
     /// 1–100, по умолчанию 20.
     pub limit: Option<i64>,
     /// С 0.

@@ -166,6 +166,51 @@ pub struct BookMetadata {
     /// удаляет — повторный импорт тогда создаст книгу заново.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub libgen: Option<LibgenSource>,
+    /// Серия книг: до 300 символов.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "Абарат")]
+    pub series: Option<String>,
+    /// Номер в серии, как в источнике (`1`, `2.5`): до 20 символов.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "1")]
+    pub series_number: Option<String>,
+    /// Язык книги, код (`ru`): до 20 символов, нижний регистр.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "ru")]
+    pub language: Option<String>,
+    /// Язык оригинала, код (`en`): до 20 символов, нижний регистр.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "en")]
+    pub original_language: Option<String>,
+    /// Ключевые слова: до 50, каждое до 100 символов.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keywords: Option<Vec<String>>,
+    /// Когда написана, как в источнике (`2002`, `1865–1869`): до 50 символов.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "2002")]
+    pub written: Option<String>,
+    /// Объём текста в словах.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 105136)]
+    pub words: Option<u64>,
+    /// Файл книги в хранилище: пишет `nexus books cassandra` (`catalog::books::cassandra`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<BookFile>,
+}
+
+/// Файл книги в хранилище архивов.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BookFile {
+    /// Архив, в котором лежит файл: до 200 символов.
+    #[schema(example = "104215-113436.arx")]
+    pub archive: String,
+    /// Путь внутри архива: до 300 символов.
+    #[schema(example = "113037.epub")]
+    pub path: String,
+    /// Размер файла в байтах.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 /// Файлы книги в LibGen (форматы, сканы) и ключ произведения, по которому импорт их объединяет.
@@ -453,6 +498,10 @@ pub enum Metadata {
 }
 
 const MAX_TEXT: usize = 200;
+/// Поля книги: название серии, число и длина ключевых слов.
+pub const MAX_SERIES: usize = 300;
+pub const MAX_KEYWORDS: usize = 50;
+pub const MAX_KEYWORD: usize = 100;
 const MAX_LIST: usize = 30;
 const MAX_TRAILERS: usize = 5;
 const MAX_STUDIOS: usize = 20;
@@ -519,6 +568,25 @@ pub fn validate(kind: EntityKind, metadata: Value) -> AppResult<Value> {
             m.awards = awards(m.awards)?;
             m.trivia = trivia(m.trivia)?;
             m.libgen = m.libgen.map(libgen).transpose()?;
+            m.series = text("series", m.series, MAX_SERIES)?;
+            m.series_number = text("series_number", m.series_number, 20)?;
+            m.language = text("language", m.language, 20)?.map(|l| l.to_lowercase());
+            m.original_language =
+                text("original_language", m.original_language, 20)?.map(|l| l.to_lowercase());
+            m.keywords = list_of("keywords", m.keywords, MAX_KEYWORDS, |k| {
+                item("keywords", k, MAX_KEYWORD)
+            })?;
+            m.written = text("written", m.written, 50)?;
+            m.file = m
+                .file
+                .map(|file| -> AppResult<BookFile> {
+                    Ok(BookFile {
+                        archive: item("file.archive", file.archive, MAX_TEXT)?,
+                        path: item("file.path", file.path, 300)?,
+                        size: file.size,
+                    })
+                })
+                .transpose()?;
             to_value(m)
         }
         EntityKind::Game => {

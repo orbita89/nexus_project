@@ -95,6 +95,11 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       # Холодный архив каталога (Tantivy, mmap): ~1 млн фильмов — сотни МБ на диске.
       ARCHIVE_DIR: /var/lib/nexus/archive
+      # Книжный поиск на Tantivy: каталог задан — книги ищутся в нём, а не в Meilisearch
+      # (пустое значение BOOKS_INDEX_DIR= возвращает книги в Meilisearch).
+      BOOKS_INDEX_DIR: ${BOOKS_INDEX_DIR-/var/lib/nexus/books-index}
+      # Обложки книг библиотеки Cassandra: раздаёт gateway по /covers/books/.
+      BOOK_COVERS_DIR: /var/lib/nexus/book-covers
       # Вложения чата — на том же томе: их надо бэкапить вместе с остальными данными.
       ATTACHMENTS_DIR: /var/lib/nexus/attachments
       # Фото профиля — там же, рядом с вложениями.
@@ -122,6 +127,8 @@ services:
       - ./covers_cache.conf:/etc/nginx/covers_cache.conf:ro
       # Кэш обложек книг (`/covers/...`, nginx.conf).
       - coverscache:/var/cache/nginx/covers
+      # Обложки книг библиотеки Cassandra (`/covers/books/...`): файлы из тома приложения.
+      - archivedata:/var/lib/nexus:ro
     depends_on:
       - app
 

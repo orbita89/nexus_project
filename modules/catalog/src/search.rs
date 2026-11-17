@@ -314,9 +314,13 @@ async fn update_entities(state: &AppState, touched: &Touched) -> Result<(), BoxE
     if touched.entities.is_empty() {
         return Ok(());
     }
+    // Книги — в свой индекс (Tantivy), если он включён; в Meilisearch их тогда нет, и строка
+    // книги, оставшаяся там с прошлого режима, удаляется как «не найденная».
+    let books = crate::books::sync::update(state, &touched.entities).await;
+    let in_meili = crate::books::search::in_meili(state);
     let entities: Vec<Entity> = sqlx::query_as(&format!(
         "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN}
-         WHERE e.id = ANY($1) AND {VISIBLE} AND {IN_CATALOG} ORDER BY e.id"
+         WHERE e.id = ANY($1) AND {VISIBLE} AND {in_meili} ORDER BY e.id"
     ))
     .bind(&touched.entities)
     .fetch_all(&state.db)
@@ -335,7 +339,7 @@ async fn update_entities(state: &AppState, touched: &Touched) -> Result<(), BoxE
             tracing::warn!(%error, %shadow, "shadow index sync failed");
         }
     }
-    Ok(())
+    books
 }
 
 // ---------------------------------------------------------------- перестройка
@@ -809,8 +813,9 @@ async fn create_version(
 /// Все видимые сущности из БД пачками по [`BATCH`] (keyset по id) в индекс `version`. Пока Meilisearch
 /// применяет пачку, читается следующая. Возвращает число отправленных документов.
 async fn fill(state: &AppState, version: &str, report: &Reporter) -> Result<usize, BoxError> {
+    let in_meili = crate::books::search::in_meili(state);
     let total: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM entities e WHERE {VISIBLE} AND {IN_CATALOG}"
+        "SELECT count(*) FROM entities e WHERE {VISIBLE} AND {in_meili}"
     ))
     .fetch_one(&state.db)
     .await?;
@@ -823,7 +828,7 @@ async fn fill(state: &AppState, version: &str, report: &Reporter) -> Result<usiz
     loop {
         let entities: Vec<Entity> = sqlx::query_as(&format!(
             "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN}
-             WHERE {VISIBLE} AND {IN_CATALOG} AND ($1::uuid IS NULL OR e.id > $1)
+             WHERE {VISIBLE} AND {in_meili} AND ($1::uuid IS NULL OR e.id > $1)
              ORDER BY e.id LIMIT $2"
         ))
         .bind(after)
@@ -1040,6 +1045,15 @@ pub async fn search(
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Json<Page<EntitySummary>>> {
     let (limit, offset) = page_bounds(query.limit, query.offset);
+    if let Some(books) = books_query(&state, &repeated, &query)? {
+        let random = matches!(query.sort, Some(SearchSort::Random));
+        return Ok(Json(
+            crate::books::search::search(&state, books, random, limit, offset).await?,
+        ));
+    }
+    if let Some(page) = blended(&state, &repeated, &query, limit, offset).await? {
+        return Ok(Json(page));
+    }
     let empty = |limit, offset| {
         Json(Page {
             items: Vec::new(),
@@ -1086,6 +1100,148 @@ pub async fn search(
     }))
 }
 
+/// Запрос к книжному индексу, если отвечать должен он: запрос только про книги (`kind=book`) и
+/// книжный поиск включён ([`crate::books::search::routed`]). Внешний `None` — отвечает
+/// Meilisearch; внутренний — под фильтры у книг заведомо ничего нет. Параметры проверяются теми
+/// же правилами, что и для Meilisearch (неверный фильтр — 400).
+fn books_query(
+    state: &AppState,
+    repeated: &Repeated,
+    query: &SearchQuery,
+) -> AppResult<Option<Option<crate::books::index::BookQuery>>> {
+    let kinds = kinds_of(repeated)?;
+    if !crate::books::search::routed(state, &kinds) {
+        return Ok(None);
+    }
+    let countries = countries_of(repeated)?;
+    filters_of(query, &kinds, &countries)?;
+    Ok(Some(crate::books::search::query_of(query, &countries)))
+}
+
+/// Сколько работ Meilisearch идёт в общей выдаче перед каждой книгой ([`blended`]).
+const BLEND_OTHERS_PER_BOOK: usize = 2;
+
+/// Порядок общей выдачи двух индексов: `true` — очередная работа из Meilisearch, `false` —
+/// книга. Чередование «две работы — книга», пока есть обе стороны, дальше — что осталось.
+/// Возвращает порядок страницы и сколько работ каждой стороны стоит перед ней.
+fn blend_order(
+    others: usize,
+    books: usize,
+    limit: usize,
+    offset: usize,
+) -> (Vec<bool>, usize, usize) {
+    let (mut o, mut b) = (0usize, 0usize);
+    let (mut before_o, mut before_b) = (0, 0);
+    let mut order = Vec::with_capacity(limit);
+    while o + b < offset + limit && (o < others || b < books) {
+        let position = o + b;
+        if position == offset {
+            (before_o, before_b) = (o, b);
+        }
+        let take_other = if o >= others {
+            false
+        } else if b >= books {
+            true
+        } else {
+            // В каждой тройке позиций третья — книга.
+            position % (BLEND_OTHERS_PER_BOOK + 1) < BLEND_OTHERS_PER_BOOK
+        };
+        if position >= offset {
+            order.push(take_other);
+        }
+        if take_other {
+            o += 1;
+        } else {
+            b += 1;
+        }
+    }
+    if order.is_empty() {
+        (before_o, before_b) = (o, b);
+    }
+    (order, before_o, before_b)
+}
+
+/// Общая выдача, когда книги живут в своём индексе (Tantivy), а запрос — про все разделы или
+/// про книги вместе с другими: оценки двух движков несравнимы, поэтому выдачи чередуются
+/// ([`blend_order`]) — так книги есть и в подсказках шапки, и в выборе работ для коллекций и
+/// чата, которые о двух индексах не знают. `total` — сумма. `None` — отвечает один Meilisearch:
+/// книжный поиск выключен, запрос не про книги, `sort=random` или книг под запрос нет.
+async fn blended(
+    state: &AppState,
+    repeated: &Repeated,
+    query: &SearchQuery,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Option<Page<EntitySummary>>> {
+    if !crate::books::sync::enabled(state) || matches!(query.sort, Some(SearchSort::Random)) {
+        return Ok(None);
+    }
+    let kinds = kinds_of(repeated)?;
+    if !(kinds.is_empty() || kinds.contains(&EntityKind::Book)) {
+        return Ok(None);
+    }
+    let countries = countries_of(repeated)?;
+    let Some(books) = crate::books::search::query_of(query, &countries) else {
+        return Ok(None);
+    };
+    // Проверка параметров (400) и запрос к Meilisearch — как у обычного пути.
+    let body = request_body(state, repeated, query).await?;
+    let books_total = crate::books::search::count(state, books.clone()).await?;
+    if books_total == 0 {
+        return Ok(None);
+    }
+    let others_total = match &body {
+        Some(body) => {
+            let mut count = body.clone();
+            count["page"] = json!(1);
+            count["hitsPerPage"] = json!(0);
+            count["attributesToRetrieve"] = json!([]);
+            ask(state, &count).await?["totalHits"].as_i64().unwrap_or(0)
+        }
+        None => 0,
+    };
+    let (order, others_offset, books_offset) = blend_order(
+        others_total as usize,
+        books_total as usize,
+        limit as usize,
+        offset as usize,
+    );
+    let others_limit = order.iter().filter(|other| **other).count();
+    let books_limit = order.len() - others_limit;
+    let mut others: std::vec::IntoIter<EntitySummary> = match body {
+        Some(mut body) if others_limit > 0 => {
+            body["offset"] = json!(others_offset);
+            body["limit"] = json!(others_limit);
+            hits::<EntitySummary>(&ask(state, &body).await?)?.into_iter()
+        }
+        _ => Vec::new().into_iter(),
+    };
+    let mut books = if books_limit > 0 {
+        crate::books::search::search(
+            state,
+            Some(books),
+            false,
+            books_limit as i64,
+            books_offset as i64,
+        )
+        .await?
+        .items
+        .into_iter()
+    } else {
+        Vec::new().into_iter()
+    };
+    let items = order
+        .into_iter()
+        .filter_map(|other| if other { others.next() } else { books.next() })
+        .collect();
+    Ok(Some(Page {
+        items,
+        total: others_total + books_total as i64,
+        limit,
+        offset,
+    }))
+}
+
 /// Тело запроса к индексу по фильтрам и сортировке `GET /search`, без `limit` и `offset`:
 /// общее для самого поиска, соседей и случайной работы — ряд должен совпадать с тем, который
 /// человек видел в списке. `None` — под фильтры заведомо ничего не подходит.
@@ -1097,6 +1253,11 @@ async fn request_body(
     let kinds = kinds_of(repeated)?;
     let countries = countries_of(repeated)?;
     let mut filters = filters_of(query, &kinds, &countries)?;
+    // Книги живут в своём индексе: строки книг, оставшиеся в Meilisearch с прежнего режима (до
+    // очередной перестройки), в выдачу попасть не должны — иначе в общей выдаче они задвоятся.
+    if crate::books::sync::enabled(state) {
+        filters.push("kind != book".to_owned());
+    }
     if let Some(person) = &query.person {
         match person_filter(&state.db, person, query.role.as_deref()).await? {
             Some(filter) => filters.push(filter),
@@ -1184,7 +1345,7 @@ async fn random_window(
 
 /// Случайное число 0..`n` (`n` > 0). Отдельной зависимости ради выбора одной карточки не нужно:
 /// наносекунды часов, перемешанные splitmix64, — этого хватает.
-fn random_below(n: i64) -> i64 {
+pub(crate) fn random_below(n: i64) -> i64 {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_nanos() as u64)
@@ -1240,6 +1401,11 @@ pub async fn neighbors(
     if matches!(query.sort, Some(SearchSort::Random)) {
         return Err(AppError::BadRequest(
             "sort=random has no neighbors".to_owned(),
+        ));
+    }
+    if let Some(books) = books_query(&state, &repeated, &query)? {
+        return Ok(Json(
+            crate::books::search::neighbors(&state, books, slug).await?,
         ));
     }
     let none = Json(Neighbors {
@@ -1350,6 +1516,9 @@ pub(crate) async fn similar(
     exclude: &[String],
     limit: i64,
 ) -> AppResult<(Vec<EntitySummary>, i64)> {
+    if crate::books::search::routed(state, &[kind]) {
+        return crate::books::search::similar(state, tags, exclude, limit).await;
+    }
     let quoted = |values: &[String]| {
         values
             .iter()
@@ -1686,7 +1855,14 @@ pub async fn publishers(
             "q must be at most {MAX_STUDIO} characters"
         )));
     }
-    let hits = facet_hits(&state, "publishers", q, query.kind, query.limit).await?;
+    let hits = if query
+        .kind
+        .is_some_and(|kind| crate::books::search::routed(&state, &[kind]))
+    {
+        crate::books::search::publishers(&state, q, query.limit).await?
+    } else {
+        facet_hits(&state, "publishers", q, query.kind, query.limit).await?
+    };
     Ok(Json(publisher_hits(&state, hits).await?))
 }
 
@@ -1785,7 +1961,14 @@ pub async fn tags(
             "q must be at most {MAX_STUDIO} characters"
         )));
     }
-    let hits = facet_hits(&state, "tags", q, query.kind, query.limit).await?;
+    let hits = if query
+        .kind
+        .is_some_and(|kind| crate::books::search::routed(&state, &[kind]))
+    {
+        crate::books::search::tags(&state, query.limit).await?
+    } else {
+        facet_hits(&state, "tags", q, query.kind, query.limit).await?
+    };
     let slugs: Vec<String> = hits.iter().map(|(slug, _)| slug.clone()).collect();
     let rows: Vec<(String, String, String, Option<String>)> =
         sqlx::query_as("SELECT slug, name, kind, description FROM tags WHERE slug = ANY($1)")
@@ -1980,6 +2163,23 @@ pub async fn reindex_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blend_alternates_two_others_and_a_book_then_drains() {
+        // 4 работы и 3 книги: О О К О О К К.
+        let (order, o, b) = blend_order(4, 3, 10, 0);
+        assert_eq!(order, [true, true, false, true, true, false, false]);
+        assert_eq!((o, b), (0, 0));
+        // Вторая страница по три: перед ней две работы и книга.
+        let (order, o, b) = blend_order(4, 3, 3, 3);
+        assert_eq!(order, [true, true, false]);
+        assert_eq!((o, b), (2, 1));
+        // Книг нет — одни работы; работ нет — одни книги.
+        assert_eq!(blend_order(2, 0, 5, 0).0, [true, true]);
+        assert_eq!(blend_order(0, 2, 5, 0).0, [false, false]);
+        // За концом выдачи — пусто.
+        assert!(blend_order(1, 1, 5, 2).0.is_empty());
+    }
 
     #[test]
     fn version_names() {

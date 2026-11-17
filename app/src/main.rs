@@ -3,6 +3,13 @@
 //! `nexus archive dump|build|ids|keep-cold` — горячий слой каталога и холодный архив
 //! (`catalog::archive`).
 //! `nexus books import` — метаданные русских книг из SQL-дампа LibGen (`catalog::books`).
+//! `nexus books cassandra DIR` — книги библиотеки Cassandra (`catalog::books::cassandra`).
+//! `nexus books index` — перестроить книжный индекс Tantivy из БД (`catalog::books::sync`);
+//! `nexus books search QUERY` — запрос к нему из терминала.
+//! `nexus search reindex` — перестроить индексы Meilisearch (как `POST /admin/search/reindex`);
+//! `nexus search bench [ROUNDS]` — замер поиска: книги (Tantivy) против фильмов (Meilisearch).
+
+mod bench;
 
 use shared::mail::Mailer;
 use shared::{db, telemetry, AppState, Config};
@@ -43,8 +50,41 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if args.first().map(String::as_str) == Some("books") {
-        let options = books_options(&args[1..]).map_err(anyhow::Error::msg)?;
-        run_books(&state, &options).await?;
+        match books_command(&args[1..]).map_err(anyhow::Error::msg)? {
+            BooksCommand::Import(options) => run_books(&state, &options).await?,
+            BooksCommand::Cassandra(options) => run_cassandra(&state, &options).await?,
+            BooksCommand::Index => {
+                let started = std::time::Instant::now();
+                let books = catalog::books::sync::rebuild(&state)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("books indexed: {books} in {:.1?}", started.elapsed());
+            }
+            BooksCommand::Search(query) => run_books_search(&state, query)?,
+        }
+        state.cache.wait_pending().await;
+        return Ok(());
+    }
+
+    if args.first().map(String::as_str) == Some("search") {
+        match args.get(1).map(String::as_str) {
+            Some("reindex") => {
+                let options = catalog::search::ReindexOptions {
+                    force: false,
+                    revalidate: false,
+                };
+                let reporter = catalog::jobs::Reporter::silent();
+                let result = catalog::search::reindex(&state, options, &reporter)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("search reindexed: {result:?}");
+            }
+            Some("bench") => {
+                let rounds = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(5);
+                bench::run(&state, rounds).await?;
+            }
+            _ => anyhow::bail!("usage: nexus search reindex\n       nexus search bench [ROUNDS]"),
+        }
         state.cache.wait_pending().await;
         return Ok(());
     }
@@ -59,6 +99,8 @@ async fn main() -> anyhow::Result<()> {
     auth::cleanup::spawn(state.db.clone());
     catalog::search::spawn_reindex(state.clone());
     catalog::search::spawn_ratings_sync(state.clone());
+    // Книжный индекс Tantivy: пуст (первый запуск, новая схема) — строится в фоне из БД.
+    catalog::books::sync::spawn_initial(state.clone());
     social::ratings::spawn_sync_all(state.clone());
     // Индекс коллекций: строится при старте, дальше его правят сами записи.
     social::collection_search::spawn_fill(state.clone());
@@ -171,11 +213,49 @@ fn archive_command(args: &[String]) -> Result<ArchiveCommand, String> {
     }
 }
 
-const BOOKS_USAGE: &str = "usage: nexus books import --dump FILE.sql[.gz] [--table updated|fiction] [--batch-size N] [--limit N]";
+const BOOKS_USAGE: &str = "usage: nexus books import --dump FILE.sql[.gz] [--table updated|fiction] [--batch-size N] [--limit N]\n       \
+     nexus books cassandra DIR [--batch-size N] [--limit N]\n       \
+     nexus books index\n       \
+     nexus books search QUERY";
 
-/// Аргументы `nexus books import ...`.
-fn books_options(args: &[String]) -> Result<catalog::books::ImportOptions, String> {
+enum BooksCommand {
+    /// Дамп LibGen.
+    Import(catalog::books::ImportOptions),
+    /// Библиотека Cassandra: каталог с `metadata/` и `covers/`.
+    Cassandra(catalog::books::cassandra::Options),
+    /// Перестроить книжный индекс Tantivy из БД (`BOOKS_INDEX_DIR`).
+    Index,
+    /// Запрос к книжному индексу из терминала: проверить выдачу и время без HTTP.
+    Search(String),
+}
+
+/// Аргументы `nexus books ...`.
+fn books_command(args: &[String]) -> Result<BooksCommand, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if args == ["index"] {
+        return Ok(BooksCommand::Index);
+    }
+    if let ["search", query] = &args[..] {
+        return Ok(BooksCommand::Search((*query).to_string()));
+    }
+    if let ["cassandra", dir, rest @ ..] = &args[..] {
+        let mut options = catalog::books::cassandra::Options::new(dir.into());
+        let mut rest = rest.iter();
+        let number = |value: Option<&&str>| -> Result<usize, String> {
+            value
+                .and_then(|v| v.parse().ok())
+                .filter(|n| *n > 0)
+                .ok_or_else(|| BOOKS_USAGE.to_string())
+        };
+        while let Some(arg) = rest.next() {
+            match *arg {
+                "--batch-size" => options.batch_size = number(rest.next())?,
+                "--limit" => options.limit = Some(number(rest.next())? as u64),
+                _ => return Err(BOOKS_USAGE.into()),
+            }
+        }
+        return Ok(BooksCommand::Cassandra(options));
+    }
     let ["import", rest @ ..] = &args[..] else {
         return Err(BOOKS_USAGE.into());
     };
@@ -198,7 +278,58 @@ fn books_options(args: &[String]) -> Result<catalog::books::ImportOptions, Strin
         }
     }
     options.dump = dump.ok_or(BOOKS_USAGE)?;
-    Ok(options)
+    Ok(BooksCommand::Import(options))
+}
+
+/// `nexus books search QUERY`: первые 10 книг по запросу, всего найдено и время — холодный
+/// запрос и повтор из кэша.
+fn run_books_search(state: &AppState, query: String) -> anyhow::Result<()> {
+    use catalog::books::index::BookQuery;
+    let index = catalog::books::sync::open(state)
+        .ok_or_else(|| anyhow::anyhow!("BOOKS_INDEX_DIR is not set"))?
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let query = BookQuery {
+        q: query,
+        ..BookQuery::default()
+    };
+    let started = std::time::Instant::now();
+    let found = index
+        .search(&query, 10, 0)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cold = started.elapsed();
+    let started = std::time::Instant::now();
+    index
+        .search(&query, 10, 0)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cached = started.elapsed();
+    println!(
+        "books in index: {}; found: {}{}; {cold:.1?} (cached: {cached:.1?})",
+        index.len(),
+        found.total,
+        if found.approximate {
+            " (typo fixed)"
+        } else {
+            ""
+        },
+    );
+    for item in found.items {
+        let authors: Vec<&str> = item.authors.iter().map(|a| a.name.as_str()).collect();
+        println!("  {} — {} [{}]", item.title, authors.join(", "), item.slug);
+    }
+    Ok(())
+}
+
+/// Импорт библиотеки Cassandra. Поисковые индексы после него строятся отдельно: книжный —
+/// `nexus books index`, люди (новые авторы) — `POST /admin/search/reindex`.
+async fn run_cassandra(
+    state: &AppState,
+    options: &catalog::books::cassandra::Options,
+) -> anyhow::Result<()> {
+    let report = catalog::books::cassandra::import(state, options)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    print!("{report}");
+    Ok(())
 }
 
 /// Импорт книг, затем перестройка поиска (новые книги и авторы — в Meilisearch).

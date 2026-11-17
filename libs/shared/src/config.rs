@@ -40,6 +40,12 @@ pub struct Config {
     /// Каталог индекса Tantivy с холодным архивом фильмов (`catalog::archive`), `ARCHIVE_DIR`.
     /// Не задан — архив выключен: его эндпоинты отвечают 503.
     pub archive_dir: Option<String>,
+    /// Каталог индекса Tantivy с книгами (`catalog::books::index`), `BOOKS_INDEX_DIR`. Не задан —
+    /// книги ищутся в Meilisearch, как остальные разделы.
+    pub books_index_dir: Option<String>,
+    /// Каталог с файлами обложек книг (`nexus books cassandra` копирует их сюда), `BOOK_COVERS_DIR`.
+    /// Раздаёт gateway по `/covers/books/...`. Не задан — обложки не копируются.
+    pub book_covers_dir: Option<String>,
     /// Ключ API TMDB (v3) или Read Access Token (v4), `TMDB_API_KEY`: полные данные фильма при
     /// возврате из архива. Не задан — фильм возвращается «скелетом», авто-возврат выключен.
     pub tmdb_api_key: Option<String>,
@@ -194,6 +200,12 @@ impl Config {
                 .trim_end_matches('/')
                 .to_string(),
             archive_dir: env::var("ARCHIVE_DIR").ok().filter(|dir| !dir.is_empty()),
+            books_index_dir: env::var("BOOKS_INDEX_DIR")
+                .ok()
+                .filter(|dir| !dir.is_empty()),
+            book_covers_dir: env::var("BOOK_COVERS_DIR")
+                .ok()
+                .filter(|dir| !dir.is_empty()),
             tmdb_api_key: env::var("TMDB_API_KEY")
                 .ok()
                 .filter(|key| !key.trim().is_empty()),

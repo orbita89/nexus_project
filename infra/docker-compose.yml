@@ -28,7 +28,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6380}:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -87,6 +87,12 @@ services:
       # Индекс холодного архива (catalog::archive): GET /catalog/archive/search, промоушен,
       # nexus archive dump|build.
       ARCHIVE_DIR: /var/lib/nexus/archive
+      # Книжный поиск на Tantivy (catalog::books::index): каталог задан — книги ищутся в нём, а
+      # не в Meilisearch. Индекс строит `nexus books index` (и сам сервер, если каталог пуст).
+      BOOKS_INDEX_DIR: ${BOOKS_INDEX_DIR-/var/lib/nexus/books-index}
+      # Обложки книг библиотеки Cassandra: сюда их копирует `nexus books cassandra`, раздаёт
+      # gateway по /covers/books/ (тот же том смонтирован в nginx только для чтения).
+      BOOK_COVERS_DIR: /var/lib/nexus/book-covers
       # Вложения чата: тот же том, что у архива — вне /app, иначе cargo watch перезапускал бы
       # приложение на каждую загруженную картинку.
       ATTACHMENTS_DIR: /var/lib/nexus/attachments
@@ -184,6 +190,8 @@ services:
       - ./covers_cache.conf:/etc/nginx/covers_cache.conf:ro
       # Кэш обложек книг (`/covers/...`, nginx.conf).
       - coverscache:/var/cache/nginx/covers
+      # Обложки книг библиотеки Cassandra (`/covers/books/...`): файлы из тома приложения.
+      - archivedata:/var/lib/nexus:ro
     depends_on:
       - app
 

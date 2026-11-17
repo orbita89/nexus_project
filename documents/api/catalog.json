@@ -4601,6 +4601,15 @@
             }
           },
           {
+            "name": "has_cover",
+            "in": "query",
+            "description": "Только книги: `true` — с обложкой, `false` — без. Работает в книжном поиске (`kind=book`\nпри включённом индексе Tantivy), в остальных случаях игнорируется.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "1–100, по умолчанию 20.",
@@ -5082,6 +5091,15 @@
             "name": "awarded",
             "in": "query",
             "description": "`true` — только полученные награды (у работы есть хотя бы одна победа).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "has_cover",
+            "in": "query",
+            "description": "Только книги: `true` — с обложкой, `false` — без. Работает в книжном поиске (`kind=book`\nпри включённом индексе Tantivy), в остальных случаях игнорируется.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -6748,6 +6766,36 @@
         ],
         "description": "Где показывать баннер."
       },
+      "BookFile": {
+        "type": "object",
+        "description": "Файл книги в хранилище архивов.",
+        "required": [
+          "archive",
+          "path"
+        ],
+        "properties": {
+          "archive": {
+            "type": "string",
+            "description": "Архив, в котором лежит файл: до 200 символов.",
+            "example": "104215-113436.arx"
+          },
+          "path": {
+            "type": "string",
+            "description": "Путь внутри архива: до 300 символов.",
+            "example": "113037.epub"
+          },
+          "size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Размер файла в байтах.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "BookMetadata": {
         "type": "object",
         "description": "Поля книги.",
@@ -6762,6 +6810,17 @@
             },
             "description": "Награды и номинации: до 50."
           },
+          "file": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BookFile",
+                "description": "Файл книги в хранилище: пишет `nexus books cassandra` (`catalog::books::cassandra`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "isbn": {
             "type": [
               "string",
@@ -6769,6 +6828,24 @@
             ],
             "description": "ISBN-10 или ISBN-13, дефисы допустимы. Хранится без дефисов.",
             "example": "9780441013593"
+          },
+          "keywords": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Ключевые слова: до 50, каждое до 100 символов."
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Язык книги, код (`ru`): до 20 символов, нижний регистр.",
+            "example": "ru"
           },
           "libgen": {
             "oneOf": [
@@ -6780,6 +6857,14 @@
                 "type": "null"
               }
             ]
+          },
+          "original_language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Язык оригинала, код (`en`): до 20 символов, нижний регистр.",
+            "example": "en"
           },
           "pages": {
             "type": [
@@ -6798,6 +6883,22 @@
             ],
             "example": "Ace Books"
           },
+          "series": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Серия книг: до 300 символов.",
+            "example": "Абарат"
+          },
+          "series_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Номер в серии, как в источнике (`1`, `2.5`): до 20 символов.",
+            "example": "1"
+          },
           "trivia": {
             "type": [
               "array",
@@ -6810,6 +6911,24 @@
             "example": [
               "Пустыню снимали в Иордании и ОАЭ."
             ]
+          },
+          "words": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Объём текста в словах.",
+            "example": 105136,
+            "minimum": 0
+          },
+          "written": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Когда написана, как в источнике (`2002`, `1865–1869`): до 50 символов.",
+            "example": "2002"
           }
         },
         "additionalProperties": false
@@ -7820,6 +7939,13 @@
           "title"
         ],
         "properties": {
+          "authors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SummaryAuthor"
+            },
+            "description": "Авторы книги по порядку — только в выдаче книжного поиска (`GET /search` с `kind=book`\nпри включённом индексе Tantivy); в остальных списках поля нет."
+          },
           "cover_height": {
             "type": [
               "integer",
@@ -9170,6 +9296,13 @@
                 "title"
               ],
               "properties": {
+                "authors": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SummaryAuthor"
+                  },
+                  "description": "Авторы книги по порядку — только в выдаче книжного поиска (`GET /search` с `kind=book`\nпри включённом индексе Tantivy); в остальных списках поля нет."
+                },
                 "cover_height": {
                   "type": [
                     "integer",
@@ -10931,6 +11064,24 @@
           "slug": {
             "type": "string",
             "example": "warner-bros-pictures"
+          }
+        }
+      },
+      "SummaryAuthor": {
+        "type": "object",
+        "description": "Автор в строке выдачи: имя и slug страницы человека.",
+        "required": [
+          "slug",
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "example": "Михаил Булгаков"
+          },
+          "slug": {
+            "type": "string",
+            "example": "mikhail-bulgakov"
           }
         }
       },

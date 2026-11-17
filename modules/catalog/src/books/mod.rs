@@ -10,7 +10,12 @@
 //! md5; у существующей книги дописывает только новые файлы в `metadata.libgen.files`, остальное
 //! (могли править в админке) не трогает.
 
+pub mod cassandra;
 pub mod dump;
+pub mod genres;
+pub mod index;
+pub mod search;
+pub mod sync;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
