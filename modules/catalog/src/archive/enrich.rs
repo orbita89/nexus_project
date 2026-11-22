@@ -712,6 +712,8 @@ mod tests {
             popularity: 1.5,
             cover_url: Some("https://img.test/old.jpg".into()),
             manual: false,
+            ext_id: None,
+            payload: None,
         }
     }
 

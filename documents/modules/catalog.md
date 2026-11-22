@@ -862,6 +862,43 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 **Индекс:** `banners_active_idx` `(priority DESC, position) WHERE is_active` — публичный список
 (`banners_page_active_idx` удалён вместе с `page`).
 
+### `catalog_book_ords` ✅ — номер книги для слоя Б (2026-11-18)
+
+Миграция `20261209100000_catalog_book_ranks.sql`. `entity_id uuid PK → entities ON DELETE
+CASCADE`, `ord integer GENERATED ALWAYS AS IDENTITY (MINVALUE 0 START WITH 0) UNIQUE` — плотный
+номер книги (индекс в массивах и бит в RoaringBitmap слоя Б, колонка `ord` в Tantivy; выдаётся
+один раз, перестройка индекса его не меняет), `text_hash bigint` — отпечаток текста, записанного в
+Tantivy (`NULL` — книги в индексе нет), `created_at`, `updated_at` (триггер `set_updated_at()`).
+Пишет только `books::sync`.
+
+### `catalog_manual_ranks` ✅ — ручной порядок (2026-11-18)
+
+Та же миграция. `entity_id uuid PK → entities ON DELETE CASCADE`, `rank integer NOT NULL UNIQUE
+CHECK (1..65535)` — место в общем списке (1 — первое), `created_at`, `updated_at` (триггер
+`set_updated_at()`). Одна таблица на любые сущности: книги — первый шаг. Пишут `nexus books ranks`
+и `PUT /admin/books/ranks` (замена целиком в одной транзакции); читает слой Б.
+
+
+### Скрипты админки (2026-11-19)
+`catalog::scripts`: служебные скрипты запускаются из админки (`/admin/scripts`). Python — `SCRIPTS_PYTHON` (`Config::scripts_python`; dev-образ `infra/Dockerfile.dev` ставит venv `/opt/pyenv` с `scripts/catalog-import/requirements.txt`; не задан — 503, в проде выключено). Команда собирается только из реестра, флаги проверяются по типу, shell не используется; stdin пуст — вопрос «Записать?» у `books_llm.py run` = «нет» (код 3 → статус `stopped`), запись — флагом `yes`/`apply`. Модель, ключи, лимиты и effort задаются только у провайдера ИИ — скрипт их не принимает. После записи (`books-llm` код 0) — перестройка книжного индекса и ручного порядка из `knigi_10_000_progress.txt` в процессе сервера. Одна задача одновременно; задачи и лог — в памяти процесса.
+
+### `catalog_ai_providers` ✅ — провайдеры ИИ (2026-11-19)
+Миграция `20261210100000_catalog_ai_providers.sql` (+ `CREATE EXTENSION pgcrypto`). Настройки ИИ для служебных задач (разметка книг `books_llm.py`, дальше — другие).
+| Колонка | Тип | Примечание |
+|---|---|---|
+| id | uuid PK uuidv7() | |
+| slug | text UNIQUE | `^[a-z0-9][a-z0-9-]{0,39}$` |
+| kind | text | `anthropic` \| `openai` (OpenAI-совместимые: DeepSeek, OpenRouter, Qwen, Gemini, Ollama) |
+| base_url | text NULL | `^https?://`; NULL — адрес провайдера по умолчанию |
+| model | text | 1..200 |
+| api_keys | bytea | ключи через запятую, `pgp_sym_encrypt(..., AI_SECRET_KEY)`; наружу не отдаются |
+| keys_hint / keys_count | text / int>0 | `sk-…a1b2`, число ключей |
+| workers | int 1..64, def 8 | одновременных запросов |
+| per_request | int 1..500, def 100 | записей в запросе |
+| effort | text, def `low` | `none`/`low`/`medium`/`high` (миграции `20261211100000`, `20261212100000`; `none` — без размышлений: Anthropic без effort, OpenAI-совместимые `thinking: disabled`): Anthropic `output_config.effort`, OpenAI-совместимые `reasoning_effort` (модель без рассуждений — не шлётся) |
+| is_default | bool | уникальный частичный индекс `WHERE is_default`; первый заведённый — по умолчанию |
+Триггер `set_updated_at`. Секрет — `AI_SECRET_KEY` (`Config::ai_secret_key`; dev compose — `dev-ai-secret`); не задан → 503 на запись/проверку.
+
 ## Поиск
 
 Активные сущности индексируются в Meilisearch (индекс `entities`; скрытые — нет: правка `active`
@@ -1505,6 +1542,7 @@ Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `cov
 | Ошибка с полем | `shared::error::AppError::Invalid { field, message }` / `AppError::on_field` → 400 `{error, code:"validation", field}` (`ErrorBody.field`) | валидация баннеров |
 | TMDB API (возврат из архива) | `reqwest`; `TMDB_API_KEY` (v3 — параметром, v4 JWT — заголовком), `TMDB_API_URL` (по умолчанию `https://api.themoviedb.org/3`, в тестах — подставной сервер), `ARCHIVE_RESTORE_PER_HOUR` (300; `governor`); `unicode-normalization` — slug людей | `archive::enrich`: полные данные фильма при `restore` и `promote` |
 | Холодный архив | `tantivy` 0.26 (`mmap`, `lz4-compression`, без zstd) + `csv`; каталог `ARCHIVE_DIR` (`Config::archive_dir`, dev/prod — том `archivedata` в `/var/lib/nexus/archive`; не задан — эндпоинты архива 503) | `catalog::archive`: индекс, поиск, страница фильма, промоушен, `nexus archive dump\|build` |
+| Книжный поиск | `tantivy` 0.26 (+ `stemmer`; свой `Collector` `OrdHits`) — слой А; `roaring` 0.10 (фасеты на `RoaringBitmap`) и `arc-swap` 1 (`ArcSwap<Sidecar>`, подмена без блокировок) — слой Б в RAM; каталог `BOOKS_INDEX_DIR` (`Config::books_index_dir`; не задан — книги в Meilisearch; там же снимок `sidecar.bin`); обложки — `BOOK_COVERS_DIR` (`Config::book_covers_dir`), gateway `/covers/books/` | `catalog::books::{index,sidecar,sync,search,ranks,cassandra}`, `nexus books cassandra\|index\|search\|ranks\|sidecar` |
 | `InterestDirectory::entities_in_use` (реализует `social`) | `shared::directory`, `state.interests` | какие сущности нужны пользователям (интересы, рецензии, коллекции, отметки, реакции, темы форума) — их сборка архива не удаляет |
 
 ## Книги из LibGen ✅
@@ -1634,7 +1672,14 @@ Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `cov
 
 **Отличия от Meilisearch для книг:** `q` ищет по названию, оригинальному названию, авторам и
 серии; в `EntitySummary` есть `authors: [{slug, name}]` (только в книжной выдаче); работает
-фильтр `has_cover=true|false`; `sort=trending` = `popular`, `sort=awarded` = `recommended`
+фильтр `has_cover=true|false`; фильтр `book_form` (2026-11-22) — вид текста через запятую:
+`book`, `collection` (сборник, `metadata.collection`), `article` / `document`
+(`metadata.kind`), или `all`; **по умолчанию `book`** — сборники, статьи и документы в обычной
+выдаче, «похожих» и соседях не показываются; неизвестное значение — 400 (`filters_of`); в
+Meilisearch-пути игнорируется. В слое Б — фасеты `form:<вид>` (`sidecar::form_key`), у каждой
+книги ровно один (`BookDoc.form`, `BookForm`; SQL `sync::COLUMNS`: `kind` article/document →
+он, иначе есть `collection` → `collection`, иначе `book`); `BookQuery.forms` пусто = только
+книги; `sort=trending` = `popular`, `sort=awarded` = `recommended`
 (статистики TMDB и наград у книг нет); фильтры `studio`, `studio_slug`, `museum`, `country`,
 `award`, `award_year`, `awarded=true` дают пустую выдачу; `GET /search/tags?kind=book` отдаёт до
 300 тегов (жанров FB2 больше двухсот), `q` там игнорируется, как и раньше.
@@ -1659,50 +1704,141 @@ Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `cov
   (`person_credit_counts.active_credits`, максимум по авторам книги) — из книг с одинаковым
   названием первой встаёт книга известного автора.
 
-**Что в индексе** (схема `books-3`, файл `nexus-schema` рядом с индексом; другая версия — индекс
-пересоздаётся пустым и строится заново): хранится одно поле `card` — строка выдачи в JSON
-(`id`, `slug`, `title`, `original_title`, `release_date`, `cover_url`, размеры обложки,
-`authors`); выдача отдаётся без похода в PostgreSQL. Аннотации в индексе нет — карточка книги
-читается из БД (`GET /entities/{slug}`) и раздаётся фронтендом как статическая страница.
-Только для фильтров и сортировок: `tags`, `credits` (`<slug>` и `<role>:<slug>`), `publisher` /
-`publisher_key`, `language`, `has_cover`, `year`, `release_day` (колонка) и `release_day_term` (терм), `popularity`, `sort_rank`,
-`sort_rating`, `sort_popular`, `sort_title`.
+**Два слоя** (2026-11-18, `books/index.rs` + `books/sidecar.rs`): Tantivy (слой А) держит только
+редко меняющееся — текст для поиска, карточку и номер книги; фасеты, сортировки и ручной порядок —
+в слое Б в RAM (`ArcSwap<Sidecar>`), он собирается из PostgreSQL и подменяется атомарно, не трогая
+индекс. **Запрос в PostgreSQL не ходит:** без текста Tantivy не вызывается вовсе (битовые маски
+фасетов + готовый порядок), с текстом Tantivy отдаёт пары (номер, оценка), порядок строит слой Б.
 
-**Сортировки:** без `sort` и с текстом — релевантность; без текста и `recommended` —
-`sort_rank` (число оценок Nexus, затем обложка / аннотация / автор, затем известность автора,
-затем год); `new` — только вышедшие, по дате; `soon` — только не вышедшие; `title` — по первым 9
-знакам ключа названия; `popular` — число оценок Nexus; `rating` (и `top_rated`) — средняя
-оценка Nexus. `total` точный, `offset` до 100 000.
+**Что в индексе** (схема `books-4`, файл `nexus-schema` рядом с индексом; другая версия — индекс
+пересоздаётся пустым и строится заново): `id` (uuid-терм, `delete_term`), `slug` (терм + колонка),
+`card` — хранимая строка выдачи в JSON (`id`, `slug`, `title`, `original_title`, `release_date`,
+`cover_url`, размеры обложки, `authors`; выдача без похода в PostgreSQL), текст `title` /
+`title_raw` / `title_key`, `author` / `author_raw` / `author_key`, `series`, и `ord` (u64-колонка,
+номер книги из `catalog_book_ords`). Аннотации в индексе нет — карточка книги читается из БД
+(`GET /entities/{slug}`) и раздаётся фронтендом как статическая страница. Фильтровых и
+сортировочных полей в индексе больше нет (`tags`, `credits`, `publisher*`, `language`,
+`has_cover`, `year`, `release_day*`, `popularity`, `sort_*` удалены в `books-4`).
 
-**Подсказки** — из словаря термов, без чтения документов: теги и издательства со счётчиками
-считаются раз на состояние индекса. Издательства — по части названия без учёта регистра и `ё`,
-сначала начинающиеся с неё.
+**Слой Б** (`books::sidecar::Sidecar`, всё индексировано номером книги `ord: u32`):
 
-**Кэш:** до 512 ответов поиска в памяти процесса (страницы до 100 карточек), ключ — запрос,
-`limit`, `offset` и отпечаток сегментов индекса; сбрасывается сам при любом коммите. Номер
-поколения читателя для ключа не годится: он растёт на каждой перезагрузке читателя.
+- `SortMeta` — 8 байт на книгу (`manual_rank: u16`, `flags: u16` — обложка / аннотация / автор,
+  `popularity: u32` — работ у самого плодовитого автора): 300 000 книг = 2,4 МБ;
+- фасеты — `RoaringBitmap` на значение: `tag:<slug>`, `person:<slug>`, `role:<role>:<slug>`,
+  `pub:<ключ издательства>`, `lang:<код>`, годы (`BTreeMap<i32, RoaringBitmap>`), обложка, все
+  видимые книги; фильтры запроса — пересечение масок (`any_tags` — объединение, «кроме» — снятие
+  битов; slug → номер через терм `slug` и колонку `ord`);
+- готовые порядки (`Vec<u32>` + обратные позиции): «Рекомендуемые» (сначала ручные места по
+  возрастанию, затем балл `BookDoc::rank`), `new` (по дате), `title`, `popular`, `rating`; узкий
+  фильтр (`|фильтр| × 16 < книг`) сортируется по позициям, широкий — проходом по порядку;
+- подсказки (теги и издательства со счётчиками) — готовые списки;
+- поколение (`generation`) — часть ключа кэша выдачи: подмена слоя Б сбрасывает кэш сама.
+
+Снимок слоя Б пишется на диск (`<BOOKS_INDEX_DIR>/sidecar.bin`, формат `NXSIDE02` — с 2026-11-22 фасеты `form:*`; снимок `NXSIDE01` не читается и пересобирается из БД, атомарно через
+`.tmp` + rename) при каждой подмене и читается при открытии индекса: сервер после рестарта и бенч
+`nexus books load` работают без похода в БД.
+
+**Ручной порядок** (`catalog_manual_ranks`, `SortMeta::manual_rank`): место `1..=65535` в общем
+списке книг, `0` — нет места. Ранг глобальный: внутри фасета книги сохраняют относительный порядок
+(третья книга списка — первая в жанре, если первые две не из него). С текстом (`sort` не задан)
+порядок совпадений: (1) точное название запроса (`title_key`) — по месту, затем по оценке;
+(2) сильные совпадения (оценка × известность ≥ 50 % лучшей, `STRONG_SHARE`) с местом — по месту;
+(3) остальное — по оценке × `1 + ln(1 + работ у автора) / 15`. Слабое совпадение (опечатка, слово
+серии) ручное место не поднимает. С текстом и явной сортировкой — совпадения в готовом порядке
+этой сортировки. Источник списка — файл `Название — Автор` (`nexus books ranks FILE`) или
+`PUT /admin/books/ranks`.
+
+**Сборщик совпадений** `OrdHits` (свой `Collector` Tantivy): читает колонку `ord` и сразу
+отбрасывает книги не из маски фильтра — узкий фасет при широком запросе не теряет совпадений
+(фильтр не после «лучших N»), `total` — точное число совпадений. Номер → адрес документа
+(`TextMap`, 8 байт на книгу) строится заново на каждое состояние индекса (отпечаток сегментов) и
+пересекается с фильтром (`indexed`): книга, которую слой Б знает, а текст ещё не записан, не даёт
+пустой строки выдачи.
+
+**Сортировки:** без `sort` и с текстом — релевантность с ручными местами (выше); без текста,
+`recommended` — ручные места, затем балл (число оценок Nexus, затем обложка / аннотация / автор,
+затем известность автора, затем год); `new` — только вышедшие, по дате; `soon` — только не
+вышедшие; `title` — по первым 9 знакам ключа названия; `popular` — число оценок Nexus; `rating`
+(и `top_rated`) — средняя оценка Nexus. При равных ключах — по номеру книги. `total` точный,
+`offset` до 100 000.
+
+**Подсказки** — из слоя Б: теги и издательства со счётчиками видимых книг. Издательства — по
+части названия без учёта регистра и `ё`, сначала начинающиеся с неё. `BookIndex::facet_counts`
+(счётчики значений фасета среди книг под запрос) — есть в индексе, в HTTP пока не выведен.
+
+**Кэш:** до 512 ответов поиска (страницы до 100 карточек) и 256 рядов выдачи (номера книг) в
+памяти процесса; ключ — запрос, `limit`, `offset` и поколение = отпечаток сегментов индекса ×
+поколение слоя Б; сбрасывается сам при коммите в индекс и при подмене слоя Б.
 
 **Синхронизация** (`books/sync.rs`):
 
+- Номер книги — `catalog_book_ords.ord` (identity с 0): выдаётся при первом чтении книги
+  (`INSERT … WHERE NOT EXISTS` — номера не тратятся на уже известные книги), не меняется.
 - `nexus books index` — полная перестройка из БД: видимые книги пачками по 2000 (keyset по `id`,
-  индекс `entities_book_id_idx`), один коммит — до него поиск читает прежний индекс. Писатель —
-  50 МБ, один поток. Замер (dev, отладочная сборка): ≈50 000 книг в минуту.
-- Сервер при старте: индекс пуст (первый запуск, новая схема) — строит его в фоне
-  (`sync::spawn_initial`); до конца сборки книжная выдача пуста.
+  индекс `entities_book_id_idx`), один коммит — до него поиск читает прежний индекс; тем же
+  проходом собирается и подменяется слой Б, в `catalog_book_ords.text_hash` пишутся отпечатки.
+  Писатель — 50 МБ, один поток. Замер (dev, отладочная сборка): ≈50 000 книг в минуту.
+- `nexus books sidecar` / `POST /admin/books/sidecar` / раз в сутки — только слой Б (тот же
+  проход по БД, без записи в Tantivy) + снимок на диск.
+- Сервер при старте: индекс пуст — строит его в фоне (и слой Б); индекс есть, снимка слоя Б нет —
+  собирает слой Б; до конца сборки книжная выдача пуста. Дальше фоновая задача
+  (`sync::spawn_initial` → `sidecar_loop`): пересборка слоя Б после правок не чаще раза в 30 с
+  (`SIDECAR_MIN_INTERVAL`) и раз в сутки (`SIDECAR_DAILY`); раз в минуту (`RANKS_POLL`) сверяет
+  отпечаток `catalog_manual_ranks` (`count`, `max(updated_at)`) и при изменении применяет только
+  места (`Sidecar::with_ranks`: фасеты и прочие порядки не пересобираются — миллисекунды).
 - Правка книги в админке, `POST /admin/search/entities` и новые оценки Nexus
-  (`search::sync_ratings`) — `sync::update` из `search::update_entities`: книги из затронутых
-  сущностей удаляются из индекса и добавляются заново одним коммитом. Писатель один на каталог:
-  пока идёт перестройка, досылка получает `Busy` (в лог; оценки досылаются следующим проходом,
-  правку админки подберёт следующая перестройка).
+  (`search::sync_ratings`) — `sync::update` из `search::update_entities`: в Tantivy пишутся только
+  книги, у которых изменился отпечаток текста (`BookDoc::text_hash`, FNV-1a по карточке, серии и
+  номеру; хранится в `catalog_book_ords.text_hash`); скрытые и удалённые — удаляются из индекса
+  сразу (отпечаток → `NULL`); новые оценки, теги, места — только в слой Б (фоновая пересборка).
+  Писатель один на каталог: пока идёт перестройка, досылка получает `Busy` (в лог).
 - Читатель следит за коммитами сам (`ReloadPolicy::OnCommitWithDelay`), поэтому перестройку
-  можно запускать отдельным процессом при работающем сервере.
+  можно запускать отдельным процессом при работающем сервере; слой Б другого процесса сервер
+  подхватит своей пересборкой (места — опросом).
 
 `nexus books search QUERY` — запрос к индексу из терминала: всего найдено, время холодного
-запроса и повтора из кэша, первые 10 книг.
+запроса и повтора из кэша, первые 10 книг. `nexus books ranks FILE` — ручной список из файла
+(`books::ranks`, см. «Ручной порядок книг»).
+
+**Издания книг** (2026-11-18): дубль книги — та же `entities` (`kind = 'book'`) с `parent_id` основной
+книги (как сезон у сериала, `GET /entities/{slug}/seasons` отдаёт издания). Издания не попадают в
+книжный поиск, слой Б и сопоставление ручного списка (`e.parent_id IS NULL` в `books::sync` и
+`books::ranks`); при досылке книга, ставшая изданием, удаляется из Tantivy. Расставляет
+`scripts/catalog-import/books_llm.py apply` (основная — с обложкой и бо́льшим файлом).
+
+## Ручной порядок книг ✅ (2026-11-18)
+
+`nexus books ranks FILE` (`books::ranks::import`): файл `Название — Автор1, Автор2` (как
+`knigi_10_000_progress.txt`; заголовок, пустые строки и `Формат:` пропускаются), место = номер
+строки (с 1, до 65 535; файл делится по последнему « — »: тире бывает в названии). Название и
+автор приводятся к одному виду с обеих сторон:
+
+- название — ключ `normalize_key` (как `title_key`); если точного нет — варианты строки: части
+  «А, или Б», без скобок, том после двоеточия / точки («Хроники Нарнии: Принц Каспиан» →
+  «принц каспиан»), затем короткая форма названия в каталоге (до `:`, `. `, `(`, «, или»:
+  «Мастер и Маргарита: роман»). Сначала точное, затем варианты;
+- автор — фамилия (последнее слово каждого автора строки) против любого слова имени автора книги
+  (порядок «Шолохов Михаил» и инициалы не мешают); латиница → кириллица по звучанию («Umberto
+  Eco»), `ё`/`э` → `е`, `й` → `и`; совпадение — общее начало ≥ min(5, длина) («Стругацкие» ~
+  «Стругацкий», «Дойль» ~ «Дойл») или одна правка у слов от 4 букв («Остин» ~ «Остен»).
+
+Название есть, автор другой — места нет (лучше пропуск, чем чужая книга на первом месте).
+Первый прогон по `knigi_10_000_progress.txt` (2026-11-17, 418 155 книг): 5445 строк → 3744 с
+местом, 1258 нет в каталоге, 432 с другим автором (в каталоге только однофамильцы / одноимённые
+книги), 11 повторов. Из нескольких изданий — с обложкой. Список целиком заменяет
+`catalog_manual_ranks` одной транзакцией и применяется к слою Б процесса; сервер подхватит опросом.
+`--unmatched OUT` — все строки без места в файл по разделам (нет в каталоге, другой автор, повтор). Отчёт: строк, получили место, нет в каталоге, другой автор, повтор, дальше 65 535 (+ по 20
+примеров).
 
 Тесты: модульные `books::index` (И между словами, стеммер, точное название, автодополнение, `ё`,
-опечатки, автор и серия, фильтры, сортировки, страницы, обновление, перестройка, подсказки),
-`books::search` (параметры → запрос), `search::tests::blend_alternates_two_others_and_a_book_then_drains`.
+опечатки, автор и серия, фильтры, сортировки, страницы, обновление, перестройка, подсказки, ручные
+места в списках и тексте, фильтр внутри сборщика, скрытие слоем Б, снимок при открытии),
+`books::sidecar` (глобальный ранг и относительный в фасете, места без пересборки фасетов, сильные
+совпадения и точное название, фасеты и счётчики, узкий = широкий порядок, снимок туда-обратно),
+`books::ranks` (разбор списка и тире в названии, фамилии в любом порядке, латиница, вариант транскрипции, короткие и альтернативные названия, место = строка, чужой автор), `books::search` (параметры →
+запрос), `search::tests::blend_alternates_two_others_and_a_book_then_drains`; HTTP
+`app/tests/books_cassandra.rs` (`book_search_is_answered_by_the_books_index`,
+`manual_ranks_order_book_listings_without_reindexing`).
 
 ## Игры из Steam ✅
 
@@ -1919,6 +2055,25 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | POST | `/admin/tmdb/active/stream` | «Пересобрать активные»: `?count=` (80000, 0–1000000, иначе 400) вышедших по баллу + все «Скоро премьера»; потоком; `done.active`. `409` — как выше |
 | POST | `/admin/archive/demote` | Перенести фильмы с сайта в архив: `{"slugs": [...]}` 1–100 → 200 `{"archived": [slug], "skipped": [{"slug", "reason": "not_found" \| "no_tmdb" \| "in_use"}]}`; документы в Tantivy, строки удалены из БД (с людьми без работ), документы с `manual = true` — сборка не вернёт; поиск и статика обновляются. 400 — пусто, >100, повтор, неверный slug; 409 — писатель архива занят (ничего не перенесено); 503 — архив недоступен |
 | POST | `/admin/archive/promote/{slug}` | Вернуть фильм из архива (`enrich::insert_film`): с `TMDB_API_KEY` — со всеми данными TMDB (как возврат открытием страницы), TMDB недоступен или ключа нет — «скелетом» (`title`, `original_title`, `release_date`, `cover_url`); `active`, `active_manual`, `external_ids.tmdb` (в том же `INSERT`), `entity_stats`; затем `delete_term` + `commit` в Tantivy, публикация (Meilisearch, ISR) → 201, карточка. 404 — нет в архиве (и неверный slug); 409 — slug или TMDB id уже в каталоге, писатель архива занят сборкой (в БД ничего не пишется); 503 — архив недоступен |
+| GET | `/admin/books/ranks` | Ручной порядок книг по местам: `limit`/`offset` → `Page<BookRank>` `{slug, title, rank}`, `total` — всего книг с местом |
+| PUT | `/admin/books/ranks` | Заменить ручной порядок целиком: `{"items": [{"slug", "rank"}]}` (до 65 535; `[]` — порядка нет) → 204. Действует сразу (слой Б в RAM, Tantivy не трогается), другие реплики — в течение минуты (опрос). 400 `validation` (`field`: `rank` — вне 1..65535 или повтор, `slug` — повтор, `items` — больше 65 535); 404 — нет книги с таким slug. Событий нет |
+| POST | `/admin/books/sidecar` | Пересобрать слой Б книжного поиска (фасеты, сортировки, места) из БД в фоне → 202; 409 — идёт другая операция над индексом; 503 — книжный поиск выключен (`BOOKS_INDEX_DIR` не задан) |
+| GET | `/admin/books/index` | Состояние книжного индекса (2026-11-22) → `BooksIndexStatus`: `db_books` (видимых книг в БД) / `db_ords`; `text` — слой А: `schema_version`, `docs`, `deleted_docs`, `segments`, `index_bytes`, `store_bytes` (поле `card`, по полям не делится), `deletes_bytes`, `disk_bytes` (все файлы каталога), `sidecar_file_bytes`, `fields[]` — место поля по частям (`termdict`, `postings`, `positions`, `fast`, `fieldnorms`, `total`; по убыванию), `cache_entries` / `cache_ranked`; `sidecar` — слой Б: `generation`, `books`, `slots`, `with_cover`, `manual_ranks`, `forms` (книг по виду), `facets[]` (`kind` = префикс ключа `tag`/`person`/`role`/`pub`/`lang`/`form`/`year`, `values`, `bytes`), оценка памяти `meta_bytes` / `orders_bytes` / `facets_bytes` / `total_bytes`; `last_index_build` / `last_sidecar_build` (`at`, `took_ms`, `books`; в этом процессе, после рестарта `null`); `operation` — текущая/последняя операция админки (`op`, `started_at`, `finished_at`, `ok`, `error`). 503 — поиск выключен |
+| POST | `/admin/books/index/rebuild` | Полная перестройка Tantivy + слоя Б из БД в фоне (`sync::rebuild`) → 202; ход — `operation` в `GET /admin/books/index`; 409 — идёт другая операция; 503 |
+| POST | `/admin/books/index/merge` | Слить сегменты Tantivy в один + `garbage_collect_files` в фоне (`BookIndex::merge`): уходят `deleted_docs`, поиск по одному сегменту; данные не меняются → 202; 409; 503 |
+| POST | `/admin/books/index/cache` | Сбросить кэш выдачи книг и прогреть списки раздела (`BookIndex::clear_cache`) сразу → 204; 503 |
+| GET | `/admin/ai/providers` | Провайдеры ИИ (без ключей: `keys_hint`, `keys_count`), по умолчанию — первым |
+| POST | `/admin/ai/providers` | Завести `{slug, kind, base_url?, model, api_keys[], workers?, per_request?, effort? (low), is_default?}` → 201; 400 — нет kind/model/ключей, лимиты вне диапазона; 409 — slug занят; 503 — нет `AI_SECRET_KEY` |
+| PATCH | `/admin/ai/providers/{slug}` | Поменять переданные поля (`api_keys` заменяют все, `base_url: ""` — по умолчанию) → 200; 404 |
+| DELETE | `/admin/ai/providers/{slug}` | → 204; 404 |
+| POST | `/admin/ai/providers/{slug}/test` | Пробный запрос «ответь OK» на каждый ключ → `{ok, errors[], reply}`; 404; 503 — нет/не тот `AI_SECRET_KEY` |
+| GET | `/admin/scripts` | Реестр скриптов админки (`catalog::scripts::SCRIPTS`): id, группа, название, описание по шагам, команда для терминала, флаги (`name`, `type` bool/int{min,max}/choice{options}/ai_provider/text{pattern}, `default`, `description`), `after`, `has_report` |
+| POST | `/admin/scripts/{id}/run` | `{flags: {имя: значение}}` → 202 `JobInfo`; команда — только из реестра, флаги проверяются (400 c `field` = флаг; неизвестный флаг — 400); 404 — нет скрипта; 409 — уже идёт задача (одна на процесс); 503 — нет `SCRIPTS_PYTHON` |
+| GET | `/admin/scripts/{id}/report` | Отчёт скрипта `text/plain` (чистка книг — `cache/books_llm/apply_report.txt`, хвост ≤ 512 КБ); 404 — нет отчёта |
+| GET | `/admin/scripts/{id}/progress` | Прогресс скрипта (`progress.json`, пишет сам скрипт в начале и конце запуска): у чистки книг `{total, classified, written, remaining, pending_write, exported_not_classified, last_batch, batches_written, updated_at}`; 404 — ещё не считался |
+| GET | `/admin/scripts/jobs` | Последние 20 задач процесса, новые первыми (в памяти: после рестарта пусто) |
+| GET | `/admin/scripts/jobs/{job}?after=N` | Задача + строки лога с номера N (`from`, `lines`, `lines_total`; хранятся последние 5000) — опрос, пока `status=running`; статусы `running/succeeded/failed/stopped` (код 3 — сухой прогон без записи)/`cancelled`; 404 |
+| POST | `/admin/scripts/jobs/{job}/cancel` | Остановить (kill процесса) → 202; 404 — нет идущей задачи |
 | GET | `/admin/ranking` | Настройки балла и окна «Скоро премьера» |
 | POST | `/admin/ranking/preview` | Топ по формуле с настройками из тела (`?limit=` 1–200, 50), без записи → `[RankPreviewRow]`; неверные настройки — 400 |
 | PUT | `/admin/ranking/stream` | Сохранить настройки и применить потоком: `rank`, перестройка поиска. 400 / 409 |
@@ -2270,8 +2425,15 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `books/dump.rs` | Потоковый разбор дампа MySQL: `Statements`, `create_table`, `insert` |
 | `books/cassandra.rs` | `nexus books cassandra`: строки `metadata/*.jsonl` → `Book`, slug'и, люди (авторы, переводчики), жанры-теги, копия обложек и размеры AVIF, запись пачками |
 | `books/genres.rs` | Жанры FB2: код → русское название (`GENRES`), `name`, `names` |
-| `books/index.rs` | Книжный индекс Tantivy: схема, анализаторы `ru_stem` / `ru_raw` (`YoFilter`), `BookDoc`, `BookQuery`, строгий и резервный запросы, автодополнение, фильтры, сортировки, кэш, подсказки (`tags`, `publishers`), `update`, `Rebuild` |
-| `books/sync.rs` | Книжный индекс ← PostgreSQL: `rebuild`, `update`, `spawn_initial`, `open`, `enabled` |
+| `books/index.rs` | Книжный поиск, слой А (Tantivy): схема `books-4` (текст, `card`, `ord`), анализаторы `ru_stem` / `ru_raw` (`YoFilter`), `BookDoc` (`text_hash`), `BookQuery`, строгий и резервный запросы, автодополнение, сборщик `OrdHits` (номер + оценка, фильтр слоя Б внутри), `TextMap` (номер → адрес), `find` (без текста — только слой Б), кэш (поколение индекса × слоя Б), `set_sidecar` / `set_ranks`, `facet_counts`, подсказки, `update`, `Rebuild` |
+| `books/sidecar.rs` | Книжный поиск, слой Б (RAM): `SortMeta` (8 байт), `Facets` (RoaringBitmap), готовые порядки, `Sidecar` (`filter`, `page`, `rank_hits` — ручные места и сильные совпадения, `with_ranks`, `facet_counts`), `SidecarBuilder`, снимок `sidecar.bin` (`save` / `load`) |
+| `books/ranks.rs` | Ручной порядок книг: `parse_list`, `author_matches`, `match_list`, `replace_all`, `import` (`nexus books ranks FILE`) |
+| `books/sync.rs` | Книжный поиск ← PostgreSQL: номера `catalog_book_ords`, `rebuild` (индекс + слой Б), `reload_sidecar`, `apply_ranks`, `update` (только изменившийся текст), `spawn_initial` + `sidecar_loop` (раз в сутки, после правок, опрос мест), `open`, `enabled` |
+| `admin/books.rs` | `GET` / `PUT /admin/books/ranks`, `POST /admin/books/sidecar`; состояние и управление индексом: `GET /admin/books/index`, `POST /admin/books/index/{rebuild,merge,cache}`; операция одна за раз на каталог индекса (`OPERATIONS`, в памяти процесса) |
+| `ai.rs` | провайдеры ИИ (`catalog_ai_providers`): list/create/update/delete, `test` (Anthropic Messages / OpenAI Chat Completions через reqwest), ключи шифрует pgcrypto; CLI `nexus ai list\|add\|set\|test\|rm` (`app/src/ai_cli.rs`), `make ai`, `make books-llm` (`books_llm.py run`) |
+| `admin/ai.rs` | `/admin/ai/providers` (CRUD + `/test`) |
+| `scripts.rs` | скрипты админки: реестр `SCRIPTS` — один скрипт `books-llm` (весь цикл чистки книг; флаги `limit`, `order` (`top` — ручной список и крупные файлы, `newest` — последние добавленные, `collections` — перепроверка ИИ сборников, помеченных по названию; размеченные пропускаются (кроме `collections`) — повторов нет; сборник решает только ИИ, пометка по названию, с которой ИИ не согласен, снимается), `yes`, `reindex` (флаг сервера, скрипту не передаётся: перестройка поиска после записи только с ним; один `reindex` — только перестройка, без скрипта; `make books-llm REINDEX=1`), `ai` — тип `ai_provider`, выбор провайдера; `has_progress`), `build_args` (только флаги реестра, regex/диапазоны), `start` (tokio::process без shell, env `DATABASE_URL`/`AI_SECRET_KEY`, stdin пуст, лог stdout+stderr), задачи в памяти (`KEEP_JOBS`=20, `KEEP_LINES`=5000), отмена, `After::BooksReindex` (rebuild + ranks в процессе) |
+| `admin/scripts.rs` | `/admin/scripts` (реестр, run, report, jobs, job, cancel) |
 | `books/search.rs` | Книжный поиск в API: `routed`, `in_meili`, `query_of`, `search`, `count`, `neighbors`, `similar`, `tags`, `publishers` |
 | `ranking.rs` | Балл «Рекомендуемые»: формула, настройки, предпросмотр, пересчёт |
 | `publish.rs` | Публикация правки: `Touched` (+`collect_awards` — страницы премий и церемоний), поиск, ISR, поток `.../stream` |

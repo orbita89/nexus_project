@@ -4,6 +4,7 @@
 //! Чтение — без авторизации, запись — `/admin/...`, только роль admin.
 
 pub mod admin;
+pub mod ai;
 pub mod archive;
 pub mod awards;
 pub mod banners;
@@ -19,6 +20,7 @@ pub mod people;
 pub mod people_search;
 pub mod publish;
 pub mod ranking;
+pub mod scripts;
 pub mod search;
 pub mod seasons;
 pub mod studios;
@@ -103,4 +105,20 @@ pub fn router() -> OpenApiRouter<AppState> {
             admin::awards::create_nomination
         ))
         .routes(routes!(admin::awards::delete_nomination))
+        .routes(routes!(admin::books::list, admin::books::put))
+        .routes(routes!(admin::books::reload_sidecar))
+        .routes(routes!(admin::books::index_status))
+        .routes(routes!(admin::books::rebuild_index))
+        .routes(routes!(admin::books::merge_index))
+        .routes(routes!(admin::books::clear_cache))
+        .routes(routes!(admin::ai::list, admin::ai::create))
+        .routes(routes!(admin::ai::update, admin::ai::delete))
+        .routes(routes!(admin::ai::test))
+        .routes(routes!(admin::scripts::list))
+        .routes(routes!(admin::scripts::run))
+        .routes(routes!(admin::scripts::report))
+        .routes(routes!(admin::scripts::progress))
+        .routes(routes!(admin::scripts::jobs))
+        .routes(routes!(admin::scripts::job))
+        .routes(routes!(admin::scripts::cancel))
 }

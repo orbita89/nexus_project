@@ -51,7 +51,13 @@ struct Fields {
     popularity: Field,
     cover_url: Field,
     manual: Field,
+    ext_id: Field,
+    payload: Field,
 }
+
+/// Внешний id (`cassandra:123`): по нему импорт пропускает работы архива. Добавлено 2026-11-18
+/// вместе с `payload` — для книг (индекс `books-archive`); у индекса фильмов их нет.
+const EXT_ID: &str = "ext_id";
 
 /// Поле ручного переноса в архив: его нет в индексах, собранных до 2026-10-19.
 const MANUAL: &str = "manual";
@@ -75,6 +81,10 @@ fn schema() -> (Schema, Fields) {
         // 1 — админ перенёс фильм в архив (`POST /admin/archive/demote`): сборка горячего слоя
         // его не вернёт, возврат открытием страницы запрещён.
         manual: builder.add_u64_field(MANUAL, INDEXED | STORED),
+        // Внешний id без TMDB (`cassandra:123`): терм — импорт сверяется с архивом.
+        ext_id: builder.add_text_field(EXT_ID, STRING | STORED),
+        // Полный снимок работы (JSON): возврат из архива без потерь — книги в TMDB нет.
+        payload: builder.add_text_field("payload", STORED),
     };
     (builder.build(), fields)
 }
@@ -104,6 +114,12 @@ pub struct ArchiveDoc {
     /// Перенесён в архив вручную (`POST /admin/archive/demote`).
     #[serde(skip)]
     pub manual: bool,
+    /// Внешний id без TMDB (`cassandra:123`).
+    #[serde(skip)]
+    pub ext_id: Option<String>,
+    /// Полный снимок работы в JSON (книги: строка `entities`, участники, теги).
+    #[serde(skip)]
+    pub payload: Option<String>,
 }
 
 /// Ошибка индекса. `Busy` — писатель занят (идёт сборка или другой промоушен).
@@ -143,6 +159,8 @@ pub struct Archive {
     covers: bool,
     /// Схема знает `manual` (иначе флаг ручного переноса не сохраняется).
     manuals: bool,
+    /// Схема знает `ext_id` и `payload` (индекс книг; у старого индекса фильмов их нет).
+    exts: bool,
 }
 
 /// Открытые индексы по каталогу (в тестах у каждого свой).
@@ -180,6 +198,7 @@ impl Archive {
             dir: dir.to_path_buf(),
             covers: index.schema().get_field(COVER_URL).is_ok(),
             manuals: index.schema().get_field(MANUAL).is_ok(),
+            exts: index.schema().get_field(EXT_ID).is_ok(),
             index,
             reader,
             fields,
@@ -350,6 +369,29 @@ impl Archive {
         Ok(count)
     }
 
+    /// Внешние id документов архива с префиксом (`cassandra:`) без префикса — по словарю термов,
+    /// документы не читаются. У индекса без поля `ext_id` — пусто.
+    pub fn ext_ids(&self, prefix: &str) -> Result<HashSet<String>, ArchiveError> {
+        let mut out = HashSet::new();
+        if !self.exts {
+            return Ok(out);
+        }
+        let searcher = self.reader.searcher();
+        for segment in searcher.segment_readers() {
+            let inverted = segment.inverted_index(self.fields.ext_id)?;
+            let mut stream = inverted.terms().stream().map_err(TantivyError::from)?;
+            while stream.advance() {
+                if let Some(id) = std::str::from_utf8(stream.key())
+                    .ok()
+                    .and_then(|key| key.strip_prefix(prefix))
+                {
+                    out.insert(id.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Писатель с бюджетом [`WRITER_BUDGET`]. Занят — [`ArchiveError::Busy`].
     pub fn writer(&self) -> Result<IndexWriter, ArchiveError> {
         Ok(self.index.writer(WRITER_BUDGET)?)
@@ -378,6 +420,14 @@ impl Archive {
         }
         if self.manuals && doc.manual {
             document.add_u64(fields.manual, 1);
+        }
+        if self.exts {
+            if let Some(ext_id) = &doc.ext_id {
+                document.add_text(fields.ext_id, ext_id);
+            }
+            if let Some(payload) = &doc.payload {
+                document.add_text(fields.payload, payload);
+            }
         }
         writer.add_document(document)?;
         Ok(())
@@ -427,6 +477,12 @@ impl Archive {
                 .get_first(fields.manual)
                 .and_then(|v| v.as_u64())
                 .is_some_and(|v| v == 1),
+            ext_id: if self.exts { text(fields.ext_id) } else { None },
+            payload: if self.exts {
+                text(fields.payload)
+            } else {
+                None
+            },
         }
     }
 }
@@ -460,6 +516,8 @@ mod tests {
             popularity: 1.0,
             cover_url: cover_url.map(str::to_owned),
             manual: false,
+            ext_id: None,
+            payload: None,
         }
     }
 

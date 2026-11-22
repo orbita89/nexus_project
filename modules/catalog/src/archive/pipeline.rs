@@ -90,6 +90,8 @@ impl Row {
             popularity: self.popularity,
             cover_url: self.cover_url.clone(),
             manual: self.tmdb_id.is_some_and(|id| manual.contains(&id)),
+            ext_id: None,
+            payload: None,
         }
     }
 }

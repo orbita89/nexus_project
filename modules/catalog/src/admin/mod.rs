@@ -2,13 +2,16 @@
 //! После каждой записи затронутые сущности и люди переотправляются в поисковые индексы,
 //! страницы пересобираются на фронтенде (`publish::run`).
 
+pub mod ai;
 pub mod awards;
 pub mod banners;
+pub mod books;
 pub mod entities;
 pub mod episodes;
 pub mod fragments;
 pub mod people;
 pub mod relations;
+pub mod scripts;
 pub mod tags;
 
 use uuid::Uuid;

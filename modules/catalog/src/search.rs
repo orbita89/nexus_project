@@ -1588,6 +1588,13 @@ fn filters_of(
             any
         });
     }
+    if let Some(form) = &query.book_form {
+        if crate::books::search::parse_forms(form).is_none() {
+            return Err(AppError::BadRequest(
+                "book_form: book, collection, article, document or all".into(),
+            ));
+        }
+    }
     if let Some(tag) = &query.tag {
         // Проверенный slug безопасно подставлять в строку фильтра.
         validate::slug("tag", tag)?;
@@ -2291,12 +2298,15 @@ mod tests {
             json!({ "role": "director" }),
             json!({ "person": "Bad Slug" }),
             json!({ "person": "christopher-nolan", "role": "Director" }),
+            json!({ "book_form": "book,magazine" }),
         ] {
             let error = filters_of(&query(bad.clone()), &[], &[]).unwrap_err();
             assert_eq!(error.code(), "validation", "{bad}");
         }
         // Фильтр по людям собирает `person_filter` (по БД), здесь — только проверка.
         assert!(ok(json!({ "person": "christopher-nolan", "role": "director" })).is_empty());
+        // Вид текста — фильтр книжного индекса, в Meilisearch не уходит.
+        assert!(ok(json!({ "book_form": "collection,all" })).is_empty());
     }
 
     #[test]

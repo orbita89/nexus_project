@@ -4,11 +4,15 @@
 //! (`nexus books index`), а правки в админке и новые оценки досылает [`super::sync::update`].
 //! Включается каталогом `BOOKS_INDEX_DIR`; не задан — книги ищутся в Meilisearch, как раньше.
 //!
-//! **Что в индексе.** По тексту ищутся название, авторы и серия. Остальное — только фильтры
-//! (жанры и теги, люди по ролям, издательство, год, язык, наличие обложки) и ключи сортировок.
-//! Хранится (`STORED`) одно поле — `card`: готовая строка выдачи (`EntitySummary` в JSON), так
-//! что список книг отдаётся без похода в БД. Аннотации в индексе нет: карточка книги читается
-//! из PostgreSQL и раздаётся фронтендом как статическая страница.
+//! **Два слоя.** Tantivy (слой А) держит только то, что меняется редко: текст для поиска
+//! (название, авторы, серия), номер книги `ord` и хранимое (`STORED`) поле `card` — готовую
+//! строку выдачи (`EntitySummary` в JSON), так что список книг отдаётся без похода в БД.
+//! Фильтры (жанры и теги, люди по ролям, издательство, год, язык, обложка), сортировки и ручной
+//! порядок — в слое Б ([`super::sidecar`]): он в RAM, обновляется ежедневно и подменяется
+//! атомарно, не трогая индекс. Запрос без текста Tantivy вообще не вызывает; с текстом Tantivy
+//! отдаёт номера и оценки совпадений (сборщик [`OrdHits`] сразу отсеивает книги не из фильтра),
+//! а порядок строит слой Б. Аннотации в индексе нет: карточка книги читается из PostgreSQL и
+//! раздаётся фронтендом как статическая страница.
 //!
 //! **Как ищет** (логика перенесена из настольной библиотеки Cassandra):
 //! - слова запроса объединяются через И, поля одного слова — через ИЛИ;
@@ -26,29 +30,31 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwap;
 use chrono::{Datelike, NaiveDate};
+use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
-use tantivy::collector::{Count, TopDocs};
+use tantivy::collector::{Collector, SegmentCollector, TopDocs};
+use tantivy::columnar::ColumnValues;
 use tantivy::directory::error::LockError;
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{
-    AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, FuzzyTermQuery, Occur, PhraseQuery, Query,
-    RangeQuery, TermQuery,
+    BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, TermQuery,
 };
 use tantivy::schema::{
-    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, INDEXED, STORED,
-    STRING,
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED, STRING,
 };
 use tantivy::tokenizer::{
     Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, TextAnalyzer, Token,
     TokenFilter, TokenStream, Tokenizer,
 };
 use tantivy::{
-    DocAddress, DocId, Index, IndexReader, IndexSettings, IndexWriter, Order, ReloadPolicy, Score,
-    Searcher, SegmentReader, TantivyDocument, TantivyError, Term,
+    DocAddress, DocId, Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy, Score,
+    Searcher, SegmentOrdinal, SegmentReader, TantivyDocument, TantivyError, Term,
 };
 use uuid::Uuid;
 
+use super::sidecar::Sidecar;
 use crate::models::{EntityKind, EntitySummary, ReleaseStatus, SummaryAuthor};
 
 /// Память писателя: 50 МБ, один поток. На сервере с малой RAM перестройка индекса из сотен
@@ -149,12 +155,8 @@ const CACHE_ENTRIES: usize = 512;
 /// Страницы длиннее не кэшируются (служебные обходы — соседи, похожие — и так редки).
 const CACHE_MAX_ITEMS: usize = 100;
 
-/// Поле известности автора (fast field): им взвешивается релевантность.
-const POPULARITY: &str = "popularity";
-/// Делитель логарифма известности в множителе релевантности: автор с 500 работами получает
-/// ×1,4, с пятью — ×1,1. Точное название (вес 12) таким множителем не перебить, а из десятка
-/// книг с одинаковым названием первой встаёт книга известного автора.
-const POPULARITY_DAMPING: f32 = 15.0;
+/// Колонка номера книги (`ord`): индекс в массивах слоя Б.
+const ORD: &str = "ord";
 
 const RU_STEM: &str = "ru_stem";
 const RU_RAW: &str = "ru_raw";
@@ -190,6 +192,10 @@ impl From<TantivyError> for IndexError {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BookDoc {
     pub id: Uuid,
+    /// Плотный номер книги (`catalog_book_ords.ord`): ключ слоя Б.
+    pub ord: u32,
+    /// Ручное место в общем списке книг (`catalog_manual_ranks`), `0` — нет.
+    pub manual_rank: u16,
     pub slug: String,
     pub title: String,
     pub original_title: Option<String>,
@@ -213,6 +219,38 @@ pub struct BookDoc {
     /// Оценки Nexus: число и средняя.
     pub ratings_count: i64,
     pub rating_avg: Option<f64>,
+    /// Что это за текст: книга, сборник, статья, документ (`metadata.kind` / `.collection`).
+    pub form: BookForm,
+}
+
+/// Вид текста. Обычная выдача — только книги; остальное — по фильтру `book_form`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BookForm {
+    #[default]
+    Book,
+    /// Несколько разных произведений в одном файле (`metadata.collection`).
+    Collection,
+    /// Статья, рецензия, интервью (`metadata.kind = article`).
+    Article,
+    /// Журнал, газета, документ (`metadata.kind = document`).
+    Document,
+}
+
+impl BookForm {
+    pub const ALL: [BookForm; 4] = [Self::Book, Self::Collection, Self::Article, Self::Document];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Book => "book",
+            Self::Collection => "collection",
+            Self::Article => "article",
+            Self::Document => "document",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.as_str() == value)
+    }
 }
 
 /// Сортировка выдачи.
@@ -255,6 +293,52 @@ pub struct BookQuery {
     pub has_cover: Option<bool>,
     /// Код языка книги (`ru`).
     pub language: Option<String>,
+    /// Виды текста (ИЛИ). Пусто — только [`BookForm::Book`]: сборники, статьи и документы в
+    /// обычную выдачу не попадают.
+    pub forms: Vec<BookForm>,
+}
+
+/// Место одного поля индекса на диске (сумма по сегментам), байты.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FieldBytes {
+    /// Словарь термов.
+    pub termdict: u64,
+    /// Списки документов по термам.
+    pub postings: u64,
+    /// Позиции слов (для фраз).
+    pub positions: u64,
+    /// FAST-колонки.
+    pub fast: u64,
+    /// Нормы длины поля (для оценки совпадения).
+    pub fieldnorms: u64,
+}
+
+impl FieldBytes {
+    pub fn total(&self) -> u64 {
+        self.termdict + self.postings + self.positions + self.fast + self.fieldnorms
+    }
+}
+
+/// Состояние слоя А ([`BookIndex::stats`]).
+#[derive(Debug, Clone)]
+pub struct IndexStats {
+    pub schema_version: &'static str,
+    pub docs: u64,
+    /// Удалённые, но ещё лежащие в сегментах документы (уйдут при слиянии).
+    pub deleted_docs: u64,
+    pub segments: usize,
+    /// Всё, что занимает индекс по данным Tantivy.
+    pub index_bytes: u64,
+    /// Хранилище документов (поле `card`, сжато целиком — по полям не делится).
+    pub store_bytes: u64,
+    pub deletes_bytes: u64,
+    /// Все файлы каталога (с неубранными старыми сегментами и снимком слоя Б).
+    pub disk_bytes: u64,
+    pub sidecar_file_bytes: u64,
+    /// Поле → место.
+    pub fields: Vec<(String, FieldBytes)>,
+    pub cache_entries: usize,
+    pub cache_ranked: usize,
 }
 
 /// Страница выдачи.
@@ -322,24 +406,12 @@ struct Fields {
     author_raw: Field,
     author_key: Field,
     series: Field,
-    tags: Field,
-    credits: Field,
-    publisher: Field,
-    publisher_key: Field,
-    language: Field,
-    has_cover: Field,
-    year: Field,
-    release_day: Field,
-    release_day_term: Field,
-    popularity: Field,
-    sort_rank: Field,
-    sort_rating: Field,
-    sort_popular: Field,
-    sort_title: Field,
+    ord: Field,
 }
 
-/// Схема индекса. Меняется схема — индекс на диске пересоздаётся пустым ([`BookIndex::open`]) и
-/// строится заново из БД.
+/// Схема индекса: только текст, карточка и номер книги — то, что меняется редко. Фильтры и
+/// сортировки — в слое Б ([`super::sidecar`]). Меняется схема — индекс на диске пересоздаётся
+/// пустым ([`BookIndex::open`]) и строится заново из БД.
 fn schema() -> (Schema, Fields) {
     let text = |tokenizer: &str, record: IndexRecordOption| {
         TextOptions::default().set_indexing_options(
@@ -369,27 +441,8 @@ fn schema() -> (Schema, Fields) {
         author_raw: b.add_text_field("author_raw", text(RU_RAW, IndexRecordOption::Basic)),
         author_key: b.add_text_field("author_key", STRING),
         series: b.add_text_field("series", text(RU_STEM, IndexRecordOption::WithFreqs)),
-        tags: b.add_text_field("tags", STRING),
-        // Участники: `<slug>` (любая роль) и `<role>:<slug>`.
-        credits: b.add_text_field("credits", STRING),
-        // Издательство как написано — значения подсказок; ключ — фильтр без учёта регистра.
-        publisher: b.add_text_field("publisher", STRING),
-        publisher_key: b.add_text_field("publisher_key", STRING),
-        language: b.add_text_field("language", STRING),
-        has_cover: b.add_u64_field("has_cover", INDEXED),
-        // Год — только терм: диапазон лет собирается из сотни-другой списков словаря. С колонкой
-        // (FAST) Tantivy проверял бы диапазон обходом значения у каждой книги — на порядок дольше.
-        year: b.add_i64_field("year", INDEXED),
-        // Дата выхода в днях от начала эры, двумя полями: колонка — сортировка по новизне,
-        // терм — фильтр «вышла / не вышла» (диапазон по словарю, как у года).
-        release_day: b.add_u64_field("release_day", FAST),
-        release_day_term: b.add_u64_field("release_day_term", INDEXED),
-        // Известность автора ([`BookDoc::author_works`]): множитель релевантности.
-        popularity: b.add_u64_field(POPULARITY, FAST),
-        sort_rank: b.add_u64_field("sort_rank", FAST),
-        sort_rating: b.add_u64_field("sort_rating", FAST),
-        sort_popular: b.add_u64_field("sort_popular", FAST),
-        sort_title: b.add_u64_field("sort_title", FAST),
+        // Номер книги — колонка: сборщик совпадений ([`OrdHits`]) читает его без документа.
+        ord: b.add_u64_field(ORD, FAST),
     };
     (b.build(), fields)
 }
@@ -482,7 +535,7 @@ pub fn normalize_key(text: &str) -> String {
 
 /// Ключ сортировки по названию: первые 9 знаков ключа названия, по 7 бит — порядок «пробел,
 /// цифры, латиница, кириллица». Книги с общим началом длиннее 9 знаков идут в порядке индекса.
-fn title_sort_key(title: &str) -> u64 {
+pub(crate) fn title_sort_key(title: &str) -> u64 {
     let mut key = 0u64;
     let mut chars = normalize_key(title).chars().collect::<Vec<_>>().into_iter();
     for _ in 0..9 {
@@ -499,7 +552,7 @@ fn title_sort_key(title: &str) -> u64 {
     key
 }
 
-fn day_of(date: NaiveDate) -> u64 {
+pub(crate) fn day_of(date: NaiveDate) -> u64 {
     date.num_days_from_ce().max(0) as u64
 }
 
@@ -507,7 +560,7 @@ impl BookDoc {
     /// Балл «Рекомендуемые»: книги с оценками выше, затем с обложкой, аннотацией и автором;
     /// затем известнее автор; при равенстве — новее. Своей статистики (как IMDb у фильмов) у
     /// книг нет.
-    fn rank(&self) -> u64 {
+    pub(crate) fn rank(&self) -> u64 {
         let rated = self.ratings_count.clamp(0, 1_000_000) as u64;
         let quality = u64::from(self.cover_url.is_some()) * 4
             + u64::from(self.has_description) * 2
@@ -519,11 +572,8 @@ impl BookDoc {
         (rated << 40) | (quality << 32) | (known << 16) | year
     }
 
-    fn document(&self, f: &Fields) -> TantivyDocument {
-        let mut doc = TantivyDocument::default();
-        doc.add_text(f.id, self.id.to_string());
-        doc.add_text(f.slug, &self.slug);
-        let card = Card {
+    fn card(&self) -> Card {
+        Card {
             id: self.id,
             slug: self.slug.clone(),
             title: self.title.clone(),
@@ -533,8 +583,32 @@ impl BookDoc {
             cover_width: self.cover_width,
             cover_height: self.cover_height,
             authors: self.authors.clone(),
-        };
-        doc.add_text(f.card, serde_json::to_string(&card).unwrap_or_default());
+        }
+    }
+
+    /// Отпечаток того, что книга кладёт в Tantivy (карточка, серия, номер). Совпал с прошлым
+    /// (`catalog_book_ords.text_hash`) — переписывать документ незачем: новые оценки, теги и
+    /// ручные места идут только в слой Б. FNV-1a: стабилен между версиями Rust (хранится в БД).
+    pub fn text_hash(&self) -> i64 {
+        let text =
+            serde_json::to_string(&(self.card(), &self.series, self.ord)).unwrap_or_default();
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in text.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash as i64
+    }
+
+    fn document(&self, f: &Fields) -> TantivyDocument {
+        let mut doc = TantivyDocument::default();
+        doc.add_text(f.id, self.id.to_string());
+        doc.add_text(f.slug, &self.slug);
+        doc.add_text(
+            f.card,
+            serde_json::to_string(&self.card()).unwrap_or_default(),
+        );
+        doc.add_u64(f.ord, u64::from(self.ord));
 
         for title in std::iter::once(&self.title).chain(&self.original_title) {
             doc.add_text(f.title, title);
@@ -555,41 +629,118 @@ impl BookDoc {
         if let Some(series) = &self.series {
             doc.add_text(f.series, series);
         }
-        for tag in &self.tags {
-            doc.add_text(f.tags, tag);
-        }
-        for (role, person) in &self.credits {
-            doc.add_text(f.credits, person);
-            doc.add_text(f.credits, format!("{role}:{person}"));
-        }
-        if let Some(publisher) = self.publisher.as_deref().map(str::trim) {
-            let key = normalize_key(publisher);
-            if !key.is_empty() {
-                doc.add_text(f.publisher, publisher);
-                doc.add_text(f.publisher_key, key);
+        doc
+    }
+}
+
+/// Сборщик совпадений: пары (номер книги, оценка) только для книг из `filter` (фасеты слоя Б
+/// проверяются здесь же, а не после «лучших N»: узкий фильтр не теряет совпадений). Без
+/// чтения документов — номер берётся из колонки `ord`.
+pub struct OrdHits {
+    filter: Arc<RoaringBitmap>,
+}
+
+pub struct OrdHitsSegment {
+    ords: Arc<dyn ColumnValues<u64>>,
+    filter: Arc<RoaringBitmap>,
+    hits: Vec<(u32, Score)>,
+}
+
+impl Collector for OrdHits {
+    type Fruit = Vec<(u32, Score)>;
+    type Child = OrdHitsSegment;
+
+    fn for_segment(
+        &self,
+        _segment: SegmentOrdinal,
+        reader: &SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        Ok(OrdHitsSegment {
+            ords: reader
+                .fast_fields()
+                .u64(ORD)?
+                .first_or_default_col(u64::MAX),
+            filter: self.filter.clone(),
+            hits: Vec::new(),
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        true
+    }
+
+    fn merge_fruits(&self, fruits: Vec<Vec<(u32, Score)>>) -> tantivy::Result<Self::Fruit> {
+        Ok(fruits.into_iter().flatten().collect())
+    }
+}
+
+impl SegmentCollector for OrdHitsSegment {
+    type Fruit = Vec<(u32, Score)>;
+
+    fn collect(&mut self, doc: DocId, score: Score) {
+        let ord = self.ords.get_val(doc);
+        if let Ok(ord) = u32::try_from(ord) {
+            if self.filter.contains(ord) {
+                self.hits.push((ord, score));
             }
         }
-        if let Some(language) = &self.language {
-            doc.add_text(f.language, language.to_lowercase());
+    }
+
+    fn harvest(self) -> Self::Fruit {
+        self.hits
+    }
+}
+
+/// Строгий запрос по тексту и резервный — с одной опечаткой.
+type TextQueries = (Box<dyn Query>, Option<Box<dyn Query>>);
+
+/// Где в Tantivy лежит каждая книга: номер → адрес документа. Адреса меняются при слиянии
+/// сегментов, поэтому карта строится заново на каждое состояние индекса ([`fingerprint`]).
+struct TextMap {
+    fingerprint: u64,
+    addresses: Vec<DocAddress>,
+    /// Книги, которые есть в индексе: пересекается с фильтром, чтобы книга, которую слой Б
+    /// уже знает, а текст ещё не дописан, не дала пустую строку выдачи.
+    indexed: RoaringBitmap,
+}
+
+const NO_ADDRESS: DocAddress = DocAddress {
+    segment_ord: u32::MAX,
+    doc_id: 0,
+};
+
+impl TextMap {
+    fn build(searcher: &Searcher, fingerprint: u64) -> Result<Self, IndexError> {
+        let mut addresses = Vec::new();
+        let mut indexed = RoaringBitmap::new();
+        for (segment_ord, segment) in searcher.segment_readers().iter().enumerate() {
+            let ords = segment
+                .fast_fields()
+                .u64(ORD)?
+                .first_or_default_col(u64::MAX);
+            for doc in segment.doc_ids_alive() {
+                let Ok(ord) = u32::try_from(ords.get_val(doc)) else {
+                    continue;
+                };
+                if addresses.len() <= ord as usize {
+                    addresses.resize(ord as usize + 1, NO_ADDRESS);
+                }
+                addresses[ord as usize] = DocAddress::new(segment_ord as u32, doc);
+                indexed.insert(ord);
+            }
         }
-        doc.add_u64(f.has_cover, u64::from(self.cover_url.is_some()));
-        if let Some(date) = self.release_date {
-            doc.add_i64(f.year, i64::from(date.year()));
-        }
-        // Сортировочные поля есть у каждого документа: без значения книга выпала бы из порядка.
-        doc.add_u64(f.release_day, self.release_date.map_or(0, day_of));
-        doc.add_u64(f.release_day_term, self.release_date.map_or(0, day_of));
-        doc.add_u64(f.popularity, u64::from(self.author_works));
-        doc.add_u64(f.sort_rank, self.rank());
-        let count = self.ratings_count.clamp(0, (1 << 24) - 1) as u64;
-        let average = (self.rating_avg.unwrap_or(0.0).clamp(0.0, 100.0) * 1000.0) as u64;
-        doc.add_u64(f.sort_rating, (average << 24) | count);
-        doc.add_u64(
-            f.sort_popular,
-            (count << 24) | (self.release_date.map_or(0, day_of) & 0xFF_FFFF),
-        );
-        doc.add_u64(f.sort_title, title_sort_key(&self.title));
-        doc
+        Ok(Self {
+            fingerprint,
+            addresses,
+            indexed,
+        })
+    }
+
+    fn address(&self, ord: u32) -> Option<DocAddress> {
+        self.addresses
+            .get(ord as usize)
+            .copied()
+            .filter(|address| address.segment_ord != u32::MAX)
     }
 }
 
@@ -628,7 +779,7 @@ fn fingerprint(searcher: &Searcher) -> u64 {
 /// срезы этого ряда: полная сортировка раздела в сотни тысяч книг делается один раз на список,
 /// а не на каждую страницу.
 struct Ranked {
-    addresses: Vec<DocAddress>,
+    ords: Vec<u32>,
     total: usize,
     approximate: bool,
 }
@@ -636,14 +787,14 @@ struct Ranked {
 impl Ranked {
     /// В ряду есть вся страница (или выдача кончилась раньше).
     fn covers(&self, limit: usize, offset: usize) -> bool {
-        self.addresses.len() >= (offset + limit).min(self.total)
+        self.ords.len() >= (offset + limit).min(self.total)
     }
 }
 
 /// Сколько первых книг списка держать в ряду: 1000 — это 40 страниц по 24. Глубже — ряд
 /// пересчитывается с удвоенной длиной.
 const RANKED_LEN: usize = 1000;
-/// Сколько рядов держать: адрес — 8 байт, так что это единицы мегабайт.
+/// Сколько рядов держать: номер — 4 байта, так что это единицы мегабайт.
 const RANKED_ENTRIES: usize = 256;
 
 /// Списки раздела без текста и фильтров, которые открывают чаще всего: их ряды готовятся
@@ -656,19 +807,17 @@ const WARM_SORTS: [BookSort; 5] = [
     BookSort::Rating,
 ];
 
-/// Ответы поиска по ключу запроса; живёт, пока не изменился индекс.
+/// Ответы поиска по ключу запроса; живёт, пока не изменились индекс и слой Б.
 #[derive(Default)]
 struct Cache {
-    /// Отпечаток индекса ([`fingerprint`]), для которого собраны записи.
+    /// Поколение ([`BookIndex::generation`]: отпечаток индекса и поколение слоя Б), для
+    /// которого собраны записи.
     generation: u64,
     entries: HashMap<(BookQuery, usize, usize), Found>,
     order: VecDeque<(BookQuery, usize, usize)>,
     /// Ряды выдачи ([`Ranked`]) по запросу без `limit` и `offset`.
     ranked: HashMap<BookQuery, Arc<Ranked>>,
     ranked_order: VecDeque<BookQuery>,
-    /// Значения подсказок: теги и издательства со счётчиками, самые частые сверху.
-    tags: Option<Arc<Vec<(String, u64)>>>,
-    publishers: Option<Arc<Vec<(String, u64)>>>,
 }
 
 impl Cache {
@@ -692,6 +841,10 @@ pub struct BookIndex {
     cache: Mutex<Cache>,
     /// Кэш ответов включён. Выключается только для замеров (`nexus search bench`).
     cached: std::sync::atomic::AtomicBool,
+    /// Слой Б: фасеты, сортировки и ручной порядок. Читатели берут снимок без блокировок.
+    sidecar: ArcSwap<Sidecar>,
+    /// Номер книги → адрес документа для текущего состояния индекса.
+    text_map: Mutex<Option<Arc<TextMap>>>,
 }
 
 /// Открытые индексы по каталогу (в тестах у каждого свой).
@@ -700,7 +853,7 @@ static OPEN: Mutex<Option<HashMap<PathBuf, Arc<BookIndex>>>> = Mutex::new(None);
 /// Файл с версией схемы рядом с индексом: другая версия — индекс пересоздаётся.
 const SCHEMA_FILE: &str = "nexus-schema";
 /// Версия схемы и анализаторов. Увеличить при любом их изменении.
-const SCHEMA_VERSION: &str = "books-3";
+const SCHEMA_VERSION: &str = "books-4";
 
 impl BookIndex {
     /// Индекс в каталоге `dir`; нет или собран по другой схеме — создаётся пустой.
@@ -748,9 +901,53 @@ impl BookIndex {
             f: fields,
             cache: Mutex::new(Cache::default()),
             cached: std::sync::atomic::AtomicBool::new(true),
+            // Снимок слоя Б с диска: поиск работает сразу, до первой сборки из БД.
+            sidecar: ArcSwap::from_pointee(Sidecar::load(dir).unwrap_or_default()),
+            text_map: Mutex::new(None),
         });
         open.insert(dir.to_path_buf(), index.clone());
         Ok(index)
+    }
+
+    /// Текущий слой Б.
+    pub fn sidecar(&self) -> Arc<Sidecar> {
+        self.sidecar.load_full()
+    }
+
+    /// Подменить слой Б целиком (ежедневная сборка): читатели видят старый или новый снимок
+    /// целиком, кэш выдачи сбрасывается сам (другое поколение). Снимок пишется на диск.
+    pub fn set_sidecar(&self, sidecar: Sidecar) -> Result<(), IndexError> {
+        if let Err(error) = sidecar.save(&self.dir) {
+            tracing::warn!(%error, "books sidecar snapshot was not saved");
+        }
+        self.sidecar.store(Arc::new(sidecar));
+        self.warm()
+    }
+
+    /// Только ручные места (`ord → место`): фасеты и прочие порядки остаются как есть.
+    pub fn set_ranks(&self, ranks: &HashMap<u32, u16>) -> Result<(), IndexError> {
+        let next = self.sidecar.load().with_ranks(ranks);
+        self.set_sidecar(next)
+    }
+
+    /// Поколение выдачи: меняется и с индексом, и со слоем Б.
+    fn generation(&self, text: &TextMap, sidecar: &Sidecar) -> u64 {
+        text.fingerprint ^ sidecar.generation().rotate_left(32)
+    }
+
+    /// Карта номер → адрес для состояния индекса, которое читает `searcher`.
+    fn text_map(&self, searcher: &Searcher) -> Result<Arc<TextMap>, IndexError> {
+        let fingerprint = fingerprint(searcher);
+        let mut current = self.text_map.lock().unwrap();
+        if let Some(map) = current
+            .as_ref()
+            .filter(|map| map.fingerprint == fingerprint)
+        {
+            return Ok(map.clone());
+        }
+        let map = Arc::new(TextMap::build(searcher, fingerprint)?);
+        *current = Some(map.clone());
+        Ok(map)
     }
 
     /// Включить или выключить кэш ответов (для замеров: сколько стоит сам запрос).
@@ -761,6 +958,86 @@ impl BookIndex {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Состояние индекса для админки: документы, сегменты и место на диске по полям.
+    pub fn stats(&self) -> Result<IndexStats, IndexError> {
+        let searcher = self.reader.searcher();
+        let usage = searcher.space_usage().map_err(TantivyError::from)?;
+        let mut fields: std::collections::BTreeMap<String, FieldBytes> = Default::default();
+        let mut store = 0u64;
+        let mut deletes = 0u64;
+        for segment in usage.segments() {
+            let parts: [(
+                &tantivy::space_usage::PerFieldSpaceUsage,
+                fn(&mut FieldBytes) -> &mut u64,
+            ); 5] = [
+                (segment.termdict(), |f| &mut f.termdict),
+                (segment.postings(), |f| &mut f.postings),
+                (segment.positions(), |f| &mut f.positions),
+                (segment.fast_fields(), |f| &mut f.fast),
+                (segment.fieldnorms(), |f| &mut f.fieldnorms),
+            ];
+            for (per_field, slot) in parts {
+                for field in per_field.fields() {
+                    let entry = fields.entry(field.field_name().to_string()).or_default();
+                    *slot(entry) += field.total().get_bytes();
+                }
+            }
+            store += segment.store().total().get_bytes();
+            deletes += segment.deletes().get_bytes();
+        }
+        let deleted_docs = searcher
+            .segment_readers()
+            .iter()
+            .map(|r| u64::from(r.num_deleted_docs()))
+            .sum();
+        let file = |name: &str| std::fs::metadata(self.dir.join(name)).map_or(0, |m| m.len());
+        let disk_bytes = std::fs::read_dir(&self.dir)
+            .map(|dir| {
+                dir.filter_map(Result::ok)
+                    .filter_map(|e| e.metadata().ok())
+                    .filter(|m| m.is_file())
+                    .map(|m| m.len())
+                    .sum()
+            })
+            .unwrap_or(0);
+        let cache = self.cache.lock().unwrap();
+        Ok(IndexStats {
+            schema_version: SCHEMA_VERSION,
+            docs: searcher.num_docs(),
+            deleted_docs,
+            segments: searcher.segment_readers().len(),
+            index_bytes: usage.total().get_bytes(),
+            store_bytes: store,
+            deletes_bytes: deletes,
+            disk_bytes,
+            sidecar_file_bytes: file(super::sidecar::SNAPSHOT_FILE),
+            fields: fields.into_iter().collect(),
+            cache_entries: cache.entries.len(),
+            cache_ranked: cache.ranked.len(),
+        })
+    }
+
+    /// Слить сегменты в один и удалить файлы, на которые индекс больше не ссылается: место
+    /// удалённых документов освобождается, поиск по одному сегменту быстрее. Занят — `Busy`.
+    pub fn merge(&self) -> Result<usize, IndexError> {
+        let mut writer = self.writer()?;
+        let ids = self.index.searchable_segment_ids()?;
+        if ids.len() > 1 {
+            writer.merge(&ids).wait()?;
+        }
+        writer.garbage_collect_files().wait()?;
+        drop(writer);
+        self.reader.reload()?;
+        self.warm()?;
+        Ok(ids.len())
+    }
+
+    /// Сбросить кэш выдачи и заново прогреть списки раздела.
+    pub fn clear_cache(&self) -> Result<(), IndexError> {
+        *self.cache.lock().unwrap() = Cache::default();
+        self.warm()
     }
 
     /// Сколько книг в индексе.
@@ -1077,105 +1354,55 @@ impl BookIndex {
         Some(Box::new(BooleanQuery::new(variants)))
     }
 
-    /// Фильтры запроса — обязательные клаузы без вклада в оценку. `None` — под фильтры
-    /// заведомо ничего не подходит.
-    fn filters(&self, q: &BookQuery, today: NaiveDate) -> Option<Vec<(Occur, Box<dyn Query>)>> {
-        let f = &self.f;
-        let term = |field: Field, value: &str| -> Box<dyn Query> {
-            Box::new(TermQuery::new(
-                Term::from_field_text(field, value),
+    /// Номера книг из `slugs` (для «кроме этих»): slug — терм индекса, номер — его колонка.
+    fn ords_of(&self, searcher: &Searcher, slugs: &[String]) -> Result<Vec<u32>, IndexError> {
+        let mut out = Vec::with_capacity(slugs.len());
+        for slug in slugs {
+            let query = TermQuery::new(
+                Term::from_field_text(self.f.slug, slug),
                 IndexRecordOption::Basic,
-            ))
-        };
-        let must = |query: Box<dyn Query>| -> (Occur, Box<dyn Query>) {
-            (Occur::Must, Box::new(ConstScoreQuery::new(query, 0.0)))
-        };
-        let mut out: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-        if let Some(tag) = &q.tag {
-            out.push(must(term(f.tags, tag)));
-        }
-        if !q.any_tags.is_empty() {
-            let any: Vec<(Occur, Box<dyn Query>)> = q
-                .any_tags
-                .iter()
-                .map(|tag| (Occur::Should, term(f.tags, tag)))
-                .collect();
-            out.push(must(Box::new(BooleanQuery::new(any))));
-        }
-        for slug in &q.exclude_slugs {
-            out.push((Occur::MustNot, term(f.slug, slug)));
-        }
-        if let Some(publisher) = &q.publisher {
-            let key = normalize_key(publisher);
-            if key.is_empty() {
-                return None;
-            }
-            out.push(must(term(f.publisher_key, &key)));
-        }
-        if let Some(person) = &q.person {
-            let value = match &q.role {
-                Some(role) => format!("{role}:{person}"),
-                None => person.clone(),
-            };
-            out.push(must(term(f.credits, &value)));
-        }
-        if let Some(language) = &q.language {
-            out.push(must(term(f.language, &language.to_lowercase())));
-        }
-        if let Some(has_cover) = q.has_cover {
-            out.push(must(Box::new(TermQuery::new(
-                Term::from_field_u64(f.has_cover, u64::from(has_cover)),
-                IndexRecordOption::Basic,
-            ))));
-        }
-        if q.year_from.is_some() || q.year_to.is_some() {
-            if matches!((q.year_from, q.year_to), (Some(from), Some(to)) if from > to) {
-                return None;
-            }
-            let bound = |year: Option<i32>| match year {
-                Some(year) => {
-                    std::ops::Bound::Included(Term::from_field_i64(f.year, i64::from(year)))
+            );
+            let hits = searcher.search(&query, &TopDocs::with_limit(1).order_by_score())?;
+            for (_, address) in hits {
+                let segment = searcher.segment_reader(address.segment_ord);
+                let ords = segment
+                    .fast_fields()
+                    .u64(ORD)?
+                    .first_or_default_col(u64::MAX);
+                if let Ok(ord) = u32::try_from(ords.get_val(address.doc_id)) {
+                    out.push(ord);
                 }
-                None => std::ops::Bound::Unbounded,
-            };
-            out.push(must(Box::new(RangeQuery::new(
-                bound(q.year_from),
-                bound(q.year_to),
-            ))));
+            }
         }
-        // «Новые» — только вышедшие, «скоро» — только не вышедшие (книга без даты — ни то ни то).
-        let day = |value: u64| Term::from_field_u64(f.release_day_term, value);
-        match q.sort {
-            BookSort::New => out.push(must(Box::new(RangeQuery::new(
-                std::ops::Bound::Included(day(1)),
-                std::ops::Bound::Included(day(day_of(today))),
-            )))),
-            BookSort::Soon => out.push(must(Box::new(RangeQuery::new(
-                std::ops::Bound::Excluded(day(day_of(today))),
-                std::ops::Bound::Unbounded,
-            )))),
-            _ => {}
-        }
-        Some(out)
+        Ok(out)
     }
 
     /// Поиск: страница `limit` книг с `offset` и сколько всего найдено.
     pub fn search(&self, q: &BookQuery, limit: usize, offset: usize) -> Result<Found, IndexError> {
         let searcher = self.reader.searcher();
-        let generation = fingerprint(&searcher);
-        let key = (q.clone(), limit, offset);
-        if !self.cached.load(std::sync::atomic::Ordering::Relaxed) {
-            return self.search_uncached(&searcher, q, limit, offset);
-        }
-        if let Some(found) = self.cache.lock().unwrap().at(generation).entries.get(&key) {
-            return Ok(found.clone());
-        }
+        let text = self.text_map(&searcher)?;
+        let sidecar = self.sidecar.load_full();
+        let generation = self.generation(&text, &sidecar);
         let offset = offset.min(MAX_OFFSET);
-        let ranked = self.ranked(&searcher, generation, q, limit, offset)?;
+        let key = (q.clone(), limit, offset);
+        let cached = self.cached.load(std::sync::atomic::Ordering::Relaxed);
+        if cached {
+            if let Some(found) = self.cache.lock().unwrap().at(generation).entries.get(&key) {
+                return Ok(found.clone());
+            }
+        }
+        let ranked = if cached {
+            self.ranked(&searcher, &text, &sidecar, generation, q, limit, offset)?
+        } else {
+            Arc::new(self.find(&searcher, &text, &sidecar, q, offset + limit)?)
+        };
         let today = chrono::Utc::now().date_naive();
         let mut items = Vec::with_capacity(limit.min(ranked.total));
-        for address in ranked.addresses.iter().skip(offset).take(limit) {
-            if let Some(card) = self.card(&searcher, *address)? {
+        for &ord in ranked.ords.iter().skip(offset).take(limit) {
+            let Some(address) = text.address(ord) else {
+                continue;
+            };
+            if let Some(card) = self.card(&searcher, address)? {
                 items.push(card.summary(today));
             }
         }
@@ -1184,7 +1411,7 @@ impl BookIndex {
             total: ranked.total,
             approximate: ranked.approximate,
         };
-        if found.items.len() <= CACHE_MAX_ITEMS {
+        if cached && found.items.len() <= CACHE_MAX_ITEMS {
             let mut cache = self.cache.lock().unwrap();
             let cache = cache.at(generation);
             if cache.entries.insert(key.clone(), found.clone()).is_none() {
@@ -1201,9 +1428,12 @@ impl BookIndex {
 
     /// Ряд выдачи запроса, в котором есть страница `offset..offset + limit`: из памяти или
     /// собранный заново (и тогда — с запасом, чтобы следующие страницы были срезами).
+    #[allow(clippy::too_many_arguments)]
     fn ranked(
         &self,
         searcher: &Searcher,
+        text: &TextMap,
+        sidecar: &Sidecar,
         generation: u64,
         q: &BookQuery,
         limit: usize,
@@ -1215,12 +1445,7 @@ impl BookIndex {
             }
         }
         let len = (offset + limit).next_power_of_two().max(RANKED_LEN);
-        let (addresses, total, approximate) = self.find(searcher, q, len, 0)?;
-        let ranked = Arc::new(Ranked {
-            addresses,
-            total,
-            approximate,
-        });
+        let ranked = Arc::new(self.find(searcher, text, sidecar, q, len)?);
         let mut cache = self.cache.lock().unwrap();
         let cache = cache.at(generation);
         if cache.ranked.insert(q.clone(), ranked.clone()).is_none() {
@@ -1235,8 +1460,7 @@ impl BookIndex {
     }
 
     /// Подготовить списки раздела без текста и фильтров ([`WARM_SORTS`]). Вызывается после
-    /// открытия индекса и после каждой записи в него: сортировка всего раздела — единственный
-    /// дорогой запрос, и платить за него должен не посетитель.
+    /// открытия индекса и после каждой записи в него или в слой Б.
     pub fn warm(&self) -> Result<(), IndexError> {
         for sort in WARM_SORTS {
             let query = BookQuery {
@@ -1248,141 +1472,103 @@ impl BookIndex {
         Ok(())
     }
 
-    /// Запросы Tantivy по тексту и фильтрам: основной (строгий; без слов в запросе — все книги
-    /// под фильтры) и резервный с опечаткой — его выполняют, только если основной ничего не
-    /// нашёл. `None` — пусто заведомо.
-    #[allow(clippy::type_complexity)]
-    fn plan(
+    /// Запросы Tantivy по тексту: основной (строгий) и резервный с опечаткой — его выполняют,
+    /// только если основной ничего не нашёл. Фильтров в них нет: их проверяет [`OrdHits`].
+    fn text_queries(
         &self,
         searcher: &Searcher,
-        q: &BookQuery,
-    ) -> Result<Option<(Box<dyn Query>, Option<Box<dyn Query>>)>, IndexError> {
-        let today = chrono::Utc::now().date_naive();
-        let Some(filters) = self.filters(q, today) else {
+        text: &str,
+    ) -> Result<Option<TextQueries>, IndexError> {
+        let parsed = self.parse(searcher, text)?;
+        let Some(strict) = self.strict_query(text, &parsed) else {
             return Ok(None);
         };
-        let with_filters = |text: Box<dyn Query>| -> Box<dyn Query> {
-            if filters.is_empty() {
-                return text;
-            }
-            let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, text)];
-            clauses.extend(filters.iter().map(|(occur, q)| (*occur, q.box_clone())));
-            Box::new(BooleanQuery::new(clauses))
-        };
-        let text: String = q.q.chars().take(MAX_QUERY_CHARS).collect();
-        // Одна-две буквы — ещё не запрос (см. [`MIN_QUERY_CHARS`]); пустой — список по фильтрам.
-        let typed = text.trim().chars().count();
-        if (1..MIN_QUERY_CHARS).contains(&typed) {
-            return Ok(None);
-        }
-        let parsed = self.parse(searcher, &text)?;
-        let Some(strict) = self.strict_query(&text, &parsed) else {
-            // Слов в запросе нет (пусто или одни знаки): все книги под фильтры.
-            return Ok(Some((with_filters(Box::new(AllQuery)), None)));
-        };
-        let fallback = self
-            .fallback_query(&parsed, strict.as_ref())
-            .map(&with_filters);
-        Ok(Some((with_filters(strict), fallback)))
+        let fallback = self.fallback_query(&parsed, strict.as_ref());
+        Ok(Some((strict, fallback)))
     }
 
-    /// Страница и число найденных — одним проходом по индексу: сборщик страницы и счётчик
-    /// работают вместе (отдельный подсчёт удваивал бы цену каждого запроса).
-    fn run(
-        &self,
-        searcher: &Searcher,
-        query: &dyn Query,
-        q: &BookQuery,
-        limit: usize,
-        offset: usize,
-    ) -> Result<(Vec<DocAddress>, usize), IndexError> {
-        if limit == 0 {
-            return Ok((Vec::new(), searcher.search(query, &Count)?));
-        }
-        let top = || TopDocs::with_limit(limit).and_offset(offset);
-        let by = |field: &str, order: Order| -> Result<(Vec<DocAddress>, usize), IndexError> {
-            let (hits, total) =
-                searcher.search(query, &(top().order_by_u64_field(field, order), Count))?;
-            Ok((
-                hits.into_iter().map(|(_, address)| address).collect(),
-                total,
-            ))
-        };
-        let has_text = !self.query_terms(&q.q).is_empty();
-        match q.sort {
-            // Релевантность, умноженная на известность автора: среди книг, одинаково
-            // совпавших с запросом, выше та, чей автор известнее.
-            BookSort::Relevance if has_text => {
-                let collector = top().tweak_score(|segment: &SegmentReader| {
-                    let popularity = segment
-                        .fast_fields()
-                        .u64(POPULARITY)
-                        .ok()
-                        .map(|column| column.first_or_default_col(0));
-                    move |doc: DocId, score: Score| {
-                        let popularity = popularity.as_ref().map_or(0, |c| c.get_val(doc));
-                        score * (1.0 + (popularity as f32).ln_1p() / POPULARITY_DAMPING)
-                    }
-                });
-                let (hits, total): (Vec<(Score, DocAddress)>, usize) =
-                    searcher.search(query, &(collector, Count))?;
-                Ok((
-                    hits.into_iter().map(|(_, address)| address).collect(),
-                    total,
-                ))
-            }
-            BookSort::Relevance | BookSort::Recommended => by("sort_rank", Order::Desc),
-            BookSort::New => by("release_day", Order::Desc),
-            BookSort::Soon => by("release_day", Order::Asc),
-            BookSort::Title => by("sort_title", Order::Asc),
-            BookSort::Popular => by("sort_popular", Order::Desc),
-            BookSort::Rating => by("sort_rating", Order::Desc),
-        }
-    }
-
-    /// Основной запрос, а если он пуст — резервный: адреса страницы, число найденных и признак
-    /// «приблизительно» (нашлось только с исправлением опечатки).
+    /// Первые `len` номеров выдачи, сколько всего найдено и признак «приблизительно» (нашлось
+    /// только с исправлением опечатки).
+    ///
+    /// - Без текста Tantivy не вызывается: фасеты слоя Б пересекаются, порядок — готовый.
+    /// - С текстом Tantivy отдаёт совпадения из фильтра ([`OrdHits`]); релевантность с ручными
+    ///   местами строит [`Sidecar::rank_hits`], остальные сортировки — готовые порядки слоя Б.
     fn find(
         &self,
         searcher: &Searcher,
+        text: &TextMap,
+        sidecar: &Sidecar,
         q: &BookQuery,
-        limit: usize,
-        offset: usize,
-    ) -> Result<(Vec<DocAddress>, usize, bool), IndexError> {
-        let Some((main, fallback)) = self.plan(searcher, q)? else {
-            return Ok((Vec::new(), 0, false));
+        len: usize,
+    ) -> Result<Ranked, IndexError> {
+        let empty = Ranked {
+            ords: Vec::new(),
+            total: 0,
+            approximate: false,
         };
-        let (addresses, total) = self.run(searcher, main.as_ref(), q, limit, offset)?;
-        if total > 0 {
-            return Ok((addresses, total, false));
+        let query: String = q.q.chars().take(MAX_QUERY_CHARS).collect();
+        // Одна-две буквы — ещё не запрос (см. [`MIN_QUERY_CHARS`]); пустой — список по фильтрам.
+        let typed = query.trim().chars().count();
+        if (1..MIN_QUERY_CHARS).contains(&typed) {
+            return Ok(empty);
         }
-        if let Some(fallback) = fallback {
-            let (addresses, total) = self.run(searcher, fallback.as_ref(), q, limit, offset)?;
-            if total > 0 {
-                return Ok((addresses, total, true));
-            }
-        }
-        Ok((Vec::new(), 0, false))
-    }
-
-    fn search_uncached(
-        &self,
-        searcher: &Searcher,
-        q: &BookQuery,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Found, IndexError> {
-        let (addresses, total, approximate) =
-            self.find(searcher, q, limit, offset.min(MAX_OFFSET))?;
+        let exclude = self.ords_of(searcher, &q.exclude_slugs)?;
+        let mut filter = sidecar.filter(q, &exclude);
+        filter &= &text.indexed;
         let today = chrono::Utc::now().date_naive();
-        let mut items = Vec::with_capacity(addresses.len());
-        for address in addresses {
-            if let Some(card) = self.card(searcher, address)? {
-                items.push(card.summary(today));
+        let Some((strict, fallback)) = self.text_queries(searcher, &query)? else {
+            // Слов в запросе нет (пусто или одни знаки): все книги под фильтры.
+            let (ords, total) = sidecar.page(q.sort, &filter, today, len);
+            return Ok(Ranked {
+                ords,
+                total,
+                approximate: false,
+            });
+        };
+        let filter = Arc::new(filter);
+        let collect = |query: &dyn Query| {
+            searcher.search(
+                query,
+                &OrdHits {
+                    filter: filter.clone(),
+                },
+            )
+        };
+        let mut hits = collect(strict.as_ref())?;
+        let mut approximate = false;
+        if hits.is_empty() {
+            if let Some(fallback) = fallback {
+                hits = collect(fallback.as_ref())?;
+                approximate = true;
             }
         }
-        Ok(Found {
-            items,
+        if hits.is_empty() {
+            return Ok(empty);
+        }
+        let total = hits.len();
+        if q.sort == BookSort::Relevance {
+            // Точное название запроса — выше любого ручного места.
+            let key = normalize_key(&query);
+            let exact: RoaringBitmap = if key.is_empty() {
+                RoaringBitmap::new()
+            } else {
+                let title = TermQuery::new(
+                    Term::from_field_text(self.f.title_key, &key),
+                    IndexRecordOption::Basic,
+                );
+                collect(&title)?.into_iter().map(|(ord, _)| ord).collect()
+            };
+            let ords = sidecar.rank_hits(&hits, &exact, len);
+            return Ok(Ranked {
+                ords,
+                total,
+                approximate,
+            });
+        }
+        let matches: RoaringBitmap = hits.into_iter().map(|(ord, _)| ord).collect();
+        let (ords, total) = sidecar.page(q.sort, &matches, today, len);
+        Ok(Ranked {
+            ords,
             total,
             approximate,
         })
@@ -1399,28 +1585,35 @@ impl BookIndex {
     /// Сколько книг под запрос (без самой выдачи).
     pub fn count(&self, q: &BookQuery) -> Result<usize, IndexError> {
         let searcher = self.reader.searcher();
-        Ok(self.find(&searcher, q, 0, 0)?.1)
+        let text = self.text_map(&searcher)?;
+        let sidecar = self.sidecar.load_full();
+        Ok(self.find(&searcher, &text, &sidecar, q, 0)?.total)
     }
 
     /// Slug'и первых `cap` книг выдачи по порядку — ряд для «предыдущая / следующая». Читается
     /// колонка `slug`, документы не распаковываются.
     pub fn slugs(&self, q: &BookQuery, cap: usize) -> Result<Vec<String>, IndexError> {
         let searcher = self.reader.searcher();
-        let (addresses, _, _) = self.find(&searcher, q, cap, 0)?;
+        let text = self.text_map(&searcher)?;
+        let sidecar = self.sidecar.load_full();
+        let ranked = self.find(&searcher, &text, &sidecar, q, cap)?;
         let mut columns = Vec::with_capacity(searcher.segment_readers().len());
         for segment in searcher.segment_readers() {
             columns.push(segment.fast_fields().str("slug")?);
         }
-        let mut out = Vec::with_capacity(addresses.len());
+        let mut out = Vec::with_capacity(ranked.ords.len());
         let mut buffer = String::new();
-        for address in addresses {
+        for ord in ranked.ords {
+            let Some(address) = text.address(ord) else {
+                continue;
+            };
             let Some(column) = &columns[address.segment_ord as usize] else {
                 continue;
             };
-            if let Some(ord) = column.term_ords(address.doc_id).next() {
+            if let Some(term) = column.term_ords(address.doc_id).next() {
                 buffer.clear();
                 column
-                    .ord_to_str(ord, &mut buffer)
+                    .ord_to_str(term, &mut buffer)
                     .map_err(TantivyError::from)?;
                 out.push(buffer.clone());
             }
@@ -1450,55 +1643,31 @@ impl BookIndex {
 
     // ---------------------------------------------------------- подсказки
 
-    /// Все значения поля со счётчиком книг, самые частые сверху. Счётчик — из словаря термов:
-    /// документы не читаются (удалённые до слияния сегментов чуть завышают число).
-    fn field_values(
-        &self,
-        searcher: &Searcher,
-        field: Field,
-    ) -> Result<Vec<(String, u64)>, IndexError> {
-        let mut counts: HashMap<String, u64> = HashMap::new();
-        for segment in searcher.segment_readers() {
-            let inverted = segment.inverted_index(field)?;
-            let mut stream = inverted.terms().stream().map_err(TantivyError::from)?;
-            while stream.advance() {
-                if let Ok(value) = std::str::from_utf8(stream.key()) {
-                    *counts.entry(value.to_string()).or_default() +=
-                        u64::from(stream.value().doc_freq);
-                }
-            }
-        }
-        let mut values: Vec<(String, u64)> = counts.into_iter().collect();
-        values.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        Ok(values)
+    /// Теги и жанры книг со счётчиками, самые частые сверху (готовые в слое Б).
+    pub fn tags(&self) -> Result<Arc<Vec<(String, u64)>>, IndexError> {
+        Ok(Arc::new(self.sidecar.load().facets().tags.clone()))
     }
 
-    /// Теги и жанры книг со счётчиками, самые частые сверху. Считается раз на состояние индекса.
-    pub fn tags(&self) -> Result<Arc<Vec<(String, u64)>>, IndexError> {
+    /// Счётчики значений фасета (`tag:`, `lang:`, `person:`…) среди книг под запрос: для
+    /// панели фильтров.
+    pub fn facet_counts(
+        &self,
+        q: &BookQuery,
+        prefix: &str,
+    ) -> Result<Vec<(String, u64)>, IndexError> {
         let searcher = self.reader.searcher();
-        let generation = fingerprint(&searcher);
-        if let Some(tags) = &self.cache.lock().unwrap().at(generation).tags {
-            return Ok(tags.clone());
-        }
-        let tags = Arc::new(self.field_values(&searcher, self.f.tags)?);
-        self.cache.lock().unwrap().at(generation).tags = Some(tags.clone());
-        Ok(tags)
+        let text = self.text_map(&searcher)?;
+        let sidecar = self.sidecar.load_full();
+        let ranked = self.find(&searcher, &text, &sidecar, q, usize::MAX)?;
+        let found: RoaringBitmap = ranked.ords.into_iter().collect();
+        Ok(sidecar.facet_counts(&found, prefix))
     }
 
     /// Издательства по части названия (без учёта регистра и `ё`): сначала те, что с неё
     /// начинаются, затем по числу книг. Пустой `q` — самые частые.
     pub fn publishers(&self, q: &str, limit: usize) -> Result<Vec<(String, u64)>, IndexError> {
-        let searcher = self.reader.searcher();
-        let generation = fingerprint(&searcher);
-        let cached = self.cache.lock().unwrap().at(generation).publishers.clone();
-        let all = match cached {
-            Some(all) => all,
-            None => {
-                let all = Arc::new(self.field_values(&searcher, self.f.publisher)?);
-                self.cache.lock().unwrap().at(generation).publishers = Some(all.clone());
-                all
-            }
-        };
+        let sidecar = self.sidecar.load_full();
+        let all = &sidecar.facets().publishers;
         let needle = normalize_key(q);
         if needle.is_empty() {
             return Ok(all.iter().take(limit).cloned().collect());
@@ -1563,8 +1732,14 @@ mod tests {
     }
 
     fn book(slug: &str, title: &str, author: &str) -> BookDoc {
+        // Номер — из slug: у одной и той же книги он один при любом переиндексировании.
+        let ord = slug
+            .bytes()
+            .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)))
+            % 1_000_000;
         BookDoc {
             id: Uuid::new_v4(),
+            ord,
             slug: slug.into(),
             title: title.into(),
             authors: vec![SummaryAuthor {
@@ -1599,10 +1774,27 @@ mod tests {
         heart.rating_avg = Some(9.0);
         let hedgehog = book("ezhik", "Ёжик в тумане", "Сергей Козлов");
         let essay = book("razbor", "Мастер и Маргарита: краткий разбор", "Критик");
+        put(&index, &[crime, master, heart, hedgehog, essay]);
         index
-            .update(&[], &[crime, master, heart, hedgehog, essay])
-            .unwrap();
-        index
+    }
+
+    /// Книги — в индекс (слой А) и они же целиком — в слой Б.
+    fn put(index: &BookIndex, docs: &[BookDoc]) {
+        index.update(&[], docs).unwrap();
+        index.set_sidecar(sidecar_of(docs)).unwrap();
+    }
+
+    fn sidecar_of(docs: &[BookDoc]) -> Sidecar {
+        let mut builder = super::super::sidecar::SidecarBuilder::default();
+        for doc in docs {
+            builder.add(doc);
+        }
+        builder.finish()
+    }
+
+    fn ord_of(index: &BookIndex, slug: &str) -> u32 {
+        let searcher = index.reader.searcher();
+        index.ords_of(&searcher, &[slug.to_string()]).unwrap()[0]
     }
 
     fn slugs(index: &BookIndex, q: BookQuery) -> Vec<String> {
@@ -1810,15 +2002,94 @@ mod tests {
     }
 
     #[test]
+    fn stats_report_fields_and_merge_drops_deleted_docs() {
+        let index = library("stats");
+        let old = index.search(&text("ёжик"), 1, 0).unwrap().items.remove(0);
+        index.update(&[old.id], &[]).unwrap();
+        let before = index.stats().unwrap();
+        assert_eq!(before.docs, 4);
+        assert!(before
+            .fields
+            .iter()
+            .any(|(name, b)| name == "title" && b.total() > 0));
+        assert!(before.store_bytes > 0);
+        index.merge().unwrap();
+        let after = index.stats().unwrap();
+        assert_eq!((after.docs, after.deleted_docs, after.segments), (4, 0, 1));
+        assert_eq!(slugs(&index, text("тумане")), Vec::<String>::new());
+        index.clear_cache().unwrap();
+    }
+
+    #[test]
     fn rebuild_swaps_the_whole_index_in_one_commit() {
         let index = library("rebuild");
         let mut rebuild = index.rebuild().unwrap();
-        rebuild
-            .add(&[book("novaya", "Новая книга", "Автор")])
-            .unwrap();
+        let novaya = book("novaya", "Новая книга", "Автор");
+        rebuild.add(std::slice::from_ref(&novaya)).unwrap();
         assert_eq!(index.len(), 5, "old index is served until commit");
         assert_eq!(rebuild.commit().unwrap(), 1);
+        index.set_sidecar(sidecar_of(&[novaya])).unwrap();
         assert_eq!(slugs(&index, BookQuery::default()), ["novaya"]);
+    }
+
+    #[test]
+    fn manual_rank_orders_listings_and_lifts_strong_text_matches() {
+        let index = library("ranks");
+        let ranks = HashMap::from([(ord_of(&index, "ezhik"), 1), (ord_of(&index, "razbor"), 2)]);
+        index.set_ranks(&ranks).unwrap();
+        // Без текста: ручные места сверху, кэш прежнего порядка сброшен.
+        assert_eq!(
+            slugs(&index, BookQuery::default())[..2],
+            ["ezhik", "razbor"]
+        );
+        // Внутри фасета — относительный порядок общего списка.
+        let classic = BookQuery {
+            tag: Some("klassika".into()),
+            ..BookQuery::default()
+        };
+        assert_eq!(slugs(&index, classic).len(), 2);
+        // Точное название выше ручного места; «разбор» совпал сильно — второй.
+        assert_eq!(
+            slugs(&index, text("мастер и маргарита")),
+            ["master", "razbor"]
+        );
+        // «Мастер» одним словом: точного названия нет, ручное место поднимает «разбор».
+        assert_eq!(slugs(&index, text("мастер")), ["razbor", "master"]);
+    }
+
+    #[test]
+    fn facet_filter_is_applied_inside_the_text_collector() {
+        let index = library("collector");
+        let q = BookQuery {
+            q: "мастер".into(),
+            tag: Some("mistika".into()),
+            ..BookQuery::default()
+        };
+        let found = index.search(&q, 1, 0).unwrap();
+        assert_eq!(found.total, 1);
+        assert_eq!(found.items[0].slug, "master");
+        let counts = index.facet_counts(&text("булгаков"), "tag:").unwrap();
+        assert_eq!(counts[0], ("klassika".to_string(), 1));
+    }
+
+    #[test]
+    fn hidden_in_sidecar_means_not_found() {
+        let index = library("hidden");
+        let docs: Vec<BookDoc> = vec![book("ezhik", "Ёжик в тумане", "Сергей Козлов")];
+        index.set_sidecar(sidecar_of(&docs)).unwrap();
+        assert!(slugs(&index, text("преступление")).is_empty());
+        assert_eq!(slugs(&index, BookQuery::default()), ["ezhik"]);
+    }
+
+    #[test]
+    fn sidecar_snapshot_is_loaded_on_open() {
+        let dir = scratch("snapshot");
+        {
+            let index = BookIndex::open(&dir).unwrap();
+            put(&index, &[book("ezhik", "Ёжик в тумане", "Сергей Козлов")]);
+        }
+        let loaded = Sidecar::load(&dir).unwrap();
+        assert_eq!(loaded.len(), 1);
     }
 
     #[test]

@@ -49,6 +49,12 @@ pub struct Config {
     /// Ключ API TMDB (v3) или Read Access Token (v4), `TMDB_API_KEY`: полные данные фильма при
     /// возврате из архива. Не задан — фильм возвращается «скелетом», авто-возврат выключен.
     pub tmdb_api_key: Option<String>,
+    /// Секрет шифрования ключей провайдеров ИИ в БД (`catalog_ai_providers`, pgcrypto),
+    /// `AI_SECRET_KEY`. Не задан — провайдеров ИИ нельзя ни завести, ни прочитать.
+    pub ai_secret_key: Option<String>,
+    /// Python для скриптов админки (`catalog::scripts`), `SCRIPTS_PYTHON` — интерпретатор с
+    /// зависимостями `scripts/catalog-import/requirements.txt`. Не задан — запуск выключен.
+    pub scripts_python: Option<String>,
     /// Адрес API TMDB, `TMDB_API_URL` (в тестах — подставной сервер).
     pub tmdb_api_url: String,
     /// Сколько фильмов в час можно вернуть из архива открытием страницы (на процесс),
@@ -209,6 +215,12 @@ impl Config {
             tmdb_api_key: env::var("TMDB_API_KEY")
                 .ok()
                 .filter(|key| !key.trim().is_empty()),
+            ai_secret_key: env::var("AI_SECRET_KEY")
+                .ok()
+                .filter(|key| !key.trim().is_empty()),
+            scripts_python: env::var("SCRIPTS_PYTHON")
+                .ok()
+                .filter(|path| !path.trim().is_empty()),
             tmdb_api_url: var_or("TMDB_API_URL", "https://api.themoviedb.org/3")
                 .trim_end_matches('/')
                 .to_string(),

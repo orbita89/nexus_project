@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use shared::{AppError, AppResult, AppState};
 
-use super::index::{BookIndex, BookQuery, BookSort, Found, IndexError};
+use super::index::{BookForm, BookIndex, BookQuery, BookSort, Found, IndexError};
 use super::sync;
 use crate::models::{EntityKind, EntitySummary, Neighbors, Page, SearchQuery, SearchSort};
 
@@ -100,8 +100,29 @@ pub fn query_of(query: &SearchQuery, countries: &[String]) -> Option<BookQuery> 
         person: query.person.clone(),
         role: query.role.as_ref().map(|r| r.trim().to_string()),
         has_cover: query.has_cover,
+        forms: query.book_form.as_deref().map(forms_of).unwrap_or_default(),
         ..BookQuery::default()
     })
+}
+
+/// Значение `book_form`: виды через запятую или `all`. `None` — неизвестный вид (400).
+/// Пустой список — значение по умолчанию (только книги).
+pub fn parse_forms(value: &str) -> Option<Vec<BookForm>> {
+    let mut forms = Vec::new();
+    for part in value.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        if part == "all" {
+            return Some(BookForm::ALL.to_vec());
+        }
+        let form = BookForm::parse(part)?;
+        if !forms.contains(&form) {
+            forms.push(form);
+        }
+    }
+    Some(forms)
+}
+
+fn forms_of(value: &str) -> Vec<BookForm> {
+    parse_forms(value).unwrap_or_default()
 }
 
 /// `GET /search` для книг. `random` — случайное окно выдачи (как у Meilisearch).
@@ -268,5 +289,19 @@ mod tests {
         assert!(query_of(&query(|_| {}), &["US".into()]).is_none());
         // «Без наград» книгам подходит всегда.
         assert!(query_of(&query(|q| q.awarded = Some(false)), &[]).is_some());
+    }
+
+    #[test]
+    fn book_form_param() {
+        assert_eq!(parse_forms(""), Some(vec![]));
+        assert_eq!(
+            parse_forms("collection, book,collection"),
+            Some(vec![BookForm::Collection, BookForm::Book])
+        );
+        assert_eq!(parse_forms("all"), Some(BookForm::ALL.to_vec()));
+        assert_eq!(parse_forms("magazine"), None);
+        let q = query_of(&query(|q| q.book_form = Some("article".into())), &[]).unwrap();
+        assert_eq!(q.forms, [BookForm::Article]);
+        assert!(query_of(&query(|_| {}), &[]).unwrap().forms.is_empty());
     }
 }

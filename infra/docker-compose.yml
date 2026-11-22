@@ -125,6 +125,8 @@ services:
       # Постеры и трейлеры (nexus media fill|check, make media): TMDB — фильмы и сериалы,
       # IGDB через приложение Twitch — игры. Без ключей ищутся только обложки книг и Rutube.
       TMDB_API_KEY: ${TMDB_API_KEY:-}
+      # Шифрование ключей провайдеров ИИ в БД (catalog_ai_providers, make books-llm).
+      AI_SECRET_KEY: ${AI_SECRET_KEY:-dev-ai-secret}
       TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID:-}
       TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET:-}
       BIND_ADDR: 0.0.0.0:8080

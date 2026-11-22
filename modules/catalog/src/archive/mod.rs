@@ -638,6 +638,8 @@ pub async fn demote(
             popularity: row.popularity.unwrap_or(0.0),
             cover_url: row.cover_url.clone(),
             manual: true,
+            ext_id: None,
+            payload: None,
         })
         .collect();
 

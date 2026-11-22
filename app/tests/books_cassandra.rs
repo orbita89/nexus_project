@@ -259,3 +259,180 @@ async fn book_search_is_answered_by_the_books_index(pool: PgPool) {
     let similar = get("/api/v1/catalog/entities/sobache-serdtse/similar").await;
     assert_eq!(slugs(&similar), ["master-i-margarita"]);
 }
+
+/// Токен пользователя с ролью (dev-вход).
+async fn token(state: &shared::AppState, login: &str, role: &str) -> String {
+    let response = test_utils::request(
+        nexus::build_app(state.clone()),
+        axum::http::Method::POST,
+        "/api/v1/auth/dev/login",
+        Some(serde_json::json!({ "login": login, "role": role })),
+        None,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.json());
+    response.json()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn manual_ranks_order_book_listings_without_reindexing(pool: PgPool) {
+    use axum::http::Method;
+    let library = library();
+    let (state, _) = test_utils::state_with_config(pool.clone(), library.config());
+    cassandra::import(&state, &Options::new(library.0.clone()))
+        .await
+        .unwrap();
+    catalog::books::sync::rebuild(&state).await.unwrap();
+    let admin = token(&state, "admin@example.com", "admin").await;
+    let user = token(&state, "user@example.com", "user").await;
+    let send = |method: Method, uri: &'static str, body: Option<serde_json::Value>, token: &str| {
+        let app = nexus::build_app(state.clone());
+        let token = token.to_string();
+        async move { test_utils::request(app, method, uri, body, Some(&token)).await }
+    };
+    let listing = || async {
+        let response = test_utils::get(
+            nexus::build_app(state.clone()),
+            "/api/v1/catalog/search?kind=book&sort=recommended",
+        )
+        .await;
+        response.json()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["slug"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let ranks = serde_json::json!({ "items": [
+        { "slug": "ezhik-v-tumane", "rank": 1 },
+        { "slug": "master-i-margarita", "rank": 2 },
+    ]});
+
+    // Только админ; неизвестный slug — 404; повтор места — 400.
+    let forbidden = send(
+        Method::PUT,
+        "/api/v1/catalog/admin/books/ranks",
+        Some(ranks.clone()),
+        &user,
+    )
+    .await;
+    assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
+    let unknown = send(
+        Method::PUT,
+        "/api/v1/catalog/admin/books/ranks",
+        Some(serde_json::json!({ "items": [{ "slug": "net-takoy", "rank": 1 }] })),
+        &admin,
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    let repeated = send(
+        Method::PUT,
+        "/api/v1/catalog/admin/books/ranks",
+        Some(serde_json::json!({ "items": [
+            { "slug": "ezhik-v-tumane", "rank": 1 },
+            { "slug": "master-i-margarita", "rank": 1 },
+        ]})),
+        &admin,
+    )
+    .await;
+    assert_eq!(repeated.status, StatusCode::BAD_REQUEST);
+
+    // Список действует сразу: слой Б в RAM, индекс не переписывается.
+    let put = send(
+        Method::PUT,
+        "/api/v1/catalog/admin/books/ranks",
+        Some(ranks),
+        &admin,
+    )
+    .await;
+    assert_eq!(put.status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        listing().await[..2],
+        ["ezhik-v-tumane", "master-i-margarita"]
+    );
+    let list = send(
+        Method::GET,
+        "/api/v1/catalog/admin/books/ranks",
+        None,
+        &admin,
+    )
+    .await;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_eq!(list.json()["total"], 2);
+    assert_eq!(list.json()["items"][0]["slug"], "ezhik-v-tumane");
+
+    // В жанре места — относительные: «Ёжика» там нет, «Мастер» — первый.
+    let genre = test_utils::get(
+        nexus::build_app(state.clone()),
+        "/api/v1/catalog/search?kind=book&person=mikhail-bulgakov&sort=recommended",
+    )
+    .await
+    .json();
+    assert_eq!(genre["items"][0]["slug"], "master-i-margarita");
+
+    // Пустой список — ручного порядка нет.
+    let cleared = send(
+        Method::PUT,
+        "/api/v1/catalog/admin/books/ranks",
+        Some(serde_json::json!({ "items": [] })),
+        &admin,
+    )
+    .await;
+    assert_eq!(cleared.status, StatusCode::NO_CONTENT);
+    let reload = send(
+        Method::POST,
+        "/api/v1/catalog/admin/books/sidecar",
+        None,
+        &admin,
+    )
+    .await;
+    assert_eq!(reload.status, StatusCode::ACCEPTED);
+
+    // Состояние индекса — только админу: оба слоя, место по полям, фасеты, операция.
+    let forbidden = send(
+        Method::GET,
+        "/api/v1/catalog/admin/books/index",
+        None,
+        &user,
+    )
+    .await;
+    assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
+    let status = send(
+        Method::GET,
+        "/api/v1/catalog/admin/books/index",
+        None,
+        &admin,
+    )
+    .await;
+    assert_eq!(status.status, StatusCode::OK);
+    let body = status.json();
+    assert!(body["text"]["docs"].as_u64().unwrap() > 0);
+    assert!(body["text"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["field"] == "title" && f["total"].as_u64().unwrap() > 0));
+    assert!(body["sidecar"]["books"].as_u64().unwrap() > 0);
+    assert_eq!(body["operation"]["op"], "sidecar");
+    let cache = send(
+        Method::POST,
+        "/api/v1/catalog/admin/books/index/cache",
+        None,
+        &admin,
+    )
+    .await;
+    assert_eq!(cache.status, StatusCode::NO_CONTENT);
+}
+
+#[test]
+fn rank_list_file_is_parsed_like_the_progress_list() {
+    let lines = catalog::books::ranks::parse_list(
+        "ПОДБОРКА КНИГ НА РУССКОМ ЯЗЫКЕ\nВсего уникальных названий: 2\nФормат: Название — Автор\n\n\
+         Мастер и Маргарита — Михаил Булгаков\nДвенадцать стульев — Илья Ильф, Евгений Петров\n",
+    );
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].title, "Мастер и Маргарита");
+}

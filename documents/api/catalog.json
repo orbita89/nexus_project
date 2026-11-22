@@ -10,6 +10,366 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/catalog/admin/ai/providers": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "operationId": "list_ai_providers",
+        "responses": {
+          "200": {
+            "description": "Провайдеры ИИ, по умолчанию — первым",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AiProvider"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Завести провайдера. Первый становится провайдером по умолчанию.",
+        "operationId": "create_ai_provider",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAiProvider"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Заведён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiProvider"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Нет kind/model/api_keys, лимиты вне диапазона",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Такой slug уже есть",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Не задан AI_SECRET_KEY",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/ai/providers/{slug}": {
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "operationId": "delete_ai_provider",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого провайдера",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Поменять переданные поля; `api_keys` заменяют прежние ключи целиком.",
+        "operationId": "update_ai_provider",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiProviderInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Обновлён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiProvider"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Поле вне диапазона",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого провайдера",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Не задан AI_SECRET_KEY (при смене ключей)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/ai/providers/{slug}/test": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Пробный запрос «ответь OK» на каждый ключ: проверить адрес, модель и ключи.",
+        "operationId": "test_ai_provider",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ответ по каждому ключу",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiTest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого провайдера",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Не задан или не тот AI_SECRET_KEY",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/archive/demote": {
       "post": {
         "tags": [
@@ -1569,6 +1929,421 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/books/index": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Состояние книжного индекса: оба слоя, место по полям, фасеты, последние сборки.",
+        "operationId": "books_index_status",
+        "responses": {
+          "200": {
+            "description": "Состояние индекса",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BooksIndexStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Книжный поиск выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/books/index/cache": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Сбросить кэш выдачи книг и заново прогреть списки раздела (сразу).",
+        "operationId": "clear_books_cache",
+        "responses": {
+          "204": {
+            "description": "Кэш сброшен"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Книжный поиск выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/books/index/merge": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Слить сегменты Tantivy в один и убрать старые файлы — в фоне: освобождает место удалённых\nдокументов (`deleted_docs`) и ускоряет поиск. Данные не меняются.",
+        "operationId": "merge_books_index",
+        "responses": {
+          "202": {
+            "description": "Слияние запущено"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже идёт другая операция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Книжный поиск выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/books/index/rebuild": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Полная перестройка: Tantivy, слой Б и отпечатки текста — из БД, в фоне. До коммита поиск\nчитает старый индекс целиком. Ход — в `operation` у `GET /admin/books/index`.",
+        "operationId": "rebuild_books_index",
+        "responses": {
+          "202": {
+            "description": "Перестройка запущена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже идёт другая операция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Книжный поиск выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/books/ranks": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Ручной порядок книг по местам.",
+        "operationId": "list_book_ranks",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Книги по местам",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_BookRank"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Заменить ручной порядок книг целиком. Действует сразу (слой Б в RAM), другие реплики\nподхватывают правку в течение минуты.",
+        "operationId": "put_book_ranks",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutBookRanks"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Список заменён"
+          },
+          "400": {
+            "description": "Место вне 1..65535, повтор slug'а или места",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Книги с таким slug нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/books/sidecar": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Пересобрать слой Б книжного поиска (фасеты, сортировки, места) из БД — в фоне.",
+        "operationId": "reload_books_sidecar",
+        "responses": {
+          "202": {
+            "description": "Пересборка запущена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже идёт другая операция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Книжный поиск выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/entities": {
       "get": {
         "tags": [
@@ -3007,6 +3782,480 @@
           },
           "409": {
             "description": "Уже идёт перестройка поиска или операция TMDB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/scripts": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "operationId": "list_admin_scripts",
+        "responses": {
+          "200": {
+            "description": "Скрипты: описание, команда для терминала, флаги",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Script"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/scripts/jobs": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "operationId": "list_admin_script_jobs",
+        "responses": {
+          "200": {
+            "description": "Последние задачи этого процесса, новые первыми",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/JobInfo"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/scripts/jobs/{job}": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Задача и её лог (со строки `after`): опрашивать, пока `status = running`.",
+        "operationId": "get_admin_script_job",
+        "parameters": [
+          {
+            "name": "job",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Строки лога с этого номера (с 0) — для догрузки: `lines_total` прошлого ответа.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Задача и строки лога",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobLog"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой задачи (или сервер перезапущен)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/scripts/jobs/{job}/cancel": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "operationId": "cancel_admin_script_job",
+        "parameters": [
+          {
+            "name": "job",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Остановка запрошена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой идущей задачи",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/scripts/{id}/progress": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Прогресс: у чистки книг — `{total, classified, written, remaining, pending_write,\nexported_not_classified, last_batch, batches_written, updated_at}`.",
+        "operationId": "admin_script_progress",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Прогресс (как записал скрипт)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет скрипта или прогресса ещё нет",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/scripts/{id}/report": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Отчёт скрипта (у чистки книг — `apply_report.txt` сухого прогона), текст.",
+        "operationId": "admin_script_report",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Текст отчёта (хвост до 512 КБ)",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет скрипта, у него нет отчёта или отчёт ещё не создан",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/scripts/{id}/run": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Запустить скрипт в фоне. Одновременно — одна задача.",
+        "operationId": "run_admin_script",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id скрипта из реестра",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunScript"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Запущен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестный флаг или значение не подходит (field — флаг)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого скрипта",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже идёт другая задача",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Не задан SCRIPTS_PYTHON",
             "content": {
               "application/json": {
                 "schema": {
@@ -4610,6 +5859,16 @@
             }
           },
           {
+            "name": "book_form",
+            "in": "query",
+            "description": "Только книги: вид текста через запятую — `book`, `collection` (сборник), `article`\n(статья), `document` (журнал, газета, документ) или `all`. По умолчанию `book`: сборники,\nстатьи и документы в обычной выдаче не показываются. Неизвестное значение — 400. Работает\nв книжном поиске (как `has_cover`), в остальных случаях игнорируется.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "book,collection"
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "1–100, по умолчанию 20.",
@@ -5104,6 +6363,16 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "name": "book_form",
+            "in": "query",
+            "description": "Только книги: вид текста через запятую — `book`, `collection` (сборник), `article`\n(статья), `document` (журнал, газета, документ) или `all`. По умолчанию `book`: сборники,\nстатьи и документы в обычной выдаче не показываются. Неизвестное значение — 400. Работает\nв книжном поиске (как `has_cover`), в остальных случаях игнорируется.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "book,collection"
           },
           {
             "name": "limit",
@@ -6034,6 +7303,198 @@
         ],
         "description": "Сущность в админском списке: как в публичном, плюс флаг активности."
       },
+      "After": {
+        "type": "string",
+        "description": "Что сделать после успешного (код 0) выполнения.",
+        "enum": [
+          "books_reindex"
+        ]
+      },
+      "AiEffort": {
+        "type": "string",
+        "description": "Усилие рассуждения модели: `none` — без размышлений (дешевле всего), `low` — дёшево и\nбыстро (по умолчанию), `high` — тщательнее.",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "AiKind": {
+        "type": "string",
+        "description": "Протокол API провайдера.",
+        "enum": [
+          "anthropic",
+          "openai"
+        ]
+      },
+      "AiProvider": {
+        "type": "object",
+        "description": "Провайдер без ключей — то, что видит админка.",
+        "required": [
+          "slug",
+          "kind",
+          "model",
+          "keys_hint",
+          "keys_count",
+          "workers",
+          "per_request",
+          "effort",
+          "is_default"
+        ],
+        "properties": {
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Адрес API; `null` — адрес провайдера по умолчанию.",
+            "example": "https://api.deepseek.com"
+          },
+          "effort": {
+            "type": "string",
+            "description": "`low` | `medium` | `high`.",
+            "example": "low"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "keys_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "keys_hint": {
+            "type": "string",
+            "description": "Начало и конец первого ключа: `sk-…a1b2`.",
+            "example": "sk-…a1b2"
+          },
+          "kind": {
+            "type": "string",
+            "example": "openai"
+          },
+          "model": {
+            "type": "string",
+            "example": "deepseek-chat"
+          },
+          "per_request": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Записей в одном запросе (книг в пачке)."
+          },
+          "slug": {
+            "type": "string",
+            "example": "deepseek"
+          },
+          "workers": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Одновременных запросов."
+          }
+        }
+      },
+      "AiProviderInput": {
+        "type": "object",
+        "description": "Новый провайдер или замена полей (`None` — поле не меняется).",
+        "properties": {
+          "api_keys": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Ключи; несколько — запросы идут по очереди через все. Заменяют прежние целиком."
+          },
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Пустая строка — адрес по умолчанию."
+          },
+          "effort": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AiEffort",
+                "description": "Новый провайдер — `low`, если не задано."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "is_default": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AiKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "per_request": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1..=500."
+          },
+          "workers": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1..=64."
+          }
+        }
+      },
+      "AiTest": {
+        "type": "object",
+        "description": "Итог пробного запроса.",
+        "required": [
+          "ok",
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": "По ключу: `null` — ответил, иначе ошибка провайдера (без самого ключа)."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Все ключи ответили."
+          },
+          "reply": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Ответ модели на первом рабочем ключе."
+          }
+        }
+      },
       "AnalysisPoint": {
         "type": "object",
         "required": [
@@ -6933,6 +8394,132 @@
         },
         "additionalProperties": false
       },
+      "BookRank": {
+        "type": "object",
+        "description": "Книга с ручным местом.",
+        "required": [
+          "slug",
+          "title",
+          "rank"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1..=65535: 1 — первое место.",
+            "example": 1
+          },
+          "slug": {
+            "type": "string",
+            "example": "master-i-margarita"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "BookRankItem": {
+        "type": "object",
+        "required": [
+          "slug",
+          "rank"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1..=65535."
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "BooksIndexStatus": {
+        "type": "object",
+        "description": "Книжный индекс целиком: `GET /admin/books/index`.",
+        "required": [
+          "db_books",
+          "db_ords",
+          "text",
+          "sidecar"
+        ],
+        "properties": {
+          "db_books": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Видимых книг в БД — столько должно быть в индексе."
+          },
+          "db_ords": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Выданных номеров книг (`catalog_book_ords`)."
+          },
+          "last_index_build": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BuildStatus",
+                "description": "Последние сборки в этом процессе (после рестарта — `null`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_sidecar_build": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BuildStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "operation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IndexOperation",
+                "description": "Текущая или последняя операция админки."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sidecar": {
+            "$ref": "#/components/schemas/SidecarStatus"
+          },
+          "text": {
+            "$ref": "#/components/schemas/TextIndexStatus"
+          }
+        }
+      },
+      "BuildStatus": {
+        "type": "object",
+        "description": "Сборка в этом процессе.",
+        "required": [
+          "at",
+          "took_ms",
+          "books"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "books": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "took_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "ButtonStyle": {
         "type": "string",
         "enum": [
@@ -6993,6 +8580,26 @@
             "format": "int64"
           }
         }
+      },
+      "CreateAiProvider": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AiProviderInput"
+          },
+          {
+            "type": "object",
+            "required": [
+              "slug"
+            ],
+            "properties": {
+              "slug": {
+                "type": "string",
+                "example": "deepseek"
+              }
+            }
+          }
+        ],
+        "description": "Новый провайдер."
       },
       "CreateAward": {
         "type": "object",
@@ -8223,6 +9830,168 @@
           }
         }
       },
+      "FacetGroupStatus": {
+        "type": "object",
+        "description": "Один вид фасетов слоя Б.",
+        "required": [
+          "kind",
+          "values",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Битмапы в сжатом виде, байты.",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "description": "Префикс ключа: `tag`, `person`, `role`, `pub`, `lang`, `form`, `year`.",
+            "example": "tag"
+          },
+          "values": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько разных значений.",
+            "minimum": 0
+          }
+        }
+      },
+      "Flag": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/FlagKind"
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "description"
+            ],
+            "properties": {
+              "default": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Значение скрипта по умолчанию (подсказка в форме); `null` — не задано."
+              },
+              "description": {
+                "type": "string",
+                "description": "Что делает флаг."
+              },
+              "name": {
+                "type": "string",
+                "description": "Имя без `--`: `limit`.",
+                "example": "limit"
+              }
+            }
+          }
+        ],
+        "description": "Флаг скрипта."
+      },
+      "FlagKind": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Флаг без значения: `--yes`.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "bool"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Целое `min..=max`.",
+            "required": [
+              "min",
+              "max",
+              "type"
+            ],
+            "properties": {
+              "max": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "min": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "int"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Одно из значений.",
+            "required": [
+              "options",
+              "type"
+            ],
+            "properties": {
+              "options": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "choice"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Провайдер ИИ из `catalog_ai_providers` (slug) — в форме выбор из списка.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "ai_provider"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Строка по шаблону (regex, как в `pattern` HTML-поля).",
+            "required": [
+              "pattern",
+              "type"
+            ],
+            "properties": {
+              "pattern": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Тип значения флага."
+      },
       "Fragment": {
         "type": "object",
         "description": "Деталь полотна со своим кропом.",
@@ -8402,6 +10171,100 @@
         },
         "additionalProperties": false
       },
+      "IndexFieldUsage": {
+        "type": "object",
+        "description": "Место одного поля Tantivy на диске, байты (сумма по сегментам).",
+        "required": [
+          "field",
+          "total",
+          "termdict",
+          "postings",
+          "positions",
+          "fast",
+          "fieldnorms"
+        ],
+        "properties": {
+          "fast": {
+            "type": "integer",
+            "format": "int64",
+            "description": "FAST-колонки.",
+            "minimum": 0
+          },
+          "field": {
+            "type": "string",
+            "example": "title"
+          },
+          "fieldnorms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Нормы длины поля.",
+            "minimum": 0
+          },
+          "positions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Позиции слов (поиск фраз).",
+            "minimum": 0
+          },
+          "postings": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Списки документов по термам.",
+            "minimum": 0
+          },
+          "termdict": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Словарь термов.",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "IndexOperation": {
+        "type": "object",
+        "description": "Операция админки над индексом.",
+        "required": [
+          "op",
+          "started_at"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "`null` — ещё идёт."
+          },
+          "ok": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`null` — ещё идёт."
+          },
+          "op": {
+            "type": "string",
+            "description": "`rebuild`, `sidecar`, `merge`.",
+            "example": "rebuild"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "IndexResult": {
         "type": "object",
         "required": [
@@ -8518,6 +10381,102 @@
           }
         ],
         "description": "Событие потока."
+      },
+      "JobInfo": {
+        "type": "object",
+        "description": "Задача без лога.",
+        "required": [
+          "id",
+          "script",
+          "args",
+          "status",
+          "started_at",
+          "lines_total"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Аргументы, как в терминале: `--limit 5000 --yes`."
+          },
+          "exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "lines_total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего строк лога с начала (включая отброшенные из памяти).",
+            "minimum": 0
+          },
+          "script": {
+            "type": "string",
+            "example": "books-llm"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          }
+        }
+      },
+      "JobLog": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/JobInfo"
+          },
+          {
+            "type": "object",
+            "required": [
+              "from",
+              "lines"
+            ],
+            "properties": {
+              "from": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Номер первой строки в `lines` (строки до него уже отброшены или не запрошены).",
+                "minimum": 0
+              },
+              "lines": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ],
+        "description": "Задача и строки лога с номера `from`."
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "running",
+          "succeeded",
+          "failed",
+          "stopped",
+          "cancelled"
+        ]
       },
       "LibgenFile": {
         "type": "object",
@@ -9252,6 +11211,61 @@
                 "updated_at": {
                   "type": "string",
                   "format": "date-time"
+                }
+              }
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
+      "Page_BookRank": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Книга с ручным местом.",
+              "required": [
+                "slug",
+                "title",
+                "rank"
+              ],
+              "properties": {
+                "rank": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "1..=65535: 1 — первое место.",
+                  "example": 1
+                },
+                "slug": {
+                  "type": "string",
+                  "example": "master-i-margarita"
+                },
+                "title": {
+                  "type": "string"
                 }
               }
             }
@@ -10134,6 +12148,22 @@
           }
         }
       },
+      "PutBookRanks": {
+        "type": "object",
+        "description": "Новый ручной список целиком (прежний удаляется).",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BookRankItem"
+            },
+            "description": "До 65 535 книг; slug'и и места не повторяются. Пустой — ручного порядка нет."
+          }
+        }
+      },
       "PutNominations": {
         "type": "object",
         "description": "Церемония целиком: прежние номинации заменяются этими.",
@@ -10414,6 +12444,79 @@
           "soon",
           "announced"
         ]
+      },
+      "RunScript": {
+        "type": "object",
+        "description": "Значения флагов: `{\"limit\": 5000, \"yes\": true, \"ai\": \"deepseek\"}`. `null`, `\"\"`, `false` —\nфлаг не передаётся.",
+        "properties": {
+          "flags": {
+            "type": "object",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Script": {
+        "type": "object",
+        "description": "Скрипт реестра.",
+        "required": [
+          "id",
+          "group",
+          "title",
+          "description",
+          "command",
+          "flags",
+          "has_report",
+          "has_progress"
+        ],
+        "properties": {
+          "after": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/After"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "command": {
+            "type": "string",
+            "description": "Команда для терминала — то же самое без админки."
+          },
+          "description": {
+            "type": "string",
+            "description": "Что делает, по шагам."
+          },
+          "flags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Flag"
+            }
+          },
+          "group": {
+            "type": "string",
+            "description": "Группа в меню.",
+            "example": "Книги"
+          },
+          "has_progress": {
+            "type": "boolean",
+            "description": "Есть прогресс (`GET /admin/scripts/{id}/progress`)."
+          },
+          "has_report": {
+            "type": "boolean",
+            "description": "Есть отчёт (`GET /admin/scripts/{id}/report`)."
+          },
+          "id": {
+            "type": "string",
+            "example": "books-llm"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
       },
       "SearchSort": {
         "type": "string",
@@ -10844,6 +12947,92 @@
         },
         "additionalProperties": false
       },
+      "SidecarStatus": {
+        "type": "object",
+        "description": "Слой Б — RAM (фасеты, сортировки, ручной порядок).",
+        "required": [
+          "generation",
+          "books",
+          "slots",
+          "with_cover",
+          "manual_ranks",
+          "forms",
+          "facets",
+          "meta_bytes",
+          "orders_bytes",
+          "facets_bytes",
+          "total_bytes"
+        ],
+        "properties": {
+          "books": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Видимые книги.",
+            "minimum": 0
+          },
+          "facets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FacetGroupStatus"
+            }
+          },
+          "facets_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "forms": {
+            "type": "object",
+            "description": "Книг по виду текста: `book`, `collection`, `article`, `document`.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "generation": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Растёт с каждой подменой слоя (ключ кэша выдачи).",
+            "minimum": 0
+          },
+          "manual_ranks": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "meta_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Оценка памяти: `SortMeta` (8 байт на книгу), готовые порядки, битмапы.",
+            "minimum": 0
+          },
+          "orders_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "slots": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Длина массивов по `ord` (с дырами от удалённых книг).",
+            "minimum": 0
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "with_cover": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "StatsResult": {
         "type": "object",
         "description": "Итог «обновить рейтинги».",
@@ -11214,6 +13403,93 @@
           "slug": {
             "type": "string",
             "example": "sci-fi"
+          }
+        }
+      },
+      "TextIndexStatus": {
+        "type": "object",
+        "description": "Слой А — Tantivy (текст и карточки).",
+        "required": [
+          "schema_version",
+          "docs",
+          "deleted_docs",
+          "segments",
+          "index_bytes",
+          "store_bytes",
+          "deletes_bytes",
+          "disk_bytes",
+          "sidecar_file_bytes",
+          "fields",
+          "cache_entries",
+          "cache_ranked"
+        ],
+        "properties": {
+          "cache_entries": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ответов в кэше выдачи и готовых рядов.",
+            "minimum": 0
+          },
+          "cache_ranked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "deleted_docs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Удалённые документы, ещё лежащие в сегментах (уйдут при слиянии `merge`).",
+            "minimum": 0
+          },
+          "deletes_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "disk_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Все файлы каталога индекса (с ещё не убранными старыми сегментами и `sidecar.bin`).",
+            "minimum": 0
+          },
+          "docs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IndexFieldUsage"
+            },
+            "description": "Поля по убыванию места."
+          },
+          "index_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всё, что занимает индекс по данным Tantivy.",
+            "minimum": 0
+          },
+          "schema_version": {
+            "type": "string",
+            "example": "books-4"
+          },
+          "segments": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "sidecar_file_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Снимок слоя Б на диске (`sidecar.bin`).",
+            "minimum": 0
+          },
+          "store_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Хранилище документов (поле `card`; сжато целиком, по полям не делится).",
+            "minimum": 0
           }
         }
       },

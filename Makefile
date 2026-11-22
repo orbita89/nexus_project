@@ -13,7 +13,7 @@ COMPOSE = docker compose -f infra/docker-compose.yml
 # Контейнер с тулчейном (сервис tools) от пользователя хоста: Rust на машине не нужен.
 TOOLS = $(COMPOSE) run --rm --user $(shell id -u):$(shell id -g) tools
 
-.PHONY: up down logs run seed media fmt lint boundaries test test-fast test-one deny ci image http ci-docker test-docker shell bench-books
+.PHONY: up down logs run seed media fmt lint boundaries test test-fast test-one deny ci image http ci-docker test-docker shell bench-books books-llm ai
 
 up:          ## Поднять dev-окружение
 	$(COMPOSE) up -d --build
@@ -98,3 +98,21 @@ bench-books: ## Нагрузка на поиск книг (Tantivy), отчёт 
 	@$(COMPOSE) ps --status running --services | grep -qx app || { echo "Окружение не запущено — сначала: make up"; exit 1; }
 	@$(COMPOSE) exec -e RUST_LOG=error app cargo run -q $(if $(filter release,$(PROFILE)),--release) -p nexus -- books load \
 		$(if $(SECONDS),--seconds $(SECONDS)) $(if $(THREADS),--threads $(THREADS)) $(if $(LIMIT),--limit $(LIMIT)) $(ARGS)
+
+# Секрет ключей ИИ — из infra/.env (только эта строка), иначе dev-значение как в docker-compose.
+AI_ENV = env $$(grep -sE '^AI_SECRET_KEY=' $(CURDIR)/infra/.env)
+NEXUS = $(COMPOSE) exec -e RUST_LOG=error app cargo run -q -p nexus --
+
+books-llm:   ## Чистка книг ИИ одной командой: make books-llm [LIMIT=5000] [ORDER=newest] [AI=slug] [YES=1] [REINDEX=1]
+	@$(COMPOSE) ps --status running --services | grep -qx app || { echo "Окружение не запущено — сначала: make up"; exit 1; }
+	@cd scripts/catalog-import && $(AI_ENV) .venv/bin/python books_llm.py run \
+		$(if $(LIMIT),--limit $(LIMIT)) $(if $(ORDER),--order $(ORDER)) $(if $(AI),--ai $(AI)) $(if $(YES),--yes) $(ARGS); \
+	code=$$?; cd ../..; \
+	if [ $$code -eq 3 ]; then exit 0; fi; [ $$code -eq 0 ] || exit $$code; \
+	if [ -z "$(REINDEX)" ]; then echo "поиск не перестроен (REINDEX=1 — перестроить)"; exit 0; fi; \
+	echo "== 5. книжный индекс и ручной порядок"; \
+	$(NEXUS) books index && \
+	$(NEXUS) books ranks knigi_10_000_progress.txt --unmatched knigi_ne_naideny.txt
+
+ai:          ## Провайдеры ИИ: make ai CMD="list" | CMD="add deepseek --kind openai --url https://api.deepseek.com --model deepseek-chat --keys sk-.." | CMD="test deepseek"
+	$(NEXUS) ai $(or $(CMD),list)

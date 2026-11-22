@@ -6,9 +6,14 @@
 //! `nexus books cassandra DIR` — книги библиотеки Cassandra (`catalog::books::cassandra`).
 //! `nexus books index` — перестроить книжный индекс Tantivy из БД (`catalog::books::sync`);
 //! `nexus books search QUERY` — запрос к нему из терминала.
+//! `nexus books ranks FILE` — ручной порядок книг из списка `Название — Автор` (место — номер
+//! строки) в `catalog_manual_ranks`; `nexus books sidecar` — пересобрать слой Б (фасеты и
+//! сортировки в RAM) и его снимок без записи в Tantivy.
+//! `nexus ai list|add|set|test|rm` — провайдеры ИИ (`catalog::ai`), ключи шифруются в БД.
 //! `nexus search reindex` — перестроить индексы Meilisearch (как `POST /admin/search/reindex`);
 //! `nexus search bench [ROUNDS]` — замер поиска: книги (Tantivy) против фильмов (Meilisearch).
 
+mod ai_cli;
 mod bench;
 mod books_load;
 
@@ -50,6 +55,10 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if args.first().map(String::as_str) == Some("ai") {
+        return ai_cli::run(&state, &args[1..]).await;
+    }
+
     if args.first().map(String::as_str) == Some("books") {
         match books_command(&args[1..]).map_err(anyhow::Error::msg)? {
             BooksCommand::Import(options) => run_books(&state, &options).await?,
@@ -62,6 +71,16 @@ async fn main() -> anyhow::Result<()> {
                 println!("books indexed: {books} in {:.1?}", started.elapsed());
             }
             BooksCommand::Search(query) => run_books_search(&state, query)?,
+            BooksCommand::Ranks(path, unmatched) => {
+                run_books_ranks(&state, &path, unmatched.as_deref()).await?
+            }
+            BooksCommand::Sidecar => {
+                let started = std::time::Instant::now();
+                let books = catalog::books::sync::reload_sidecar(&state)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("books sidecar: {books} books in {:.1?}", started.elapsed());
+            }
             BooksCommand::Load(options) => {
                 let dir = state
                     .config
@@ -226,6 +245,8 @@ const BOOKS_USAGE: &str = "usage: nexus books import --dump FILE.sql[.gz] [--tab
      nexus books cassandra DIR [--batch-size N] [--limit N]\n       \
      nexus books index\n       \
      nexus books search QUERY\n       \
+     nexus books ranks FILE [--unmatched OUT]\n       \
+     nexus books sidecar\n       \
      nexus books load [--seconds N] [--threads 1,4,16] [--limit N]";
 
 enum BooksCommand {
@@ -239,6 +260,10 @@ enum BooksCommand {
     Index,
     /// Запрос к книжному индексу из терминала: проверить выдачу и время без HTTP.
     Search(String),
+    /// Ручной порядок книг из файла списка; второй путь — куда записать строки без места.
+    Ranks(std::path::PathBuf, Option<std::path::PathBuf>),
+    /// Пересобрать слой Б из БД.
+    Sidecar,
 }
 
 /// Аргументы `nexus books ...`.
@@ -252,6 +277,15 @@ fn books_command(args: &[String]) -> Result<BooksCommand, String> {
     }
     if let ["search", query] = &args[..] {
         return Ok(BooksCommand::Search((*query).to_string()));
+    }
+    if let ["ranks", file] = &args[..] {
+        return Ok(BooksCommand::Ranks(file.into(), None));
+    }
+    if let ["ranks", file, "--unmatched", out] = &args[..] {
+        return Ok(BooksCommand::Ranks(file.into(), Some(out.into())));
+    }
+    if args == ["sidecar"] {
+        return Ok(BooksCommand::Sidecar);
     }
     if let ["cassandra", dir, rest @ ..] = &args[..] {
         let mut options = catalog::books::cassandra::Options::new(dir.into());
@@ -294,6 +328,53 @@ fn books_command(args: &[String]) -> Result<BooksCommand, String> {
     }
     options.dump = dump.ok_or(BOOKS_USAGE)?;
     Ok(BooksCommand::Import(options))
+}
+
+/// `nexus books ranks FILE`: список в `catalog_manual_ranks` и отчёт — сколько строк нашлось,
+/// чего нет в каталоге и где автор не совпал (по 20 примеров).
+async fn run_books_ranks(
+    state: &AppState,
+    path: &std::path::Path,
+    unmatched: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let (lines, matched) = catalog::books::ranks::import(state, path)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "lines: {lines}; ranked: {}; not in catalog: {}; other author: {}; repeated: {}; beyond 65535: {}",
+        matched.ranks.len(),
+        matched.not_found.len(),
+        matched.other_author.len(),
+        matched.repeated.len(),
+        matched.beyond,
+    );
+    for (label, list) in [
+        ("not in catalog", &matched.not_found),
+        ("other author", &matched.other_author),
+    ] {
+        for line in list.iter().take(20) {
+            println!("  {label}: {line}");
+        }
+    }
+    if let Some(out) = unmatched {
+        // Строки без места целиком, по разделам: чего нет в каталоге, где автор другой, повторы.
+        let mut text = String::new();
+        for (title, list) in [
+            ("НЕТ В КАТАЛОГЕ", &matched.not_found),
+            ("НАЗВАНИЕ ЕСТЬ, АВТОР ДРУГОЙ", &matched.other_author),
+            ("ПОВТОР (книга уже получила место выше)", &matched.repeated),
+        ] {
+            text.push_str(&format!("# {title}: {}\n", list.len()));
+            for line in list {
+                text.push_str(line);
+                text.push('\n');
+            }
+            text.push('\n');
+        }
+        std::fs::write(out, text)?;
+        println!("unmatched lines written to {}", out.display());
+    }
+    Ok(())
 }
 
 /// `nexus books search QUERY`: первые 10 книг по запросу, всего найдено и время — холодный

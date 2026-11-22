@@ -28,6 +28,10 @@ futures-util = { workspace = true }
 flate2 = { workspace = true }
 # Холодный архив: индекс Tantivy и TSV-дамп (catalog::archive).
 tantivy = { workspace = true }
+# Слой Б книжного поиска: фасеты (RoaringBitmap) и подмена состояния (ArcSwap).
+roaring = { workspace = true }
+regex = { workspace = true }
+arc-swap = { workspace = true }
 csv = { workspace = true }
 # Возврат из архива: лимит авто-возвратов в час и slug людей из имени (NFKD).
 governor = { workspace = true }

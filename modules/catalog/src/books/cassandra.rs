@@ -416,6 +416,8 @@ pub async fn import(state: &AppState, options: &Options) -> Result<Report, BoxEr
         tracing::warn!("BOOK_COVERS_DIR is not set: books are imported without covers");
     }
     let genre_tags = ensure_genres(state).await?;
+    // Книги в архиве книг (`books::archive`) обратно не импортируются.
+    let archived = super::archive::archived_cassandra_ids(state)?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(u64, u64, Vec<Book>), String>>(2);
     let batch_size = options.batch_size.max(1);
@@ -475,6 +477,7 @@ pub async fn import(state: &AppState, options: &Options) -> Result<Report, BoxEr
             state,
             batch,
             &genre_tags,
+            &archived,
             &mut people,
             &covers_from,
             covers_to.as_deref(),
@@ -631,6 +634,7 @@ async fn write_batch(
     state: &AppState,
     batch: Vec<Book>,
     genre_tags: &HashMap<&'static str, Uuid>,
+    archived: &HashSet<i64>,
     people: &mut HashMap<String, Uuid>,
     covers_from: &Path,
     covers_to: Option<&Path>,
@@ -654,7 +658,11 @@ async fn write_batch(
     let total = batch.len();
     let books: Vec<Book> = batch
         .into_iter()
-        .filter(|b| !known.contains(&b.cassandra_id) && seen.insert(b.cassandra_id))
+        .filter(|b| {
+            !known.contains(&b.cassandra_id)
+                && !archived.contains(&b.cassandra_id)
+                && seen.insert(b.cassandra_id)
+        })
         .collect();
     report.known += (total - books.len()) as u64;
     if books.is_empty() {

@@ -19,6 +19,16 @@ RUN cargo install cargo-watch cargo-deny --locked --root /usr/local
 # и при нескольких контейнерах на одном томе это приводит к "mkdir ...: file exists".
 ENV CARGO_HOME=/cargo-cache
 
+# Python для скриптов админки (catalog::scripts, /admin/scripts): отдельный venv вне /app с
+# зависимостями scripts/catalog-import. Новая зависимость в requirements.txt — пересобрать образ
+# (docker compose build app).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/catalog-import/requirements.txt /tmp/requirements.txt
+RUN python3 -m venv /opt/pyenv && /opt/pyenv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+ENV SCRIPTS_PYTHON=/opt/pyenv/bin/python
+
 # Сборка — в /target, а не в /app/target: том поверх /app/target заставлял Docker создавать
 # в проекте на хосте пустую папку target/ от root, и локальный cargo не мог в неё писать.
 ENV CARGO_TARGET_DIR=/target
