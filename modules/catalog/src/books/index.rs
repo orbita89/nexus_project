@@ -298,6 +298,12 @@ pub struct BookQuery {
     pub forms: Vec<BookForm>,
 }
 
+/// Часть размера сегмента по полям и куда её прибавить в [`FieldBytes`].
+type FieldPart<'a> = (
+    &'a tantivy::space_usage::PerFieldSpaceUsage,
+    fn(&mut FieldBytes) -> &mut u64,
+);
+
 /// Место одного поля индекса на диске (сумма по сегментам), байты.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FieldBytes {
@@ -968,10 +974,7 @@ impl BookIndex {
         let mut store = 0u64;
         let mut deletes = 0u64;
         for segment in usage.segments() {
-            let parts: [(
-                &tantivy::space_usage::PerFieldSpaceUsage,
-                fn(&mut FieldBytes) -> &mut u64,
-            ); 5] = [
+            let parts: [FieldPart; 5] = [
                 (segment.termdict(), |f| &mut f.termdict),
                 (segment.postings(), |f| &mut f.postings),
                 (segment.positions(), |f| &mut f.positions),

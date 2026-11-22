@@ -26,13 +26,13 @@
 | `avatar_id` | `uuid` | | Загруженный файл: им же называется файл на диске. `NULL` — фото не загружали. Миграция `20261117100000_auth_profile_bio_avatar.sql` |
 | `bio` | `text` | CHECK ≤ 1000 символов | «О себе» в профиле. Та же миграция |
 | `stats_public` | `boolean` | NOT NULL, default `false` | Видна ли аналитика профиля (оценки, «просмотрено», «посмотрю позже») другим. Та же миграция |
-| `role` | `user_role` | NOT NULL, default `user` | `user`, `author`, `admin` |
+| `role` | `user_role` | NOT NULL, default `user` | `user`, `vip`, `author`, `admin` |
 | `is_active` | `boolean` | NOT NULL, default `true` | `false` — заблокирован админом |
 | `email_verified_at` | `timestamptz` | | Когда подтверждён email. `NULL` — вход по паролю запрещён |
 | `username_changed_at` | `timestamptz` | | Когда username меняли в последний раз (раз в 30 дней). `NULL` — не меняли |
 | `created_at`, `updated_at` | `timestamptz` | NOT NULL | `updated_at` — триггер |
 
-**`user_role`** — enum (`user`, `author`, `admin`). Порядок значений задаёт старшинство, в SQL
+**`user_role`** — enum (`user`, `vip`, `author`, `admin`; `vip` — миграция `20261213100000_auth_role_vip.sql`). Порядок значений задаёт старшинство, в SQL
 работает `role >= 'author'`.
 
 ### `avatar_uploads` ✅ — журнал загрузок фото профиля
@@ -333,10 +333,11 @@ API видно в PR. Обновить: `UPDATE_OPENAPI=1 cargo test -p nexus op
 |---|---|---|
 | гость | без токена | Читать каталог и форум |
 | `user` | любой зарегистрированный | + отзывы и оценки, коллекции, **ответы в темах форума** |
+| `vip` | назначает админ единицам (бесплатно) | как `user` + **читать закрытые книги** (`GET /catalog/books/{slug}/epub`) |
 | `author` | назначает админ | + **создавать форумы и темы** |
 | `admin` | назначает админ | + админские эндпоинты (`/api/v1/<модуль>/admin/...`) |
 
-Роли упорядочены: `user < author < admin`. Новый пользователь всегда получает `user`.
+Роли упорядочены: `user < vip < author < admin`. Чтение книг — исключение из старшинства: только `vip` и `admin` (`Role::can_read_books`). Новый пользователь всегда получает `user`.
 
 ### Как проверять права в коде
 

@@ -16,6 +16,7 @@ pub mod dump;
 pub mod genres;
 pub mod index;
 pub mod ranks;
+pub mod reader;
 pub mod search;
 pub mod sidecar;
 pub mod sync;

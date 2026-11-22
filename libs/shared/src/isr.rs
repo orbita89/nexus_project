@@ -33,6 +33,8 @@ struct Inner {
     http: reqwest::Client,
     /// Полный адрес вебхука.
     url: String,
+    /// Адрес хода пересборки: `GET {ISR_URL}/_isr/status`.
+    status_url: String,
     secret: String,
 }
 
@@ -47,6 +49,7 @@ impl Isr {
             inner: Some(Arc::new(Inner {
                 http,
                 url: format!("{}/_isr/revalidate", base_url.trim_end_matches('/')),
+                status_url: format!("{}/_isr/status", base_url.trim_end_matches('/')),
                 secret: secret.to_string(),
             })),
         }
@@ -75,6 +78,33 @@ impl Isr {
         inner.post(&json!({ "all": true })).await
     }
 
+    /// Пересобрать в фоне статику одного раздела (`book`, `movie`, …) или всю (`None`):
+    /// `{"all": true, "kind": ...}`. `Ok(false)` — пересборка уже идёт, вторая не запущена.
+    pub async fn revalidate_kind(&self, kind: Option<&str>) -> Result<bool, IsrError> {
+        let inner = self.inner.as_ref().ok_or(IsrError::Disabled)?;
+        let body = match kind {
+            Some(kind) => json!({ "all": true, "kind": kind }),
+            None => json!({ "all": true }),
+        };
+        let reply = inner.post_json(&body).await?;
+        Ok(reply
+            .get("started")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
+    }
+
+    /// Ход последней пересборки: тело `GET /_isr/status` как есть (`{"run": {...} | null}`).
+    pub async fn status(&self) -> Result<serde_json::Value, IsrError> {
+        let inner = self.inner.as_ref().ok_or(IsrError::Disabled)?;
+        let response = inner
+            .http
+            .get(&inner.status_url)
+            .bearer_auth(&inner.secret)
+            .send()
+            .await?;
+        Inner::json_reply(response).await
+    }
+
     /// Пересобрать страницы `paths` (`/films/dune-2021`). Пачками по [`PATHS_PER_REQUEST`];
     /// первая же ошибка прерывает отправку. Пустой список — без запросов.
     pub async fn revalidate(&self, paths: &[String]) -> Result<(), IsrError> {
@@ -87,6 +117,31 @@ impl Isr {
 }
 
 impl Inner {
+    async fn post_json(&self, body: &serde_json::Value) -> Result<serde_json::Value, IsrError> {
+        let response = self
+            .http
+            .post(&self.url)
+            .bearer_auth(&self.secret)
+            .json(body)
+            .send()
+            .await?;
+        Self::json_reply(response).await
+    }
+
+    async fn json_reply(response: reqwest::Response) -> Result<serde_json::Value, IsrError> {
+        let status = response.status();
+        if status.is_success() {
+            // Пустое или не JSON-тело (старый фронтенд) — null: успех статусом, без подробностей.
+            let text = response.text().await?;
+            return Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null));
+        }
+        let body = response.text().await.unwrap_or_default();
+        Err(IsrError::Status {
+            status: status.as_u16(),
+            body: body.chars().take(500).collect(),
+        })
+    }
+
     async fn post(&self, body: &serde_json::Value) -> Result<(), IsrError> {
         let response = self
             .http

@@ -34,10 +34,21 @@ pub const ACCESS_TOKEN_TTL_SECS: i64 = 15 * 60;
 pub enum Role {
     /// Отзывы, оценки, коллекции, ответы в темах форума.
     User,
+    /// Как `user`, плюс чтение закрытых книг (`GET /catalog/books/{slug}/epub`). Выдаёт админ
+    /// единицам (`PATCH /auth/admin/users/{id}/role`). Читать книги может только `vip` и `admin`:
+    /// `author` по старшинству выше, но чтение ему не открывается (проверка — [`Role::can_read_books`]).
+    Vip,
     /// Плюс создание форумов и тем.
     Author,
     /// Плюс админские эндпоинты.
     Admin,
+}
+
+impl Role {
+    /// Доступ к закрытым книгам: только `vip` и `admin` (не по старшинству).
+    pub fn can_read_books(self) -> bool {
+        matches!(self, Role::Vip | Role::Admin)
+    }
 }
 
 /// Содержимое access-токена.
@@ -186,6 +197,8 @@ mod tests {
 
     #[test]
     fn roles_are_ordered_by_privilege() {
+        assert!(Role::User < Role::Vip);
+        assert!(Role::Vip < Role::Author);
         assert!(Role::User < Role::Author);
         assert!(Role::Author < Role::Admin);
     }
@@ -224,6 +237,14 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(jwt().verify(&token), Err(AppError::Unauthorized)));
+    }
+
+    #[test]
+    fn only_vip_and_admin_read_books() {
+        assert!(Role::Vip.can_read_books());
+        assert!(Role::Admin.can_read_books());
+        assert!(!Role::User.can_read_books());
+        assert!(!Role::Author.can_read_books());
     }
 
     #[test]

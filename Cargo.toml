@@ -73,14 +73,14 @@ lettre = { version = "0.11", default-features = false, features = [
 ] }
 http-body-util = "0.1"
 # OAuth: обмен кода на токен и запрос профиля у провайдера. rustls на ring, как у lettre.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 base64 = "0.22"
 # Трейты-справочники в shared::directory: async fn в dyn-трейтах пока нестабильны.
 async-trait = "0.1"
 # Кэш карточек каталога (shared::cache): L1 в памяти процесса, L2 в Redis, фоновые записи.
 moka = { version = "0.12", features = ["future"] }
 deadpool-redis = "0.23"
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
 # Моки трейтов в тестах (shared::cache::MockL2Store, источник карточек каталога).
 mockall = "0.15"
 # WebSocket-клиент для тестов realtime (те же версии, что у axum).
@@ -89,6 +89,9 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # Распаковка ежедневного дампа TMDB (`movie_ids_*.json.gz`) в catalog.
 flate2 = "1"
 # Холодный архив каталога (catalog::archive): индекс через mmap, без zstd (C-зависимость).
+# Читалка книг: извлечение EPUB из архивов .arx (Jubako, zstd).
+libarx = { version = "0.4.2", default-features = false, features = ["zstd"] }
+relative-path = "2"
 tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "stemmer"] }
 # Слой Б книжного поиска (catalog::books::sidecar): фасеты на битовых масках и атомарная подмена
 # состояния в RAM без блокировок читателей.

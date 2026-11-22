@@ -8,6 +8,7 @@
 //! справочники `shared::directory` (`AppState::entities`, `AppState::users`), см. `refs`.
 
 pub mod admin;
+pub mod annotations;
 pub mod attachments;
 pub mod chat;
 pub mod collection_comments;
@@ -94,6 +95,9 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(marks::list_own))
         .routes(routes!(notes::get_own, notes::put_own, notes::delete_own))
         .routes(routes!(notes::list_own))
+        .routes(routes!(annotations::list_book, annotations::create))
+        .routes(routes!(annotations::update, annotations::delete))
+        .routes(routes!(annotations::list_own))
         .routes(routes!(
             notes::get_own_person,
             notes::put_own_person,

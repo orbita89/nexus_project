@@ -26,6 +26,7 @@ pub mod seasons;
 pub mod studios;
 pub mod tags;
 pub mod tmdb;
+pub mod tutor;
 mod validate;
 
 use shared::AppState;
@@ -105,15 +106,29 @@ pub fn router() -> OpenApiRouter<AppState> {
             admin::awards::create_nomination
         ))
         .routes(routes!(admin::awards::delete_nomination))
+        .routes(routes!(books::reader::epub))
         .routes(routes!(admin::books::list, admin::books::put))
         .routes(routes!(admin::books::reload_sidecar))
         .routes(routes!(admin::books::index_status))
         .routes(routes!(admin::books::rebuild_index))
         .routes(routes!(admin::books::merge_index))
         .routes(routes!(admin::books::clear_cache))
+        .routes(routes!(admin::static_pages::regenerate))
+        .routes(routes!(admin::static_pages::regenerate_pages))
+        .routes(routes!(admin::static_pages::status))
+        .routes(routes!(tutor::providers::list, tutor::providers::create))
+        .routes(routes!(tutor::providers::update, tutor::providers::delete))
+        .routes(routes!(tutor::providers::test))
+        .routes(routes!(tutor::threads::list_book, tutor::threads::create))
+        .routes(routes!(tutor::threads::list_own))
+        .routes(routes!(tutor::threads::get, tutor::threads::delete))
+        .routes(routes!(tutor::threads::send))
         .routes(routes!(admin::ai::list, admin::ai::create))
         .routes(routes!(admin::ai::update, admin::ai::delete))
         .routes(routes!(admin::ai::test))
+        .routes(routes!(admin::prompts::list))
+        .routes(routes!(admin::prompts::put, admin::prompts::delete))
+        .routes(routes!(admin::prompts::preview))
         .routes(routes!(admin::scripts::list))
         .routes(routes!(admin::scripts::run))
         .routes(routes!(admin::scripts::report))

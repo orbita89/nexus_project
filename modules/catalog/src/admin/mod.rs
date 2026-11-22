@@ -10,8 +10,10 @@ pub mod entities;
 pub mod episodes;
 pub mod fragments;
 pub mod people;
+pub mod prompts;
 pub mod relations;
 pub mod scripts;
+pub mod static_pages;
 pub mod tags;
 
 use uuid::Uuid;

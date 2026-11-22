@@ -68,6 +68,9 @@ services:
     # files.tmdb.org заглушкой 127.0.0.1, и «Обновить рейтинги» не скачивает дамп TMDB. Имена
     # сервисов (postgres, redis, …) по-прежнему резолвит встроенный DNS Docker.
     dns: [1.1.1.1, 8.8.8.8]
+    # Сервер фронтенда (ISR_URL) запущен на хосте.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ..:/app
       - cargo-registry:/cargo-cache
@@ -76,6 +79,9 @@ services:
       # Холодный архив каталога (Tantivy) и дампы `nexus archive`: вне /app, иначе cargo watch
       # перезапускал бы приложение на каждую запись индекса.
       - archivedata:/var/lib/nexus
+      # Архивы книг Cassandra (.arx) для читалки — только чтение. На сервере — HDD,
+      # путь задаёт BOOKS_ARCHIVES_HOST.
+      - ${BOOKS_ARCHIVES_HOST:-/home/dev/cassandra.books/data/archives}:/srv/book-archives:ro
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@postgres:5432/${POSTGRES_DB:-nexus_db}
       REDIS_URL: redis://redis:6379
@@ -93,6 +99,10 @@ services:
       # Обложки книг библиотеки Cassandra: сюда их копирует `nexus books cassandra`, раздаёт
       # gateway по /covers/books/ (тот же том смонтирован в nginx только для чтения).
       BOOK_COVERS_DIR: /var/lib/nexus/book-covers
+      # Читалка: архивы .arx (GET /catalog/books/{slug}/epub) и кэш извлечённых EPUB.
+      BOOKS_ARCHIVES_DIR: /srv/book-archives
+      BOOKS_EPUB_CACHE_DIR: /var/lib/nexus/epub-cache
+      BOOKS_EPUB_CACHE_MB: ${BOOKS_EPUB_CACHE_MB:-2048}
       # Вложения чата: тот же том, что у архива — вне /app, иначе cargo watch перезапускал бы
       # приложение на каждую загруженную картинку.
       ATTACHMENTS_DIR: /var/lib/nexus/attachments
@@ -108,9 +118,10 @@ services:
       # Фронтенд: из него строятся ссылки в письмах.
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost}
       # Ревалидация статики фронтенда после правок в админке: POST {ISR_URL}/_isr/revalidate.
-      # Пусто — шаг пропускается. Адрес — как его видит контейнер (dev-сервер на хосте:5173).
-      ISR_URL: ${ISR_URL:-}
-      ISR_SECRET: ${ISR_SECRET:-}
+      # Сервер фронтенда (nexus_web, `pnpm dev` = сборка + node server/index.js) — на хосте :3000.
+      # Секрет — тот же, что ISR_SECRET у nexus_web. Пусто — шаг пропускается.
+      ISR_URL: ${ISR_URL:-http://host.docker.internal:3000}
+      ISR_SECRET: ${ISR_SECRET:-nexus-dev-isr-secret}
       # Публичный адрес API: из него строится redirect_uri для OAuth-провайдеров.
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost}
       # POST /api/v1/auth/dev/login — вход под любым пользователем. Только для dev, в проде false.
@@ -194,6 +205,13 @@ services:
       - coverscache:/var/cache/nginx/covers
       # Обложки книг библиотеки Cassandra (`/covers/books/...`): файлы из тома приложения.
       - archivedata:/var/lib/nexus:ro
+      # Фронтенд (nexus_web рядом с этим репозиторием): nginx берёт из него build/ — готовые
+      # страницы и ассеты. Монтируем весь каталог, а не build/: сборка удаляет build/ и создаёт
+      # заново, и примонтированный build/ остался бы старым, удалённым.
+      - ${WEB_DIR:-../../nexus_web}:/srv/nexus-web:ro
+    # Сервер фронтенда запущен на хосте (`pnpm dev` в nexus_web, порт 3000).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - app
 

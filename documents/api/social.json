@@ -1693,6 +1693,280 @@
         ]
       }
     },
+    "/api/v1/social/annotations/{id}": {
+      "delete": {
+        "tags": [
+          "annotations"
+        ],
+        "summary": "Удалить свою пометку.",
+        "operationId": "delete_annotation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id пометки",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой своей пометки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "annotations"
+        ],
+        "summary": "Изменить цвет или заметку своей пометки.",
+        "operationId": "update_annotation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id пометки",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAnnotation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Annotation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный цвет или длина заметки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такой своей пометки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/social/books/{slug}/annotations": {
+      "get": {
+        "tags": [
+          "annotations"
+        ],
+        "summary": "Свои пометки в книге — по порядку в книге (доля прочитанного), затем по времени.",
+        "operationId": "list_book_annotations",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug книги",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "master-i-margarita"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Закладки и выделения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Annotation"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Книга не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "annotations"
+        ],
+        "summary": "Добавить закладку или выделение. Повторная закладка на то же место возвращает существующую.",
+        "operationId": "create_book_annotation",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug книги",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "master-i-margarita"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAnnotation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Создана (или такая закладка уже была)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Annotation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Книга не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Слишком много пометок в книге",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/chat/attachments": {
       "post": {
         "tags": [
@@ -8399,6 +8673,87 @@
         ]
       }
     },
+    "/api/v1/social/users/me/annotations": {
+      "get": {
+        "tags": [
+          "annotations"
+        ],
+        "summary": "Свои пометки во всех книгах, новые сверху: раздел профиля.",
+        "operationId": "list_own_annotations",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Только закладки или только выделения; по умолчанию — всё.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "bookmark",
+                "highlight"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница пометок с книгами",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AnnotationWithEntity"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный параметр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/social/users/me/chat-settings": {
       "get": {
         "tags": [
@@ -10101,6 +10456,99 @@
         },
         "additionalProperties": false
       },
+      "Annotation": {
+        "type": "object",
+        "description": "Закладка или выделение.",
+        "required": [
+          "id",
+          "kind",
+          "cfi",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "cfi": {
+            "type": "string",
+            "description": "EPUB CFI: точка (закладка) или диапазон (выделение)."
+          },
+          "chapter": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Цвет выделения 0–6; у закладки — `null`."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "fraction": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Доля прочитанного 0–1 в момент создания."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AnnotationKind"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Выделенный текст; у закладки — `null`."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AnnotationKind": {
+        "type": "string",
+        "enum": [
+          "bookmark",
+          "highlight"
+        ]
+      },
+      "AnnotationWithEntity": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Annotation"
+          },
+          {
+            "type": "object",
+            "required": [
+              "entity"
+            ],
+            "properties": {
+              "entity": {
+                "$ref": "#/components/schemas/EntityRef"
+              }
+            }
+          }
+        ],
+        "description": "Пометка в своём списке (профиль): то же плюс книга."
+      },
       "Attachment": {
         "type": "object",
         "description": "Вложение сообщения.",
@@ -11048,6 +11496,57 @@
             "format": "int64",
             "description": "Комментарии к рецензиям.",
             "example": 4
+          }
+        }
+      },
+      "CreateAnnotation": {
+        "type": "object",
+        "description": "Новая пометка.",
+        "required": [
+          "kind",
+          "cfi"
+        ],
+        "properties": {
+          "cfi": {
+            "type": "string",
+            "example": "epubcfi(/6/14!/4/2/1:0)"
+          },
+          "chapter": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "0–6, у выделения по умолчанию 0."
+          },
+          "fraction": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AnnotationKind"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обязателен у выделения."
           }
         }
       },
@@ -12004,6 +12503,56 @@
           }
         ],
         "description": "Страница своих заметок: форма элементов зависит от `kind`."
+      },
+      "Page_AnnotationWithEntity": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Annotation"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "entity"
+                  ],
+                  "properties": {
+                    "entity": {
+                      "$ref": "#/components/schemas/EntityRef"
+                    }
+                  }
+                }
+              ],
+              "description": "Пометка в своём списке (профиль): то же плюс книга."
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
       },
       "Page_Collection": {
         "type": "object",
@@ -14674,6 +15223,25 @@
           "new"
         ]
       },
+      "UpdateAnnotation": {
+        "type": "object",
+        "description": "Правка: цвет и заметка. `note: null` или пустая строка — убрать заметку; поле не передано —\nне менять.",
+        "properties": {
+          "color": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "UpdateChatMessage": {
         "type": "object",
         "required": [
@@ -15039,6 +15607,14 @@
     {
       "name": "marks",
       "description": "Личные отметки «Посмотреть позже» и «Просмотрено». Видит только сам пользователь"
+    },
+    {
+      "name": "annotations",
+      "description": "Закладки и выделения в читалке книг. Видит только сам пользователь"
+    },
+    {
+      "name": "ai-tutor",
+      "description": "ИИ-преподаватель: обсуждение книги с ИИ на своём ключе. Только свои обсуждения"
     },
     {
       "name": "forum",

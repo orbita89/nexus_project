@@ -436,3 +436,89 @@ fn rank_list_file_is_parsed_like_the_progress_list() {
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0].title, "Мастер и Маргарита");
 }
+
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn book_reader_serves_private_books_only_to_vip_and_admin(pool: PgPool) {
+    use axum::http::Method;
+    let library = library();
+    let mut config = library.config();
+    config.books_archives_dir = Some(library.0.join("archives").to_string_lossy().into_owned());
+    config.books_epub_cache_dir = library.0.join("epub-cache").to_string_lossy().into_owned();
+    let (state, _) = test_utils::state_with_config(pool.clone(), config);
+    cassandra::import(&state, &Options::new(library.0.clone()))
+        .await
+        .unwrap();
+    let slug = |with_file: bool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT slug FROM entities WHERE kind = 'book' AND (metadata ? 'file') = $1 LIMIT 1",
+            )
+            .bind(with_file)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (with_file, without_file) = (slug(true).await, slug(false).await);
+    let user = token(&state, "user@example.com", "user").await;
+    let author = token(&state, "author@example.com", "author").await;
+    let vip = token(&state, "vip@example.com", "vip").await;
+    let admin = token(&state, "admin@example.com", "admin").await;
+    let read = |slug: &str, token: Option<&str>| {
+        let app = nexus::build_app(state.clone());
+        let uri = format!("/api/v1/catalog/books/{slug}/epub");
+        let token = token.map(str::to_string);
+        async move {
+            test_utils::request(app, Method::GET, &uri, None, token.as_deref())
+                .await
+                .status
+        }
+    };
+
+    // Закрытая книга: гость — 401, user/author — 403.
+    assert_eq!(read(&with_file, None).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(read(&with_file, Some(&user)).await, StatusCode::FORBIDDEN);
+    assert_eq!(read(&with_file, Some(&author)).await, StatusCode::FORBIDDEN);
+    // vip/admin проходят проверку; архива `1-9.arx` в хранилище нет — 503.
+    assert_eq!(
+        read(&with_file, Some(&vip)).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        read(&with_file, Some(&admin)).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    // HEAD — только проверка доступа: архив не нужен, 200 vip и 403 user.
+    let head = |token: &str| {
+        let app = nexus::build_app(state.clone());
+        let uri = format!("/api/v1/catalog/books/{with_file}/epub");
+        let token = token.to_string();
+        async move {
+            test_utils::request(app, Method::HEAD, &uri, None, Some(&token))
+                .await
+                .status
+        }
+    };
+    assert_eq!(head(&vip).await, StatusCode::OK);
+    assert_eq!(head(&user).await, StatusCode::FORBIDDEN);
+    // Нет файла или нет книги — 404.
+    assert_eq!(read(&without_file, Some(&vip)).await, StatusCode::NOT_FOUND);
+    assert_eq!(
+        read("no-such-book", Some(&vip)).await,
+        StatusCode::NOT_FOUND
+    );
+
+    // Публичная книга открыта гостю.
+    sqlx::query(
+        "UPDATE entities SET metadata = metadata || '{\"public_read\": true}' WHERE slug = $1",
+    )
+    .bind(&with_file)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        read(&with_file, None).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}

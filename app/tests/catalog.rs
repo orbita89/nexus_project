@@ -2777,6 +2777,55 @@ async fn admin_writes_revalidate_static_pages(pool: PgPool) {
     );
 }
 
+/// Админка статики: пересборка раздела уходит во фронтенд `{"all": true, "kind": "book"}`;
+/// неизвестный раздел — 400, без ISR — 503.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn admin_regenerates_static_pages_by_kind(pool: PgPool) {
+    let mut ctx = Ctx::without_search(pool);
+
+    let (status, _) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/static/regenerate",
+            Some(json!({ "kind": "book" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    let isr = FakeIsr::start(StatusCode::ACCEPTED).await;
+    isr.attach(&mut ctx);
+
+    let (status, _) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/static/regenerate",
+            Some(json!({ "kind": "poem" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(isr.bodies().is_empty());
+
+    let (status, _) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/static/regenerate",
+            Some(json!({ "kind": "book" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(isr.bodies(), vec![json!({ "all": true, "kind": "book" })]);
+
+    let (status, _) = ctx
+        .admin_send(
+            Method::POST,
+            "/admin/static/pages",
+            Some(json!({ "paths": ["/books/dune-novel"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(isr.bodies()[1], json!({ "paths": ["/books/dune-novel"] }));
+}
+
 // ---------------------------------------------------------------- связанные произведения
 
 /// Слаги связанных произведений одного типа связи: `related` — общий список для карусели.

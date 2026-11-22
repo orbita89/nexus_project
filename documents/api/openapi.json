@@ -2132,6 +2132,7 @@
         "description": "Роль пользователя. Порядок вариантов задаёт старшинство: `User < Author < Admin`,\nтак что проверка «не ниже автора» — это `role >= Role::Author`.",
         "enum": [
           "user",
+          "vip",
           "author",
           "admin"
         ]

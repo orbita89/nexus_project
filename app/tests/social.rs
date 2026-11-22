@@ -1553,6 +1553,151 @@ async fn marks_errors(pool: PgPool) {
     .await;
 }
 
+// ---------------------------------------------------------------- пометки в читалке
+
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn book_annotations_are_private(pool: PgPool) {
+    let ctx = Ctx::new(pool);
+    let (alice, bob) = (ctx.user("alice").await, ctx.user("bob").await);
+
+    // Только книги: у фильма пометок не бывает.
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::GET,
+        "/books/dune-2021/annotations",
+        None,
+        Some(&alice),
+    )
+    .await;
+    // Без входа — 401.
+    ctx.expect(
+        StatusCode::UNAUTHORIZED,
+        Method::GET,
+        "/books/dune-novel/annotations",
+        None,
+        None,
+    )
+    .await;
+
+    let mark = json!({ "kind": "bookmark", "cfi": "epubcfi(/6/4!/4/2:0)", "chapter": "Глава 1", "fraction": 0.1 });
+    let bookmark = ctx
+        .expect(
+            StatusCode::CREATED,
+            Method::POST,
+            "/books/dune-novel/annotations",
+            Some(mark.clone()),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(bookmark["kind"], "bookmark");
+    assert!(bookmark["color"].is_null());
+    // Та же закладка ещё раз — та же запись.
+    let again = ctx
+        .expect(
+            StatusCode::CREATED,
+            Method::POST,
+            "/books/dune-novel/annotations",
+            Some(mark),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(again["id"], bookmark["id"]);
+
+    // Выделение без текста — 400, цвет вне 0–6 — 400.
+    ctx.expect(
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        "/books/dune-novel/annotations",
+        Some(json!({ "kind": "highlight", "cfi": "epubcfi(/6/4!/4/2,/1:0,/1:5)" })),
+        Some(&alice),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::BAD_REQUEST,
+        Method::POST,
+        "/books/dune-novel/annotations",
+        Some(json!({ "kind": "highlight", "cfi": "x", "text": "Пряность", "color": 7 })),
+        Some(&alice),
+    )
+    .await;
+
+    let highlight = ctx
+        .expect(
+            StatusCode::CREATED,
+            Method::POST,
+            "/books/dune-novel/annotations",
+            Some(json!({ "kind": "highlight", "cfi": "epubcfi(/6/4!/4/2,/1:0,/1:5)", "text": "Пряность", "color": 3, "note": "главное", "fraction": 0.05 })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(highlight["color"], 3);
+
+    // Список книги — по порядку в книге: выделение (0.05) раньше закладки (0.1).
+    let list = ctx
+        .get_ok("/books/dune-novel/annotations", Some(&alice))
+        .await;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    assert_eq!(list[0]["kind"], "highlight");
+    // Чужие пометки не видны.
+    let other = ctx
+        .get_ok("/books/dune-novel/annotations", Some(&bob))
+        .await;
+    assert_eq!(other.as_array().unwrap().len(), 0);
+
+    // Правка: цвет и заметка; чужую — 404.
+    let path = format!("/annotations/{}", highlight["id"].as_str().unwrap());
+    let edited = ctx
+        .expect(
+            StatusCode::OK,
+            Method::PATCH,
+            &path,
+            Some(json!({ "color": 5, "note": null })),
+            Some(&alice),
+        )
+        .await;
+    assert_eq!(edited["color"], 5);
+    assert!(edited["note"].is_null());
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::PATCH,
+        &path,
+        Some(json!({ "color": 1 })),
+        Some(&bob),
+    )
+    .await;
+
+    // Профиль: свои пометки с книгой, новые сверху; фильтр по виду.
+    let own = ctx.get_ok("/users/me/annotations", Some(&alice)).await;
+    assert_eq!(own["total"], 2);
+    assert_eq!(own["items"][0]["entity"]["slug"], "dune-novel");
+    assert_eq!(own["items"][0]["kind"], "highlight");
+    let marks = ctx
+        .get_ok("/users/me/annotations?kind=bookmark", Some(&alice))
+        .await;
+    assert_eq!(marks["total"], 1);
+
+    ctx.expect(
+        StatusCode::NOT_FOUND,
+        Method::DELETE,
+        &path,
+        None,
+        Some(&bob),
+    )
+    .await;
+    ctx.expect(
+        StatusCode::NO_CONTENT,
+        Method::DELETE,
+        &path,
+        None,
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(
+        ctx.get_ok("/users/me/annotations", Some(&alice)).await["total"],
+        1
+    );
+}
+
 // ---------------------------------------------------------------- личные заметки
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]

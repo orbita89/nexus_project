@@ -46,6 +46,14 @@ pub struct Config {
     /// Каталог с файлами обложек книг (`nexus books cassandra` копирует их сюда), `BOOK_COVERS_DIR`.
     /// Раздаёт gateway по `/covers/books/...`. Не задан — обложки не копируются.
     pub book_covers_dir: Option<String>,
+    /// Каталог с архивами книг `<от>-<до>.arx` (Cassandra, `metadata.file.archive`),
+    /// `BOOKS_ARCHIVES_DIR`. Не задан — читалка (`GET /catalog/books/{slug}/epub`) отвечает 503.
+    pub books_archives_dir: Option<String>,
+    /// Кэш извлечённых EPUB на диске, `BOOKS_EPUB_CACHE_DIR` (по умолчанию `<tmp>/nexus-epub`).
+    pub books_epub_cache_dir: String,
+    /// Предел кэша EPUB в мегабайтах, `BOOKS_EPUB_CACHE_MB` (по умолчанию 2048): сверх него
+    /// удаляются давно не открытые файлы.
+    pub books_epub_cache_mb: u64,
     /// Ключ API TMDB (v3) или Read Access Token (v4), `TMDB_API_KEY`: полные данные фильма при
     /// возврате из архива. Не задан — фильм возвращается «скелетом», авто-возврат выключен.
     pub tmdb_api_key: Option<String>,
@@ -212,6 +220,22 @@ impl Config {
             book_covers_dir: env::var("BOOK_COVERS_DIR")
                 .ok()
                 .filter(|dir| !dir.is_empty()),
+            books_archives_dir: env::var("BOOKS_ARCHIVES_DIR")
+                .ok()
+                .filter(|dir| !dir.is_empty()),
+            books_epub_cache_dir: env::var("BOOKS_EPUB_CACHE_DIR")
+                .ok()
+                .filter(|dir| !dir.is_empty())
+                .unwrap_or_else(|| {
+                    env::temp_dir()
+                        .join("nexus-epub")
+                        .to_string_lossy()
+                        .into_owned()
+                }),
+            books_epub_cache_mb: env::var("BOOKS_EPUB_CACHE_MB")
+                .ok()
+                .and_then(|mb| mb.parse().ok())
+                .unwrap_or(2048),
             tmdb_api_key: env::var("TMDB_API_KEY")
                 .ok()
                 .filter(|key| !key.trim().is_empty()),

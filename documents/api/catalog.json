@@ -10,6 +10,277 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/catalog/admin/ai/prompts": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "operationId": "list_ai_prompts",
+        "responses": {
+          "200": {
+            "description": "Промпты ИИ: встроенные тексты и переопределения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiPrompts"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/ai/prompts/preview": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Собранные промпты на примере книги — как их увидит модель.",
+        "operationId": "preview_ai_prompts",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "Область: `default` или тип сущности. По умолчанию `book`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Пример собранных промптов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiPromptPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестная область",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/ai/prompts/{key}/{scope}": {
+      "put": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Переопределить промпт для области. Неизвестные подстановки `{…}` — 400.",
+        "operationId": "put_ai_prompt",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutAiPrompt"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Сохранено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiPromptOverride"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пустой/длинный текст, неизвестная область или подстановка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого промпта",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Убрать переопределение: действует общее или встроенное.",
+        "operationId": "delete_ai_prompt",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Сброшено"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого переопределения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/ai/providers": {
       "get": {
         "tags": [
@@ -4596,6 +4867,206 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/static/pages": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Перерисовать несколько страниц сразу (до ответа): одну книгу после ручной проверки и т.п.",
+        "operationId": "regenerate_static_pages",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegeneratePages"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Перерисованы"
+          },
+          "400": {
+            "description": "Пустой список или больше 100 адресов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ISR не настроен или страница не нарисовалась",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/static/regenerate": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Пересобрать статику раздела (или всю) в фоне. Ход — `GET /admin/static/status`.",
+        "operationId": "regenerate_static",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegenerateStatic"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Запущено (или уже идёт: started = false)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegenerateStarted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестный kind",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ISR не настроен или фронтенд не отвечает",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/static/status": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Ход последней пересборки статики.",
+        "operationId": "static_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaticStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ISR не настроен или фронтенд не отвечает",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/tags": {
       "post": {
         "tags": [
@@ -5455,6 +5926,196 @@
         }
       }
     },
+    "/api/v1/catalog/books/{slug}/epub": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Отдать EPUB книги для читалки.",
+        "operationId": "read_book_epub",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Slug книги",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Файл книги. `HEAD` — только проверка доступа, без извлечения и тела",
+            "content": {
+              "application/epub+zip": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Закрытая книга, гость"
+          },
+          "403": {
+            "description": "Закрытая книга, роль не vip/admin"
+          },
+          "404": {
+            "description": "Нет книги или у неё нет файла"
+          },
+          "503": {
+            "description": "Хранилище архивов не настроено или недоступно"
+          }
+        },
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/books/{slug}/tutor": {
+      "get": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Свои обсуждения книги, свежие сверху.",
+        "operationId": "list_book_ai_threads",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug книги",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "master-i-margarita"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AiThread"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Книга не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Начать обсуждение книги.",
+        "operationId": "create_ai_thread",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "slug книги",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "master-i-margarita"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAiThread"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiThread"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Книга не найдена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Слишком много обсуждений",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/entities": {
       "get": {
         "tags": [
@@ -6080,6 +6741,353 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/catalog/me/ai-providers": {
+      "get": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Свои провайдеры.",
+        "operationId": "list_my_ai_providers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserAiProvider"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Добавить провайдера (свой ключ).",
+        "operationId": "create_my_ai_provider",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserAiProvider"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserAiProvider"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже 5 провайдеров",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ИИ не настроен на сервере",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/me/ai-providers/{id}": {
+      "delete": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Удалить своего провайдера. Удалили «по умолчанию» — им становится самый старый оставшийся.",
+        "operationId": "delete_my_ai_provider",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалён"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого своего провайдера",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Изменить своего провайдера.",
+        "operationId": "update_my_ai_provider",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserAiProvider"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserAiProvider"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные поля",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого своего провайдера",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/me/ai-providers/{id}/test": {
+      "post": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Проверить ключ: короткий запрос к модели.",
+        "operationId": "test_my_ai_provider",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserAiTest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого своего провайдера",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/me/tutor": {
+      "get": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Свои обсуждения во всех книгах, свежие сверху: раздел профиля.",
+        "operationId": "list_my_ai_threads",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AiThreadWithEntity"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/v1/catalog/people": {
@@ -7206,6 +8214,207 @@
           }
         }
       }
+    },
+    "/api/v1/catalog/tutor/{id}": {
+      "get": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Обсуждение со всеми сообщениями.",
+        "operationId": "get_ai_thread",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiThreadDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого своего обсуждения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Удалить своё обсуждение.",
+        "operationId": "delete_ai_thread",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Удалено"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого своего обсуждения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/tutor/{id}/messages": {
+      "post": {
+        "tags": [
+          "ai-tutor"
+        ],
+        "summary": "Задать вопрос. Ответ — потоком (`text/event-stream`):\n`event: delta` `data: {\"text\": \"…\"}` — кусок ответа;\n`event: done` `data: {\"id\", \"tokens_in\", \"tokens_out\"}` — ответ сохранён;\n`event: error` `data: {\"message\"}` — модель не ответила (вопрос сохранён).",
+        "operationId": "send_ai_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendAiMessage"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Поток ответа (SSE)",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пустой или слишком длинный вопрос",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого своего обсуждения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Нет своего ключа ИИ (`no_ai_provider`) или обсуждение переполнено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ИИ не настроен на сервере",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -7327,6 +8536,186 @@
           "anthropic",
           "openai"
         ]
+      },
+      "AiMessage": {
+        "type": "object",
+        "required": [
+          "id",
+          "role",
+          "content",
+          "created_at"
+        ],
+        "properties": {
+          "chapter": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Вопрос из читалки: выделенный фрагмент и глава."
+          },
+          "role": {
+            "type": "string",
+            "description": "`user` или `assistant`."
+          }
+        }
+      },
+      "AiPrompt": {
+        "type": "object",
+        "description": "Промпт: назначение, подстановки, встроенный текст и переопределения.",
+        "required": [
+          "key",
+          "title",
+          "description",
+          "placeholders",
+          "builtin",
+          "overrides"
+        ],
+        "properties": {
+          "builtin": {
+            "type": "string",
+            "description": "Встроенный текст (действует, если переопределений нет)."
+          },
+          "description": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "example": "tutor.system"
+          },
+          "overrides": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AiPromptOverride"
+            }
+          },
+          "placeholders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Placeholder"
+            }
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "AiPromptLimit": {
+        "type": "object",
+        "description": "Числовой предел промпта (меняется только в коде).",
+        "required": [
+          "name",
+          "value",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "AiPromptOverride": {
+        "type": "object",
+        "description": "Переопределение промпта для области.",
+        "required": [
+          "scope",
+          "template",
+          "updated_at"
+        ],
+        "properties": {
+          "scope": {
+            "type": "string",
+            "description": "`default` — для всех сущностей, иначе тип: `book`, `movie`, …",
+            "example": "book"
+          },
+          "template": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AiPromptPreview": {
+        "type": "object",
+        "description": "Что уйдёт в модель на примере книги.",
+        "required": [
+          "scope",
+          "system",
+          "quote_question",
+          "summarize"
+        ],
+        "properties": {
+          "quote_question": {
+            "type": "string",
+            "description": "Вопрос по фрагменту из читалки."
+          },
+          "scope": {
+            "type": "string"
+          },
+          "summarize": {
+            "type": "string",
+            "description": "Запрос на сжатие разговора."
+          },
+          "system": {
+            "type": "string",
+            "description": "Системный промпт (читатель на 30%, есть резюме)."
+          }
+        }
+      },
+      "AiPrompts": {
+        "type": "object",
+        "description": "Все промпты ИИ.",
+        "required": [
+          "scopes",
+          "prompts",
+          "limits"
+        ],
+        "properties": {
+          "limits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AiPromptLimit"
+            }
+          },
+          "prompts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AiPrompt"
+            }
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Области: `default` и типы сущностей."
+          }
+        }
       },
       "AiProvider": {
         "type": "object",
@@ -7494,6 +8883,94 @@
             "description": "Ответ модели на первом рабочем ключе."
           }
         }
+      },
+      "AiThread": {
+        "type": "object",
+        "description": "Обсуждение.",
+        "required": [
+          "id",
+          "title",
+          "messages_count",
+          "tokens_in",
+          "tokens_out",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "messages_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "title": {
+            "type": "string"
+          },
+          "tokens_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Расход токенов обсуждения (по данным провайдера): вход и выход."
+          },
+          "tokens_out": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AiThreadDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AiThread"
+          },
+          {
+            "type": "object",
+            "required": [
+              "entity",
+              "messages"
+            ],
+            "properties": {
+              "entity": {
+                "$ref": "#/components/schemas/EntityRef"
+              },
+              "messages": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AiMessage"
+                }
+              }
+            }
+          }
+        ],
+        "description": "Обсуждение целиком: книга и все сообщения."
+      },
+      "AiThreadWithEntity": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AiThread"
+          },
+          {
+            "type": "object",
+            "required": [
+              "entity"
+            ],
+            "properties": {
+              "entity": {
+                "$ref": "#/components/schemas/EntityRef"
+              }
+            }
+          }
+        ],
+        "description": "Обсуждение в своём списке (профиль): то же плюс книга."
       },
       "AnalysisPoint": {
         "type": "object",
@@ -8337,6 +9814,10 @@
             "maximum": 100000,
             "minimum": 1
           },
+          "public_read": {
+            "type": "boolean",
+            "description": "Читать книгу могут все, включая гостей. Без поля (или `false`) читалка открыта только\nролям `vip` и `admin` (`GET /catalog/books/{slug}/epub`). Ставит админ."
+          },
           "publisher": {
             "type": [
               "string",
@@ -8600,6 +10081,18 @@
           }
         ],
         "description": "Новый провайдер."
+      },
+      "CreateAiThread": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Пусто — по первому вопросу."
+          }
+        }
       },
       "CreateAward": {
         "type": "object",
@@ -9058,6 +10551,39 @@
           }
         },
         "additionalProperties": false
+      },
+      "CreateUserAiProvider": {
+        "type": "object",
+        "required": [
+          "kind",
+          "title",
+          "model",
+          "api_key"
+        ],
+        "properties": {
+          "api_key": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "Сделать провайдером по умолчанию (первый — всегда по умолчанию)."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/UserAiKind"
+          },
+          "model": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
       },
       "Crop": {
         "type": "object",
@@ -9521,6 +11047,50 @@
           "game",
           "painting"
         ]
+      },
+      "EntityRef": {
+        "type": "object",
+        "description": "Сущность каталога в чужих ответах: ровно столько, сколько нужно для ссылки на карточку.",
+        "required": [
+          "id",
+          "kind",
+          "slug",
+          "title"
+        ],
+        "properties": {
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`movie`, `series`, `book`, `game`.",
+            "example": "movie"
+          },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Дата выхода: по году фронтенд различает «Дюна (1984)» и «Дюна (2021)». `null` — неизвестна.",
+            "example": "2021-10-22"
+          },
+          "slug": {
+            "type": "string",
+            "example": "dune-2021"
+          },
+          "title": {
+            "type": "string",
+            "example": "Дюна"
+          }
+        }
       },
       "EntitySort": {
         "type": "string",
@@ -10904,6 +12474,56 @@
           }
         }
       },
+      "Page_AiThreadWithEntity": {
+        "type": "object",
+        "description": "Страница списка.",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/AiThread"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "entity"
+                  ],
+                  "properties": {
+                    "entity": {
+                      "$ref": "#/components/schemas/EntityRef"
+                    }
+                  }
+                }
+              ],
+              "description": "Обсуждение в своём списке (профиль): то же плюс книга."
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "example": 20
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "example": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "example": 137
+          }
+        }
+      },
       "Page_ArchiveDoc": {
         "type": "object",
         "description": "Страница списка.",
@@ -12080,6 +13700,22 @@
           }
         }
       },
+      "Placeholder": {
+        "type": "object",
+        "description": "Подстановка промпта — для админки.",
+        "required": [
+          "name",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "PlannedStep": {
         "type": "object",
         "description": "Шаг в событии `plan`.",
@@ -12145,6 +13781,18 @@
           "name": {
             "type": "string",
             "example": "АСТ"
+          }
+        }
+      },
+      "PutAiPrompt": {
+        "type": "object",
+        "description": "Новый текст промпта.",
+        "required": [
+          "template"
+        ],
+        "properties": {
+          "template": {
+            "type": "string"
           }
         }
       },
@@ -12359,6 +14007,51 @@
             "format": "double",
             "description": "Среднее, округлённое до 0,1; оценок нет — `null`.",
             "example": 9.2
+          }
+        }
+      },
+      "RegeneratePages": {
+        "type": "object",
+        "description": "Страницы для перерисовки сразу (до ответа).",
+        "required": [
+          "paths"
+        ],
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Адреса страниц: `/books/belaya-gvardiya`. 1–100.",
+            "example": [
+              "/books/belaya-gvardiya"
+            ]
+          }
+        }
+      },
+      "RegenerateStarted": {
+        "type": "object",
+        "required": [
+          "started"
+        ],
+        "properties": {
+          "started": {
+            "type": "boolean",
+            "description": "`false` — пересборка уже идёт, вторая не запущена."
+          }
+        }
+      },
+      "RegenerateStatic": {
+        "type": "object",
+        "description": "Что пересобрать.",
+        "properties": {
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Раздел: `book`, `movie`, `series`, `game`, `painting`. Не задан — вся статика.",
+            "example": "book"
           }
         }
       },
@@ -12780,6 +14473,47 @@
           }
         }
       },
+      "SendAiMessage": {
+        "type": "object",
+        "description": "Вопрос.",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "chapter": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fraction": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Докуда дочитал читатель (0–1): ИИ не спойлерит дальше."
+          },
+          "provider_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Свой провайдер; не задан — по умолчанию."
+          },
+          "quote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Выделенный в читалке фрагмент (≤ 1500 символов, длиннее — обрежется)."
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
       "SeriesMetadata": {
         "type": "object",
         "description": "Поля сериала.",
@@ -13030,6 +14764,105 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "StaticFailure": {
+        "type": "object",
+        "description": "Страница, которая не перерисовалась.",
+        "required": [
+          "path",
+          "status"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "StaticRun": {
+        "type": "object",
+        "description": "Ход последней пересборки статики (в памяти сервера фронтенда, с его перезапуска).",
+        "required": [
+          "total",
+          "done",
+          "changed",
+          "failed",
+          "started_at",
+          "running"
+        ],
+        "properties": {
+          "changed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько страниц действительно изменилось (остальные совпали байт в байт и не тронуты).",
+            "minimum": 0
+          },
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Пересборка прервалась целиком (например, API каталога не ответил)."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StaticFailure"
+            },
+            "description": "Первые 100 ошибок."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` — ещё идёт."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Раздел; `null` — вся статика."
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Страниц в работе (каталог из API + файлы на диске).",
+            "minimum": 0
+          }
+        }
+      },
+      "StaticStatus": {
+        "type": "object",
+        "properties": {
+          "run": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StaticRun",
+                "description": "`null` — с запуска сервера фронтенда пересборок не было."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -14000,6 +15833,118 @@
           }
         },
         "additionalProperties": false
+      },
+      "UpdateUserAiProvider": {
+        "type": "object",
+        "description": "Правка: переданное поле меняется; `api_key` — новый ключ.",
+        "properties": {
+          "api_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Пустая строка — адрес по умолчанию."
+          },
+          "is_default": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` — сделать провайдером по умолчанию."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UserAiKind": {
+        "type": "string",
+        "description": "Протокол API: `openai` — любой OpenAI-совместимый (OpenAI, DeepSeek, OpenRouter, свой\nсервер), `anthropic` — Claude.",
+        "enum": [
+          "openai",
+          "anthropic"
+        ]
+      },
+      "UserAiProvider": {
+        "type": "object",
+        "description": "Свой провайдер (без ключа).",
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "model",
+          "key_hint",
+          "is_default",
+          "created_at"
+        ],
+        "properties": {
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Пусто — адрес по умолчанию протокола.",
+            "example": "https://api.deepseek.com"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "key_hint": {
+            "type": "string",
+            "description": "`sk-…a1b2`."
+          },
+          "kind": {
+            "type": "string",
+            "example": "openai"
+          },
+          "model": {
+            "type": "string",
+            "example": "deepseek-chat"
+          },
+          "title": {
+            "type": "string",
+            "example": "DeepSeek"
+          }
+        }
+      },
+      "UserAiTest": {
+        "type": "object",
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Ответ модели или текст ошибки (ключ вырезан)."
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        }
       }
     },
     "securitySchemes": {

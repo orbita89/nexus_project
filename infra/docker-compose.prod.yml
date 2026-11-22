@@ -105,8 +105,19 @@ services:
       ATTACHMENTS_DIR: /var/lib/nexus/attachments
       # Фото профиля — там же, рядом с вложениями.
       AVATARS_DIR: /var/lib/nexus/avatars
+      # Читалка книг: тома .arx — на HDD (только чтение), извлечённые EPUB — кэш на быстром диске
+      # с жёстким пределом: сверх BOOKS_EPUB_CACHE_MB удаляются давно не открытые книги, брошенные
+      # .tmp-* и пустые каталоги (catalog::books::reader). Без BOOKS_ARCHIVES_HOST читалка — 503.
+      BOOKS_ARCHIVES_DIR: /srv/book-archives
+      BOOKS_EPUB_CACHE_DIR: /var/cache/nexus-epub
+      BOOKS_EPUB_CACHE_MB: ${BOOKS_EPUB_CACHE_MB:-2048}
     volumes:
       - archivedata:/var/lib/nexus
+      # HDD с архивами книг (путь на сервере).
+      - ${BOOKS_ARCHIVES_HOST:-/mnt/books/archives}:/srv/book-archives:ro
+      # Кэш EPUB — отдельный том (на SSD), не внутри контейнера и не в /tmp: его можно
+      # очистить целиком (`docker volume rm`), данные сайта он не затрагивает.
+      - epubcache:/var/cache/nexus-epub
     depends_on:
       postgres:
         condition: service_healthy
@@ -135,6 +146,7 @@ services:
 
 volumes:
   coverscache:
+  epubcache:
   pgdata18:
   redisdata:
   meilidata:

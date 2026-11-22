@@ -1650,6 +1650,36 @@ Dev: прогон запущен 2026-10-14 (`target/archive-work/`, лог `cov
 Тесты: модульные `books::cassandra` (разбор строки, slug'и, размеры AVIF, языки, путь обложки),
 `books::genres`.
 
+## Читалка книг ✅ (2026-11-22)
+
+`GET /api/v1/catalog/books/{slug}/epub` (`books/reader.rs`, гость или пользователь) отдаёт EPUB
+книги для читалки на фронте (foliate-js/epub.js); скачивание добавим позже (`Content-Disposition`).
+
+- **Где файл:** `metadata.file = {archive, path, size}` (пишет `nexus books cassandra`). Архивы
+  `<от>-<до>.arx` (Jubako, zstd) лежат в `BOOKS_ARCHIVES_DIR` (`Config::books_archives_dir`; dev —
+  `/srv/book-archives`, смонтирован только для чтения из `BOOKS_ARCHIVES_HOST`, по умолчанию
+  `/home/dev/cassandra.books/data/archives`; на сервере — HDD). Запись достаётся крейтом `libarx`
+  0.4.2 (`ExtractBuilder` одной записи, `spawn_blocking`), без внешней программы `arx`.
+- **Кэш:** извлечённый файл — в `BOOKS_EPUB_CACHE_DIR/<архив без .arx>/<path>` (по умолчанию
+  `<tmp>/nexus-epub`, dev — `/var/lib/nexus/epub-cache`); попадание обновляет mtime, после
+  каждого извлечения удаляются самые старые файлы, пока кэш больше `BOOKS_EPUB_CACHE_MB` (2048).
+  Извлечение идёт во временный `.tmp-<uuid>` и переименовывается — параллельные запросы не видят
+  недописанный файл.
+- **Доступ:** `metadata.public_read = true` (ставит админ правкой метаданных книги) — всем, иначе
+  только ролям `vip` и `admin` (`Role::can_read_books`, не по старшинству: `author` не читает).
+  Гость → 401, другая роль → 403.
+- **Ответ:** 200 `application/epub+zip`, `Content-Disposition: inline`, `Cache-Control:
+  private, max-age=3600` (публичная — `public, max-age=86400`). 404 — нет книги, нет
+  `metadata.file`, недопустимый путь (`..`, `/`, архив не `.arx`) или запись не извлеклась;
+  503 — `BOOKS_ARCHIVES_DIR` не задан или файла архива нет.
+- **Кэш в браузере (2026-11-22):** публичные книги фронт хранит в IndexedDB; закрытые — с
+  проверкой `HEAD /books/{slug}/epub` перед каждым открытием (только доступ и `metadata.file`,
+  архив не читается: 200 / 401 / 403 / 404, `Cache-Control: no-store`; 401/403 → копию удалить)
+  и автоудалением через 30 дней. В профиле — «Сохранено на устройстве» и «Очистить».
+- **Статичная страница на CDN** одна для всех: кнопку «Читать» показывает JS по `metadata.file`,
+  `metadata.public_read` и роли из токена; гостю на закрытой книге — «Войдите», `user` — «Доступ
+  по приглашению». Файл защищает только этот эндпоинт.
+
 ## Книжный поиск на Tantivy ✅ (2026-11-17)
 
 Книги (`kind = 'book'`) ищутся в собственном индексе Tantivy, а не в Meilisearch
@@ -2062,6 +2092,7 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | POST | `/admin/books/index/rebuild` | Полная перестройка Tantivy + слоя Б из БД в фоне (`sync::rebuild`) → 202; ход — `operation` в `GET /admin/books/index`; 409 — идёт другая операция; 503 |
 | POST | `/admin/books/index/merge` | Слить сегменты Tantivy в один + `garbage_collect_files` в фоне (`BookIndex::merge`): уходят `deleted_docs`, поиск по одному сегменту; данные не меняются → 202; 409; 503 |
 | POST | `/admin/books/index/cache` | Сбросить кэш выдачи книг и прогреть списки раздела (`BookIndex::clear_cache`) сразу → 204; 503 |
+| GET | `/books/{slug}/epub` | Гость/пользователь. EPUB книги для читалки из архива `.arx` (`books::reader::epub`): `metadata.public_read` — всем, иначе `vip`/`admin`; 200 `application/epub+zip`, 401 гость, 403 роль, 404 нет книги/файла, 503 архивы не настроены; `HEAD` — только проверка доступа без извлечения (200/401/403/404) |
 | GET | `/admin/ai/providers` | Провайдеры ИИ (без ключей: `keys_hint`, `keys_count`), по умолчанию — первым |
 | POST | `/admin/ai/providers` | Завести `{slug, kind, base_url?, model, api_keys[], workers?, per_request?, effort? (low), is_default?}` → 201; 400 — нет kind/model/ключей, лимиты вне диапазона; 409 — slug занят; 503 — нет `AI_SECRET_KEY` |
 | PATCH | `/admin/ai/providers/{slug}` | Поменять переданные поля (`api_keys` заменяют все, `base_url: ""` — по умолчанию) → 200; 404 |
@@ -2427,6 +2458,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `books/genres.rs` | Жанры FB2: код → русское название (`GENRES`), `name`, `names` |
 | `books/index.rs` | Книжный поиск, слой А (Tantivy): схема `books-4` (текст, `card`, `ord`), анализаторы `ru_stem` / `ru_raw` (`YoFilter`), `BookDoc` (`text_hash`), `BookQuery`, строгий и резервный запросы, автодополнение, сборщик `OrdHits` (номер + оценка, фильтр слоя Б внутри), `TextMap` (номер → адрес), `find` (без текста — только слой Б), кэш (поколение индекса × слоя Б), `set_sidecar` / `set_ranks`, `facet_counts`, подсказки, `update`, `Rebuild` |
 | `books/sidecar.rs` | Книжный поиск, слой Б (RAM): `SortMeta` (8 байт), `Facets` (RoaringBitmap), готовые порядки, `Sidecar` (`filter`, `page`, `rank_hits` — ручные места и сильные совпадения, `with_ranks`, `facet_counts`), `SidecarBuilder`, снимок `sidecar.bin` (`save` / `load`) |
+| `books/reader.rs` | Читалка: `epub` (`GET /books/{slug}/epub`), доступ (`check_access`: `public_read` или `vip`/`admin`), извлечение одной записи `.arx` (`libarx`), кэш EPUB на диске с вытеснением по mtime (`Store::prune`), проверка путей (`safe_names`) |
 | `books/ranks.rs` | Ручной порядок книг: `parse_list`, `author_matches`, `match_list`, `replace_all`, `import` (`nexus books ranks FILE`) |
 | `books/sync.rs` | Книжный поиск ← PostgreSQL: номера `catalog_book_ords`, `rebuild` (индекс + слой Б), `reload_sidecar`, `apply_ranks`, `update` (только изменившийся текст), `spawn_initial` + `sidecar_loop` (раз в сутки, после правок, опрос мест), `open`, `enabled` |
 | `admin/books.rs` | `GET` / `PUT /admin/books/ranks`, `POST /admin/books/sidecar`; состояние и управление индексом: `GET /admin/books/index`, `POST /admin/books/index/{rebuild,merge,cache}`; операция одна за раз на каталог индекса (`OPERATIONS`, в памяти процесса) |

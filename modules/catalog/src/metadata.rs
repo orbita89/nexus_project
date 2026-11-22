@@ -196,6 +196,10 @@ pub struct BookMetadata {
     /// Файл книги в хранилище: пишет `nexus books cassandra` (`catalog::books::cassandra`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<BookFile>,
+    /// Читать книгу могут все, включая гостей. Без поля (или `false`) читалка открыта только
+    /// ролям `vip` и `admin` (`GET /catalog/books/{slug}/epub`). Ставит админ.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub public_read: bool,
 }
 
 /// Файл книги в хранилище архивов.
@@ -1261,6 +1265,17 @@ mod tests {
         assert_eq!(ok("080442957x").unwrap(), json!({ "isbn": "080442957X" }));
         assert!(ok("9780441013594").is_err());
         assert!(ok("12345").is_err());
+    }
+
+    #[test]
+    fn book_public_read_is_kept_only_when_true() {
+        let book = |v: Value| validate(EntityKind::Book, v).unwrap();
+        assert_eq!(
+            book(json!({ "public_read": true })),
+            json!({ "public_read": true })
+        );
+        assert_eq!(book(json!({ "public_read": false })), json!({}));
+        assert!(validate(EntityKind::Book, json!({ "public_read": "yes" })).is_err());
     }
 
     #[test]

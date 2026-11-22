@@ -1492,7 +1492,7 @@ pub struct UserRatingsQuery {
 }
 
 /// Отличает «поле не передано» (`None`) от `null` (`Some(None)`).
-fn nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: Deserialize<'de>,
     D: Deserializer<'de>,
