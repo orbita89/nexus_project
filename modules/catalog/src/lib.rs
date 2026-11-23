@@ -136,4 +136,11 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::scripts::jobs))
         .routes(routes!(admin::scripts::job))
         .routes(routes!(admin::scripts::cancel))
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(admin::covers::upload))
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    admin::covers::MAX_COVER_BYTES + 64 * 1024,
+                )),
+        )
 }

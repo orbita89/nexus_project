@@ -62,7 +62,7 @@ pub async fn list(
                 .with_code("use_search"),
         );
     }
-    let page = list_page(&state.db, query, None, Some(true)).await?;
+    let page = list_page(&state.db, query, None, Some(true), false).await?;
     Ok(Json(Page {
         items: page.items.into_iter().map(|row| row.entity).collect(),
         total: page.total,
@@ -71,14 +71,22 @@ pub async fn list(
     }))
 }
 
+/// Потолок `total` в админском списке: больше — «10 000+», точный счёт не нужен.
+pub(crate) const ADMIN_TOTAL_CAP: i64 = 10_000;
+
 /// Страница списка: публичный (`active = Some(true)`: видимые) и админский (`active` из запроса).
 /// `q` — подстрока в названии, только для админки (скрытых сущностей нет в Meilisearch).
+/// `admin` — админский список: без `sort` — новые сверху (`e.id DESC`, uuidv7, проход по
+/// индексу), `total` — не больше [`ADMIN_TOTAL_CAP`]. Сортировка по баллу и полный `count(*)`
+/// по миллиону строк занимали 5–50 с.
 pub(crate) async fn list_page(
     db: &PgPool,
     query: ListEntitiesQuery,
     q: Option<&str>,
     active: Option<bool>,
+    admin: bool,
 ) -> AppResult<Page<AdminEntitySummary>> {
+    let newest_first = admin && query.sort.is_none();
     let (limit, offset) = page_bounds(query.limit, query.offset);
     if let Some(year) = query.year {
         check_year(year)?;
@@ -140,7 +148,15 @@ pub(crate) async fn list_page(
         }
     };
 
-    let count_sql = format!("SELECT count(*) {}", filter(6));
+    let count_sql = if admin {
+        format!(
+            "SELECT count(*) FROM (SELECT 1 {} LIMIT {}) capped",
+            filter(6),
+            ADMIN_TOTAL_CAP
+        )
+    } else {
+        format!("SELECT count(*) {}", filter(6))
+    };
     let mut count = sqlx::query_scalar(&count_sql)
         .bind(query.kind)
         .bind(&query.tag)
@@ -152,6 +168,7 @@ pub(crate) async fn list_page(
     }
     let total: i64 = count.fetch_one(db).await?;
     let order = match sort {
+        _ if newest_first => "e.id DESC",
         EntitySort::Recommended => {
             // Без балла (нет IMDb или мало голосов) — по известности на TMDB, а не по дате.
             "st.rank_score DESC NULLS LAST, st.tmdb_votes DESC NULLS LAST,

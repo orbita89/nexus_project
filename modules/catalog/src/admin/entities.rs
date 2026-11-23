@@ -7,6 +7,7 @@ use crate::metadata;
 use crate::models::{
     AddCredit, AdminEntitySummary, AdminListEntitiesQuery, CreateEntity, EntityCredit,
     EntityCreditRow, EntityDetail, EntityKind, ListEntitiesQuery, Page, SetTags, Tag, UpdateEntity,
+    VISIBLE,
 };
 use crate::publish::{self, Touched};
 use crate::validate::{self, MAX_LONG_TEXT, MAX_TITLE};
@@ -23,7 +24,9 @@ use std::time::Instant;
 use uuid::Uuid;
 
 /// Все сущности, включая скрытые с сайта (`active` в каждой): найти и включить. Фильтры и
-/// сортировки — как у `GET /entities`, плюс `active`.
+/// сортировки — как у `GET /entities`, плюс `active`. Без `sort` — новые сверху; `total` не
+/// больше 10 000. Книги (`kind=book`, без `active=false` и `studio`, книжный поиск включён) —
+/// из индекса Tantivy в нашем порядке (ручные места, затем балл), флаги — из PostgreSQL.
 #[utoipa::path(
     get, operation_id = "admin_list_entities", path = "/admin/entities", tag = "catalog-admin",
     security(("bearer" = [])),
@@ -40,6 +43,13 @@ pub async fn list(
     AdminUser(_admin): AdminUser,
     Query(query): Query<AdminListEntitiesQuery>,
 ) -> AppResult<Json<Page<AdminEntitySummary>>> {
+    if query.kind == Some(EntityKind::Book)
+        && query.active != Some(false)
+        && query.studio.is_none()
+        && crate::books::search::routed(&state, &[EntityKind::Book])
+    {
+        return Ok(Json(books_page(&state, query).await?));
+    }
     let list = ListEntitiesQuery {
         sort: query.sort,
         kind: query.kind,
@@ -51,8 +61,59 @@ pub async fn list(
         offset: query.offset,
     };
     Ok(Json(
-        list_page(&state.db, list, query.q.as_deref(), query.active).await?,
+        list_page(&state.db, list, query.q.as_deref(), query.active, true).await?,
     ))
+}
+
+/// Админский список книг из Tantivy: в индексе только видимые книги (скрытых — сотни, их
+/// отдаёт `active=false` из PostgreSQL). Флаги `active` — одним запросом по id страницы.
+async fn books_page(
+    state: &AppState,
+    query: AdminListEntitiesQuery,
+) -> AppResult<Page<AdminEntitySummary>> {
+    #[derive(sqlx::FromRow)]
+    struct Flags {
+        id: Uuid,
+        active: bool,
+        active_manual: bool,
+        visible: bool,
+    }
+    if let Some(year) = query.year {
+        crate::entities::check_year(year)?;
+    }
+    let (limit, offset) = shared::pagination::page_bounds(query.limit, query.offset);
+    let book_query =
+        crate::books::search::admin_query(query.q.as_deref(), query.sort, query.tag, query.year);
+    let page = crate::books::search::search(state, Some(book_query), false, limit, offset).await?;
+    let ids: Vec<Uuid> = page.items.iter().map(|item| item.id).collect();
+    let flags: Vec<Flags> = sqlx::query_as(&format!(
+        "SELECT e.id, e.active, e.active_manual, {VISIBLE} AS visible
+         FROM entities e WHERE e.id = ANY($1)"
+    ))
+    .bind(&ids)
+    .fetch_all(&state.db)
+    .await?;
+    let mut flags: std::collections::HashMap<Uuid, Flags> =
+        flags.into_iter().map(|f| (f.id, f)).collect();
+    Ok(Page {
+        // Книга удалена, а индекс ещё не обновлён — строки нет.
+        items: page
+            .items
+            .into_iter()
+            .filter_map(|entity| {
+                let f = flags.remove(&entity.id)?;
+                Some(AdminEntitySummary {
+                    entity,
+                    active: f.active,
+                    active_manual: f.active_manual,
+                    visible: f.visible,
+                })
+            })
+            .collect(),
+        total: page.total,
+        limit: page.limit,
+        offset: page.offset,
+    })
 }
 
 /// Создать сущность. `metadata` проверяется по схеме своего `kind`. `active` — по умолчанию `true`.

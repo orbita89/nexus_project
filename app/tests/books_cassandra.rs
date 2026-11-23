@@ -373,6 +373,40 @@ async fn manual_ranks_order_book_listings_without_reindexing(pool: PgPool) {
     .json();
     assert_eq!(genre["items"][0]["slug"], "master-i-margarita");
 
+    // Админский список книг — из индекса в том же ручном порядке, с флагами из БД; скрытые
+    // (`active=false`) — из PostgreSQL.
+    let admin_list = send(
+        Method::GET,
+        "/api/v1/catalog/admin/entities?kind=book",
+        None,
+        &admin,
+    )
+    .await;
+    assert_eq!(admin_list.status, StatusCode::OK);
+    let body = admin_list.json();
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["items"][0]["slug"], "ezhik-v-tumane");
+    assert_eq!(body["items"][1]["slug"], "master-i-margarita");
+    assert_eq!(body["items"][0]["active"], true);
+    assert_eq!(body["items"][0]["visible"], true);
+    let by_title = send(
+        Method::GET,
+        "/api/v1/catalog/admin/entities?kind=book&q=%D0%BC%D0%B0%D1%81%D1%82%D0%B5%D1%80",
+        None,
+        &admin,
+    )
+    .await;
+    assert_eq!(by_title.json()["items"][0]["slug"], "master-i-margarita");
+    let hidden = send(
+        Method::GET,
+        "/api/v1/catalog/admin/entities?kind=book&active=false",
+        None,
+        &admin,
+    )
+    .await;
+    assert_eq!(hidden.status, StatusCode::OK);
+    assert_eq!(hidden.json()["total"], 0);
+
     // Пустой список — ручного порядка нет.
     let cleared = send(
         Method::PUT,
@@ -521,4 +555,83 @@ async fn book_reader_serves_private_books_only_to_vip_and_admin(pool: PgPool) {
         read(&with_file, None).await,
         StatusCode::SERVICE_UNAVAILABLE
     );
+}
+
+/// AVIF для тестов: `ftyp` с брендом `avif` и бокс `ispe` с размерами.
+fn avif(width: u32, height: u32) -> Vec<u8> {
+    let mut data = 24u32.to_be_bytes().to_vec();
+    data.extend_from_slice(b"ftypavif\0\0\0\0mif1avif");
+    data.extend_from_slice(b"\0\0\0\x14ispe\0\0\0\0");
+    data.extend_from_slice(&width.to_be_bytes());
+    data.extend_from_slice(&height.to_be_bytes());
+    data
+}
+
+#[sqlx::test(migrator = "nexus::MIGRATOR")]
+async fn book_cover_is_replaced_in_place(pool: PgPool) {
+    let library = library();
+    let (state, _) = test_utils::state_with_config(pool.clone(), library.config());
+    cassandra::import(&state, &Options::new(library.0.clone()))
+        .await
+        .unwrap();
+    let admin = token(&state, "admin@example.com", "admin").await;
+    let user = token(&state, "user@example.com", "user").await;
+    let id_of = |title: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM entities WHERE title = $1")
+                .bind(title)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let upload = |id: uuid::Uuid, bytes: Vec<u8>, token: String| {
+        let app = nexus::build_app(state.clone());
+        async move {
+            test_utils::upload(
+                app,
+                &format!("/api/v1/catalog/admin/entities/{id}/cover"),
+                "cover.avif",
+                bytes,
+                Some(&token),
+            )
+            .await
+        }
+    };
+
+    // Обложка есть: новый файл — по тому же пути, адрес прежний, размеры новые.
+    let heart = id_of("Собачье сердце").await;
+    let forbidden = upload(heart, avif(300, 450), user.clone()).await;
+    assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
+    let jpeg = upload(heart, b"\xff\xd8\xff\xe0 not avif".to_vec(), admin.clone()).await;
+    assert_eq!(jpeg.status, StatusCode::BAD_REQUEST);
+    assert_eq!(jpeg.json()["code"], "not_avif");
+    let replaced = upload(heart, avif(300, 450), admin.clone()).await;
+    assert_eq!(replaced.status, StatusCode::OK, "{:?}", replaced.json());
+    let body = replaced.json();
+    assert_eq!(
+        body["cover_url"],
+        "http://nexus.test/covers/books/1-9/1.avif"
+    );
+    assert_eq!(body["cover_width"], 300);
+    assert_eq!(body["cover_height"], 450);
+    let file = library.0.join("out-covers/1-9/1.avif");
+    assert_eq!(std::fs::read(&file).unwrap(), avif(300, 450));
+    // Временных файлов рядом не остаётся.
+    assert_eq!(
+        std::fs::read_dir(file.parent().unwrap()).unwrap().count(),
+        1
+    );
+
+    // Обложки не было, книга не из архива — `manual/<id>.avif`.
+    let master = id_of("Мастер и Маргарита").await;
+    let added = upload(master, avif(600, 900), admin.clone()).await;
+    assert_eq!(added.status, StatusCode::OK);
+    let manual = format!("manual/{}.avif", master.simple());
+    assert_eq!(
+        added.json()["cover_url"],
+        format!("http://nexus.test/covers/books/{manual}")
+    );
+    assert!(library.0.join("out-covers").join(manual).is_file());
 }

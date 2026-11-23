@@ -266,6 +266,22 @@ async fn list_entities_filters(pool: PgPool) {
     assert_eq!(slugs(&admin_q("100%25").await), ["no-date"]);
     assert_eq!(slugs(&admin_q("%25").await), ["no-date"]);
 
+    // Админский список без `sort` — новые сверху (uuidv7 id), `total` точный до 10 000.
+    let (status, page) = ctx
+        .admin_send(Method::GET, "/admin/entities?limit=100", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let ids: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(ids, sorted);
+    assert_eq!(page["total"].as_u64().unwrap() as usize, ids.len());
+
     let page = ctx.get_ok("/entities?tag=no-such-tag").await;
     assert_eq!(page["total"], 0);
     assert_eq!(page["items"], json!([]));

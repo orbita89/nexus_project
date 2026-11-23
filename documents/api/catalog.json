@@ -2620,7 +2620,7 @@
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Все сущности, включая скрытые с сайта (`active` в каждой): найти и включить. Фильтры и\nсортировки — как у `GET /entities`, плюс `active`.",
+        "summary": "Все сущности, включая скрытые с сайта (`active` в каждой): найти и включить. Фильтры и\nсортировки — как у `GET /entities`, плюс `active`. Без `sort` — новые сверху; `total` не\nбольше 10 000. Книги (`kind=book`, без `active=false` и `studio`, книжный поиск включён) —\nиз индекса Tantivy в нашем порядке (ручные места, затем балл), флаги — из PostgreSQL.",
         "operationId": "admin_list_entities",
         "parameters": [
           {
@@ -2970,6 +2970,105 @@
           },
           "409": {
             "description": "slug занят",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/entities/{id}/cover": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Заменить обложку книги файлом AVIF: тот же путь и тот же `cover_url` (или путь по правилам\nвыше, если обложки не было), старый файл заменяется.",
+        "operationId": "upload_book_cover",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id книги",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "multipart/form-data с одним файловым полем (AVIF)",
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Карточка с обложкой",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Не AVIF (`not_avif`), больше 10 МБ (`file_too_large`), не книга, пустой запрос",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет сущности",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "BOOK_COVERS_DIR не задан",
             "content": {
               "application/json": {
                 "schema": {

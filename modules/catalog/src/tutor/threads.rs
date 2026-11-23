@@ -597,6 +597,7 @@ fn error_event(message: &str) -> Event {
 
 /// Пересжать summary, если вне окна последних реплик накопилось [`prompt::SUMMARIZE_AFTER`].
 /// Ошибка не страшна: попробуем после следующего ответа.
+#[allow(clippy::too_many_arguments)]
 async fn compact(
     db: &sqlx::PgPool,
     http: &reqwest::Client,

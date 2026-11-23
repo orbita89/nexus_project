@@ -18,7 +18,9 @@ use shared::{AppError, AppResult, AppState};
 
 use super::index::{BookForm, BookIndex, BookQuery, BookSort, Found, IndexError};
 use super::sync;
-use crate::models::{EntityKind, EntitySummary, Neighbors, Page, SearchQuery, SearchSort};
+use crate::models::{
+    EntityKind, EntitySort, EntitySummary, Neighbors, Page, SearchQuery, SearchSort,
+};
 
 /// Сколько книг выдачи просматривать, разыскивая работу для «предыдущая / следующая».
 const NEIGHBORS_SCAN: usize = 5000;
@@ -158,6 +160,33 @@ pub async fn search(
         limit,
         offset: offset as i64,
     })
+}
+
+/// Запрос к индексу для админского списка книг (`GET /admin/entities?kind=book`): все виды
+/// текста; без `sort` — наш порядок (ручные места, затем балл; с `q` — релевантность с местами).
+pub fn admin_query(
+    q: Option<&str>,
+    sort: Option<EntitySort>,
+    tag: Option<String>,
+    year: Option<i32>,
+) -> BookQuery {
+    BookQuery {
+        q: q.unwrap_or_default().trim().to_string(),
+        sort: match sort {
+            None => BookSort::Relevance,
+            Some(EntitySort::Recommended) => BookSort::Recommended,
+            Some(EntitySort::Trending | EntitySort::Popular) => BookSort::Popular,
+            Some(EntitySort::TopRated | EntitySort::Rating) => BookSort::Rating,
+            Some(EntitySort::New) => BookSort::New,
+            Some(EntitySort::Soon) => BookSort::Soon,
+            Some(EntitySort::Title) => BookSort::Title,
+        },
+        tag,
+        year_from: year,
+        year_to: year,
+        forms: BookForm::ALL.to_vec(),
+        ..BookQuery::default()
+    }
 }
 
 /// Сколько книг под запрос.

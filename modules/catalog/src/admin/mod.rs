@@ -6,6 +6,7 @@ pub mod ai;
 pub mod awards;
 pub mod banners;
 pub mod books;
+pub mod covers;
 pub mod entities;
 pub mod episodes;
 pub mod fragments;

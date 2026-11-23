@@ -312,7 +312,7 @@ fn keywords(value: &str) -> Vec<String> {
 
 /// Путь обложки — только `<каталог>/<файл>` из букв, цифр, `-`, `_`, `.`: он уходит в URL и в
 /// путь на диске.
-fn safe_cover_path(path: &str) -> bool {
+pub fn safe_cover_path(path: &str) -> bool {
     let mut parts = path.split('/');
     let ok = |part: Option<&str>| {
         part.is_some_and(|p| {
