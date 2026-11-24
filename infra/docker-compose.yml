@@ -37,26 +37,6 @@ services:
       timeout: 3s
       retries: 10
 
-  meilisearch:
-    image: getmeili/meilisearch:v1.15
-    restart: unless-stopped
-    environment:
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-nexus_dev_master_key}
-      MEILI_ENV: development
-      # Без ограничений индексация берёт до 2/3 RAM и потоки на все ядра, а память после пика
-      # не отдаёт: прогон тестов каталога поднимал Meilisearch с 50 MiB до 2,8 GiB.
-      MEILI_MAX_INDEXING_MEMORY: ${MEILI_MAX_INDEXING_MEMORY:-256Mb}
-      MEILI_MAX_INDEXING_THREADS: ${MEILI_MAX_INDEXING_THREADS:-2}
-    ports:
-      - "7700:7700"
-    volumes:
-      - meilidata:/meili_data
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:7700/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   app:
     build:
       context: ..
@@ -85,16 +65,16 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@postgres:5432/${POSTGRES_DB:-nexus_db}
       REDIS_URL: redis://redis:6379
-      MEILI_URL: http://meilisearch:7700
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-nexus_dev_master_key}
       # Перестройка поиска переключается на индекс любого размера: в разработке каталог часто
       # перезаливается целиком. В проде (docker-compose.prod.yml) — по умолчанию 80%.
       SEARCH_REINDEX_MIN_PERCENT: ${SEARCH_REINDEX_MIN_PERCENT:-0}
       # Индекс холодного архива (catalog::archive): GET /catalog/archive/search, промоушен,
       # nexus archive dump|build.
       ARCHIVE_DIR: /var/lib/nexus/archive
-      # Книжный поиск на Tantivy (catalog::books::index): каталог задан — книги ищутся в нём, а
-      # не в Meilisearch. Индекс строит `nexus books index` (и сам сервер, если каталог пуст).
+      # Все индексы Tantivy: books, people, works, archive, collections. Обязателен: без него поиск отвечает 503.
+      SEARCH_INDEX_DIR: ${SEARCH_INDEX_DIR-/var/lib/nexus/tantivy}
+      # Индекс книг (по умолчанию <SEARCH_INDEX_DIR>/books). Строит `nexus books index` (и сам
+      # сервер, если каталог пуст).
       BOOKS_INDEX_DIR: ${BOOKS_INDEX_DIR-/var/lib/nexus/books-index}
       # Обложки книг библиотеки Cassandra: сюда их копирует `nexus books cassandra`, раздаёт
       # gateway по /covers/books/ (тот же том смонтирован в nginx только для чтения).
@@ -150,8 +130,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      meilisearch:
-        condition: service_healthy
       mailpit:
         condition: service_started
 
@@ -171,14 +149,10 @@ services:
     environment:
       HOME: /tmp
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@postgres:5432/${POSTGRES_DB:-nexus_db}
-      MEILI_URL: http://meilisearch:7700
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-nexus_dev_master_key}
       REDIS_URL: redis://redis:6379
       CARGO_BUILD_JOBS: "2"
     depends_on:
       postgres:
-        condition: service_healthy
-      meilisearch:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -219,7 +193,6 @@ volumes:
   coverscache:
   pgdata18:
   redisdata:
-  meilidata:
   archivedata:
   cargo-registry:
   app-target:

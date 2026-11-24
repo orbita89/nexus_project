@@ -122,6 +122,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(collection_links::list))
         .routes(routes!(collection_links::set))
         .routes(routes!(admin::search_collections))
+        .routes(routes!(admin::rebuild_collections_index))
         .routes(routes!(collection_links::add, collection_links::remove))
         .routes(routes!(admin::delete_collection_comment))
         .routes(routes!(collections::list_for_user))

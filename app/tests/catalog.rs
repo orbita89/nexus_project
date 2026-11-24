@@ -2,9 +2,10 @@
 //! ревалидация статики фронтенда), перестройка индекса с версиями.
 //!
 //! Данные — `fixtures/catalog.sql`. Карточки читаются из PostgreSQL; поиск и перестройка — в
-//! настоящем Meilisearch, блокировка перестройки — в Redis (`MEILI_URL`, `MEILI_MASTER_KEY`,
-//! `REDIS_URL`, поднимаются `make up`). Фронтенд для ISR — [`FakeIsr`]. У каждого теста свои префиксы
-//! индексов и ключей; [`test_utils::Cleanup`] удаляет их и при падении теста.
+//! индексах Tantivy во временном каталоге (`SEARCH_INDEX_DIR`), блокировка перестройки — в Redis
+//! (`REDIS_URL`, поднимается `make up`). Фронтенд для ISR — [`FakeIsr`]. У каждого теста свои
+//! каталог индексов и префикс ключей; [`test_utils::IndexDir`] и [`test_utils::Cleanup`] удаляют
+//! их и при падении теста.
 
 use axum::http::{Method, StatusCode};
 use serde_json::{json, Value};
@@ -20,13 +21,15 @@ const CATALOG: &str = "/api/v1/catalog";
 struct Ctx {
     state: AppState,
     _cleanup: Cleanup,
+    _index: Option<test_utils::IndexDir>,
 }
 
 impl Ctx {
-    fn from_state(state: AppState) -> Self {
+    fn from_state(state: AppState, index: Option<test_utils::IndexDir>) -> Self {
         Self {
             _cleanup: Cleanup::new(&state),
             state,
+            _index: index,
         }
     }
 
@@ -38,7 +41,7 @@ impl Ctx {
         test_utils::state_with_config(pool, config).0
     }
 
-    /// Как в проде: Meilisearch и Redis включены, индексы построены из фикстур.
+    /// Как в проде: индексы и Redis включены, индексы построены из фикстур (работы, люди, книги).
     async fn new(pool: PgPool) -> Self {
         let ctx = Self::unindexed(pool);
         catalog::search::reindex(
@@ -48,18 +51,21 @@ impl Ctx {
         )
         .await
         .expect("reindex fixtures");
+        catalog::books::sync::rebuild(&ctx.state)
+            .await
+            .expect("books index");
         ctx
     }
 
-    /// Meilisearch и Redis включены, индексов ещё нет.
+    /// Индексы и Redis включены, индексов ещё нет.
     fn unindexed(pool: PgPool) -> Self {
-        let state = test_utils::with_cache(test_utils::with_search(Self::base(pool)));
-        Self::from_state(state)
+        let (state, index) = test_utils::with_index(Self::base(pool));
+        Self::from_state(test_utils::with_cache(state), Some(index))
     }
 
-    /// Без Meilisearch и кэша.
+    /// Без индексов (`SEARCH_INDEX_DIR` не задан) и кэша.
     fn without_search(pool: PgPool) -> Self {
-        Self::from_state(Self::base(pool))
+        Self::from_state(Self::base(pool), None)
     }
 
     async fn send(
@@ -153,7 +159,7 @@ impl Ctx {
             .to_string()
     }
 
-    /// Ждёт, пока поиск вернёт ожидаемое: индексация в Meilisearch асинхронная.
+    /// Ждёт, пока поиск вернёт ожидаемое: правки доезжают до индекса после ответа админки.
     async fn search_until(&self, path: &str, done: impl Fn(&Value) -> bool) -> Value {
         for _ in 0..100 {
             let body = self.get_ok(path).await;
@@ -242,12 +248,12 @@ async fn list_entities_filters(pool: PgPool) {
     let page = ctx.get_ok("/entities?year=2021").await;
     assert_eq!(slugs(&page), ["dune-2021"]);
 
-    // Поиск по названию на сайте — только через Meilisearch (`GET /search`).
+    // Поиск по названию на сайте — только через `GET /search`.
     let response = ctx.get("/entities?q=witcher").await;
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
     assert_eq!(response.json()["code"], "use_search");
 
-    // В админке (скрытых нет в Meilisearch) — подстрока без учёта регистра, в названии или
+    // В админке (скрытых нет в индексе) — подстрока без учёта регистра, в названии или
     // оригинальном названии.
     let admin_q = |q: &'static str| {
         let ctx = &ctx;
@@ -1279,7 +1285,7 @@ async fn tags_crud(pool: PgPool) {
 // ---------------------------------------------------------------- поиск
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn search_returns_503_when_meilisearch_is_off(pool: PgPool) {
+async fn search_returns_503_when_index_dir_is_not_set(pool: PgPool) {
     let ctx = Ctx::without_search(pool);
 
     let response = ctx.get("/search?q=dune").await;
@@ -1316,7 +1322,7 @@ async fn search_after_reindex(pool: PgPool) {
         .admin_send(Method::POST, "/admin/search/reindex", None)
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["indexed"], 5);
+    assert_eq!(body["indexed"], 4);
 
     // Опечатка и оригинальное название.
     let page = ctx.get_ok("/search?q=dunne").await;
@@ -1360,7 +1366,7 @@ async fn search_after_reindex(pool: PgPool) {
     assert_eq!(page["items"], json!([]));
     assert_eq!(page["total"], 3, "{page}");
 
-    // slug тега подставляется в фильтр Meilisearch, поэтому проверяется.
+    // slug тега подставляется в запрос, поэтому проверяется.
     let response = ctx.get("/search?tag=x%22%20OR%20kind%20%3D%20book").await;
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
 
@@ -1369,7 +1375,7 @@ async fn search_after_reindex(pool: PgPool) {
         .admin_send(Method::POST, "/admin/search/reindex", None)
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["indexed"], 5);
+    assert_eq!(body["indexed"], 4);
     assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 3);
 }
 
@@ -1687,7 +1693,7 @@ async fn entity_neighbors_random_and_cover_size(pool: PgPool) {
         assert_eq!(ctx.get(bad).await.status, StatusCode::BAD_REQUEST, "{bad}");
     }
 
-    // Размеры обложки — и в выдаче поиска (документ Meilisearch), и в соседях, и на карточке.
+    // Размеры обложки — и в выдаче поиска (документ индекса), и в соседях, и на карточке.
     assert_eq!(first["next"]["cover_width"], 1000, "{first}");
     assert_eq!(first["next"]["cover_height"], 1493);
     let page = ctx.get_ok("/search?q=dune&kind=movie&sort=new").await;
@@ -1907,7 +1913,7 @@ async fn get_on(state: &AppState, path: &str) -> TestResponse {
     request(app, Method::GET, &format!("{CATALOG}{path}"), None, None).await
 }
 
-/// Карточки сущностей и людей — из PostgreSQL: без Meilisearch и Redis, правки в обход API видны
+/// Карточки сущностей и людей — из PostgreSQL: без индексов и Redis, правки в обход API видны
 /// сразу.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn cards_read_postgres_without_search_or_redis(pool: PgPool) {
@@ -2093,22 +2099,13 @@ async fn search_hits_have_no_card(pool: PgPool) {
 // ---------------------------------------------------------------- перестройка с версиями
 
 impl Ctx {
-    /// Версии индекса сущностей (`…entities_v<ms>`), по возрастанию.
-    async fn versions(&self) -> Vec<String> {
-        let main = self.state.search.index(catalog::search::INDEX);
-        let indexes = self
-            .state
-            .search
-            .call(Method::GET, "/indexes?limit=1000", None)
-            .await
-            .unwrap();
-        let mut versions: Vec<String> = indexes["results"]
-            .as_array()
+    /// Поколения индекса работ (`works.v<ms>`), по возрастанию.
+    fn versions(&self) -> Vec<String> {
+        let root = self.state.config.search_index_dir.clone().unwrap();
+        let mut versions: Vec<String> = std::fs::read_dir(root)
             .unwrap()
-            .iter()
-            .filter_map(|index| index["uid"].as_str())
-            .filter(|uid| uid.starts_with(&format!("{main}_v")))
-            .map(str::to_string)
+            .filter_map(|e| e.unwrap().file_name().into_string().ok())
+            .filter(|name| name.starts_with("works.v"))
             .collect();
         versions.sort();
         versions
@@ -2128,56 +2125,58 @@ impl Ctx {
     }
 }
 
-/// Хранятся только текущая версия (индекс `entities`) и одна предыдущая; старые удаляются.
+/// Хранятся только текущее поколение индекса и одно предыдущее; старые удаляются.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn reindex_keeps_current_and_one_previous_version(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
-    let first = ctx.versions().await;
-    assert_eq!(first.len(), 1, "{first:?}");
+    // Пустое поколение `works.v0` (открыто до первой перестройки) и первое построенное.
+    let first = ctx.versions();
+    assert_eq!(first.len(), 2, "{first:?}");
 
     let (status, body) = ctx.reindex("").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["indexed"], 5);
-    assert_eq!(body["previous_count"], 5);
-    // Устаревшие версии обоих индексов: `entities_v*` (их и проверяем) и `people_v*`.
+    assert_eq!(body["indexed"], 4, "работы без книг");
+    assert_eq!(body["previous_count"], 4);
+    // Устаревшие поколения обоих индексов: `works.v*` и `people.v*`.
     let deleted = body["deleted"].as_array().unwrap();
     assert_eq!(deleted.len(), 2, "{body}");
-    assert!(first.iter().all(|v| deleted.contains(&json!(v))), "{body}");
-    let second = ctx.versions().await;
-    assert_eq!(second, [body["previous_version"].as_str().unwrap()]);
+    assert!(deleted.contains(&json!(first[0])), "{body}");
+    let second = ctx.versions();
+    assert_eq!(second.len(), 2);
+    assert_eq!(second[0], body["previous_version"].as_str().unwrap());
     assert_ne!(second, first);
 
     let (status, body) = ctx.reindex("").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let deleted = body["deleted"].as_array().unwrap();
     assert_eq!(deleted.len(), 2, "{body}");
-    assert!(second.iter().all(|v| deleted.contains(&json!(v))), "{body}");
-    assert_eq!(ctx.versions().await.len(), 1);
+    assert!(deleted.contains(&json!(second[0])), "{body}");
+    assert_eq!(ctx.versions().len(), 2);
 
     // Поиск всё это время работает и видит всё.
-    assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 3);
+    assert_eq!(ctx.get_ok("/search?kind=movie").await["total"], 2);
 }
 
-/// Новый индекс меньше 80% текущего — поиск не переключается, теневой удаляется; ровно 80% и
-/// `force=true` — переключается.
+/// Новый индекс меньше 80% текущего — поиск не переключается, новое поколение удаляется; ровно
+/// 80% и `force=true` — переключается.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn reindex_refuses_to_switch_to_much_smaller_index(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
-    let versions = ctx.versions().await;
+    let versions = ctx.versions();
 
-    // 1 из 5 — 20%.
+    // 1 из 4 работ — 25%.
     ctx.delete_entities_except(&["witcher-3"]).await;
     let (status, body) = ctx.reindex("").await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(body["error"].as_str().unwrap().contains("80%"), "{body}");
-    assert_eq!(ctx.versions().await, versions, "shadow index is removed");
-    assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 3);
+    assert_eq!(ctx.versions(), versions, "new generation is removed");
+    assert_eq!(ctx.get_ok("/search?kind=movie").await["total"], 2);
 
     let (status, body) = ctx.reindex("?force=true").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["indexed"], 1);
-    assert_eq!(body["previous_count"], 5);
-    assert_eq!(ctx.get_ok("/search?q=dunne").await["total"], 0);
+    assert_eq!(body["previous_count"], 4);
+    assert_eq!(ctx.get_ok("/search?kind=movie").await["total"], 0);
 }
 
 /// `SEARCH_REINDEX_MIN_PERCENT=0` (dev) — переключается на индекс любого размера без `force`.
@@ -2192,28 +2191,33 @@ async fn reindex_without_size_check_when_min_percent_is_zero(pool: PgPool) {
     let (status, body) = ctx.reindex("").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["indexed"], 1);
-    assert_eq!(body["previous_count"], 5);
+    assert_eq!(body["previous_count"], 4);
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn reindex_switches_at_exactly_80_percent(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
-    // 4 из 5 — ровно 80%.
+    // 4 из 5 сущностей — книга в индексе работ не считается; ровно 80% — это 4 из 5 работ, поэтому
+    // проверяем границу на людях и работах отдельно: убираем одну работу из четырёх (75%) с
+    // порогом 75.
+    let mut ctx = ctx;
+    let mut config = (*ctx.state.config).clone();
+    config.search_reindex_min_percent = 75;
+    ctx.state.config = Arc::new(config);
     sqlx::query("DELETE FROM entities WHERE slug = 'witcher-3'")
         .execute(&ctx.state.db)
         .await
         .unwrap();
     let (status, body) = ctx.reindex("").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["indexed"], 4);
+    assert_eq!(body["indexed"], 3);
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn reindex_stream_reports_progress_rotation_and_isr(pool: PgPool) {
+async fn reindex_stream_reports_progress_and_isr(pool: PgPool) {
     let mut ctx = Ctx::new(pool).await;
     let isr = FakeIsr::start(StatusCode::OK).await;
     isr.attach(&mut ctx);
-    let old = ctx.versions().await;
 
     let token = ctx.admin().await;
     let response = ctx
@@ -2233,33 +2237,14 @@ async fn reindex_stream_reports_progress_rotation_and_isr(pool: PgPool) {
         .iter()
         .map(|s| s["step"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        plan,
-        [
-            "create_index",
-            "fill",
-            "fill_people",
-            "check",
-            "swap",
-            "rotate",
-            "isr"
-        ]
-    );
+    assert_eq!(plan, ["works", "people", "isr"]);
     let finished: Vec<(String, String)> = steps(&events)
         .into_iter()
         .filter(|(_, status)| status != "running")
         .collect();
     assert_eq!(
         finished,
-        pairs(&[
-            ("create_index", "done"),
-            ("fill", "done"),
-            ("fill_people", "done"),
-            ("check", "done"),
-            ("swap", "done"),
-            ("rotate", "done"),
-            ("isr", "done"),
-        ])
+        pairs(&[("works", "done"), ("people", "done"), ("isr", "done")])
     );
     let progress = |step: &str| -> Vec<&Value> {
         events
@@ -2268,33 +2253,24 @@ async fn reindex_stream_reports_progress_rotation_and_isr(pool: PgPool) {
             .map(|(_, data)| data)
             .collect()
     };
-    let entities = progress("fill");
+    let entities = progress("works");
     assert_eq!(entities.first().unwrap()["done"], 0);
     let last = entities.last().unwrap();
     assert_eq!(
         (last["done"].as_u64(), last["total"].as_u64()),
-        (Some(5), Some(5))
+        (Some(4), Some(4))
     );
     // Люди фикстур: четверо, у всех есть видимые работы или работ нет вовсе.
-    let last = *progress("fill_people").last().unwrap();
+    let last = *progress("people").last().unwrap();
     assert_eq!(
         (last["done"].as_u64(), last["total"].as_u64()),
         (Some(4), Some(4))
     );
 
-    let rotate = events
-        .iter()
-        .find(|(_, d)| d["step"] == "rotate" && d["status"] == "done")
-        .unwrap();
-    assert!(
-        rotate.1["message"].as_str().unwrap().contains(&old[0]),
-        "{}",
-        rotate.1
-    );
     let done = &events.last().unwrap().1;
     assert_eq!(done["type"], "done");
     assert_eq!(done["ok"], true);
-    assert_eq!(done["reindex"]["indexed"], 5);
+    assert_eq!(done["reindex"]["indexed"], 4);
     assert_eq!(done["reindex"]["people_indexed"], 3);
     assert_eq!(isr.bodies(), [json!({ "all": true })]);
     // Фронтенд пересобирает в фоне: шаг сообщает «запущена», а не «пересобрана».
@@ -2328,15 +2304,7 @@ async fn reindex_stream_reports_refused_switch(pool: PgPool) {
         .into_iter()
         .filter(|(_, status)| status != "running")
         .collect();
-    assert_eq!(
-        finished,
-        pairs(&[
-            ("create_index", "done"),
-            ("fill", "done"),
-            ("fill_people", "done"),
-            ("check", "failed"),
-        ])
-    );
+    assert_eq!(finished, pairs(&[("works", "failed")]));
     let done = &events.last().unwrap().1;
     assert_eq!(done["ok"], false);
     assert!(done.get("reindex").is_none(), "{done}");
@@ -2722,7 +2690,7 @@ async fn update_stream_rejects_bad_input_before_streaming(pool: PgPool) {
     assert_eq!(response.status, StatusCode::UNAUTHORIZED);
 }
 
-/// Выключенные Meilisearch и ISR — `skipped`, упавший ISR — `failed` и `ok: false`;
+/// Выключенные поиск и ISR — `skipped`, упавший ISR — `failed` и `ok: false`;
 /// запись в БД при этом остаётся.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn update_stream_reports_skipped_and_failed_steps(pool: PgPool) {
@@ -3779,7 +3747,7 @@ async fn search_sorts_by_nexus_ratings(pool: PgPool) {
 }
 
 /// Фасеты наград в индексе: фильтр «есть „Оскар“», год церемонии и сортировка по числу наград.
-/// Без них каталог не умеет «фильмы с наградой»: любые выборки идут только через Meilisearch.
+/// Без них каталог не умеет «фильмы с наградой»: любые выборки идут только через индекс.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn search_award_facets(pool: PgPool) {
     let ctx = Ctx::new(pool).await;

@@ -1,62 +1,51 @@
-//! Поиск по каталогу через Meilisearch.
+//! Поиск по каталогу на Tantivy.
 //!
-//! Два индекса: `entities` (здесь) и `people` ([`crate::people_search`]); перестраиваются и
-//! переключаются вместе. Источник правды — PostgreSQL, индексы производные и нужны только для поиска:
-//! карточки (`GET /entities/{slug}`, `GET /people/{slug}`) читаются из БД. Документ компактный
+//! Индексы: `works` ([`crate::works`]: фильмы, сериалы, игры, картины), `people`
+//! ([`crate::people_idx`]) и `books` ([`crate::books`]); лежат под `SEARCH_INDEX_DIR`. Источник
+//! правды — PostgreSQL, индексы производные и нужны только для поиска: карточки
+//! (`GET /entities/{slug}`, `GET /people/{slug}`) читаются из БД. Документ компактный
 //! ([`SearchDoc`]): без карточки, описания и участников.
 //!
-//! После каждой записи в админке затронутые сущности переотправляются в индекс
-//! ([`update_index`] из [`crate::publish::run`]) с ожиданием применения. Ошибка Meilisearch
-//! запись не отменяет, только пишется в лог и в поток публикации.
+//! После каждой записи в админке затронутые сущности переписываются в индексы
+//! ([`update_index`] из [`crate::publish::run`]). Ошибка индекса запись не отменяет, только
+//! пишется в лог и в поток публикации.
 //!
-//! **Перестройка** ([`reindex`]) — без простоя и без очистки живого индекса. Поиск всегда
-//! читает индекс `entities` (роль алиаса: в Meilisearch 1.15 алиасов нет):
-//! 1. создаются теневые `entities_v<unix ms>` и `people_v<unix ms>`;
-//! 2. все сущности из БД пачками по [`BATCH`] уходят в первый, затем пересчитывается известность
-//!    людей и все публичные люди уходят во второй (`progress` в потоке по каждому шагу);
-//! 3. каждый новый индекс должен быть не меньше `SEARCH_REINDEX_MIN_PERCENT`% текущего (80, в
-//!    dev — 0) — иначе поиск не переключается (сломанная или неполная выборка), теневые
-//!    удаляются; `force` — пропустить;
-//! 4. `swap-indexes` (обе пары одной задачей): `entities` и `people` получают новые документы
-//!    атомарно для всех инстансов, а `*_v<ms>` — предыдущую версию (откат — swap обратно);
-//! 5. ротация: хранятся текущая и одна предыдущая версия, `*_v*` старше удаляются;
-//! 6. фронтенду — запустить пересборку всей статики (`{"all": true}`; он отвечает `202` и
-//!    пересобирает в фоне), только при ручном запуске.
+//! **Перестройка** ([`reindex`]) — без простоя: каждый индекс строится в новое поколение
+//! каталога `<name>.v<ms>` и переключается атомарно (`<name>.current`, хранятся два поколения):
+//! 1. работы из БД пачками; новый индекс не меньше `SEARCH_REINDEX_MIN_PERCENT`% текущего
+//!    (80, в dev — 0), иначе поколение не переключается; `force` — пропустить;
+//! 2. известность людей и все публичные люди — так же;
+//! 3. фронтенду — пересборка всей статики (`{"all": true}`), только при ручном запуске.
 //!
-//! Перестройка одна за раз: в процессе — набор занятых индексов, между инстансами — блокировка
-//! в Redis. Правки во время перестройки пишутся и в теневой индекс (в пределах инстанса).
+//! Перестройка одна за раз: в процессе — флаг, между инстансами — блокировка в Redis. Правки во
+//! время перестройки повторяются после переключения.
 
 use crate::entities::check_year;
 use crate::jobs::{self, DoneEvent, JobEvent, Reporter, Step, StepStatus};
 use crate::models::{
     page_bounds, CountryHit, Entity, EntityKind, EntitySummary, FacetQuery, IndexEntities,
     IndexResult, Neighbors, Page, PublisherHit, ReindexQuery, ReindexResult, ReleaseStatus,
-    SearchQuery, SearchSort, StudioHit, StudiosQuery, TagHit, ENTITY_COLUMNS, ENTITY_STATS_JOIN,
-    IN_CATALOG, VISIBLE,
+    SearchQuery, SearchSort, StudioHit, StudiosQuery, TagHit, ENTITY_STATS_JOIN, IN_CATALOG,
+    VISIBLE,
 };
 use crate::people_search;
 use crate::publish::Touched;
 use crate::validate;
 use axum::extract::State;
-use axum::http::Method;
 use axum::response::Response;
 use axum::Json;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use shared::directory::RatingStats;
 use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path, Query, Repeated};
-use shared::search::{Search, SearchError};
 use shared::{AdminUser, AppError, AppResult, AppState};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-
-/// Имя индекса сущностей (без префикса). Его читает поиск.
-pub const INDEX: &str = "entities";
 
 /// Сколько сущностей читать из БД и отправлять одним запросом при перестройке.
 pub const BATCH: usize = 500;
@@ -73,10 +62,6 @@ const RUNNING_LOCK_RENEW: Duration = Duration::from_secs(30);
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-// Общая часть работы с Meilisearch живёт в `shared::search`: ею пользуется и `social`
-// (индекс коллекций), а модули не зависят друг от друга.
-pub(crate) use shared::search::{ignore, search_exact, unavailable, upsert_and_delete};
-
 /// Документ индекса — компактный (решение 2026-10-14): то, по чему ищут (`title`,
 /// `original_title`, `studios`), что показывает выдача (`EntitySummary`: `slug`, постер, дата,
 /// статус выхода, рейтинг IMDb), фильтры (`kind`, `tags`, `year`, `studios`, `release_ts`,
@@ -84,7 +69,7 @@ pub(crate) use shared::search::{ignore, search_exact, unavailable, upsert_and_de
 /// описания, имён участников и названий тегов в индексе нет: карточка читается из БД, а полный
 /// состав (миллионы титров) делал перестройку в разы дольше.
 #[derive(Debug, Serialize)]
-struct SearchDoc {
+pub(crate) struct SearchDoc {
     id: Uuid,
     kind: EntityKind,
     slug: String,
@@ -98,7 +83,7 @@ struct SearchDoc {
     /// Для фильтров `year = 2021`, `year 2000 TO 2010`.
     year: Option<i32>,
     /// `release_date` в unix-секундах (полночь UTC): сортировки `new` / `soon` и их фильтр
-    /// «вышел / не вышел» (Meilisearch сравнивает только числа).
+    /// «вышел / не вышел» (для сортировок и фильтра «вышел / не вышел»).
     release_ts: Option<i64>,
     /// Все студии из `metadata.studios`: поиск («dreamworks»), фильтр `studio`, подсказки.
     studios: Vec<String>,
@@ -225,36 +210,12 @@ fn day_ts(date: NaiveDate) -> i64 {
     date.and_time(NaiveTime::MIN).and_utc().timestamp()
 }
 
-fn entity_settings() -> Value {
-    json!({
-        // Порядок задаёт вес: совпадение в названии важнее, чем в студии.
-        "searchableAttributes": ["title", "original_title", "studios", "publishers"],
-        "filterableAttributes": [
-            "kind", "tags", "year", "slug", "studios", "publishers", "museums", "release_ts",
-            "studio_slugs", "countries",
-            "award_slugs", "award_years", "award_wins", "award_nominations",
-        ],
-        "sortableAttributes": [
-            "rank_score", "popularity", "quality", "release_ts", "title",
-            "nexus_ratings_count", "nexus_rating_avg", "award_wins", "award_nominations",
-        ],
-        // Подсказки студий, издателей и тегов без запроса — самые частые.
-        "faceting": {
-            "sortFacetValuesBy": {
-                "studios": "count", "publishers": "count", "museums": "count", "tags": "count",
-                "countries": "count",
-            },
-        },
-        "pagination": { "maxTotalHits": MAX_TOTAL_HITS },
-    })
-}
-
-/// Потолок счёта и листания Meilisearch (по умолчанию 1000) — с запасом на рост горячего слоя.
-pub(crate) const MAX_TOTAL_HITS: u32 = 500_000;
-
 /// Документы пачки сущностей: строки уже прочитаны, теги, оценки Nexus и slug'и студий — по
 /// запросу на пачку. Участников в документе нет: фильтр `person` — через [`person_filter`].
-async fn docs_of(db: &sqlx::PgPool, entities: Vec<Entity>) -> Result<Vec<SearchDoc>, BoxError> {
+pub(crate) async fn docs_of(
+    db: &sqlx::PgPool,
+    entities: Vec<Entity>,
+) -> Result<Vec<SearchDoc>, BoxError> {
     let ids: Vec<Uuid> = entities.iter().map(|e| e.id).collect();
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT et.entity_id, t.slug FROM entity_tags et JOIN tags t ON t.id = et.tag_id
@@ -314,32 +275,10 @@ async fn update_entities(state: &AppState, touched: &Touched) -> Result<(), BoxE
     if touched.entities.is_empty() {
         return Ok(());
     }
-    // Книги — в свой индекс (Tantivy), если он включён; в Meilisearch их тогда нет, и строка
-    // книги, оставшаяся там с прошлого режима, удаляется как «не найденная».
+    // Книги и работы — каждые в свой индекс Tantivy; ошибка одного не мешает другому.
     let books = crate::books::sync::update(state, &touched.entities).await;
-    let in_meili = crate::books::search::in_meili(state);
-    let entities: Vec<Entity> = sqlx::query_as(&format!(
-        "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN}
-         WHERE e.id = ANY($1) AND {VISIBLE} AND {in_meili} ORDER BY e.id"
-    ))
-    .bind(&touched.entities)
-    .fetch_all(&state.db)
-    .await?;
-    let docs = docs_of(&state.db, entities).await?;
-    let present: Vec<Uuid> = docs.iter().map(|doc| doc.id).collect();
-    let docs = serde_json::to_value(&docs)?;
-
-    let main = state.search.index(INDEX);
-    upsert_and_delete(&state.search, &main, &docs, &touched.entities, &present).await?;
-    if let Some(shadow) = shadow_of(&main) {
-        // Не успеет — перестройка перезапишет документ более ранним чтением; не страшно.
-        if let Err(error) =
-            upsert_and_delete(&state.search, &shadow, &docs, &touched.entities, &present).await
-        {
-            tracing::warn!(%error, %shadow, "shadow index sync failed");
-        }
-    }
-    books
+    let works = crate::works::sync::update(state, &touched.entities).await;
+    books.and(works)
 }
 
 // ---------------------------------------------------------------- перестройка
@@ -356,14 +295,7 @@ pub struct ReindexOptions {
 impl ReindexOptions {
     /// Шаги для `plan`.
     pub fn steps(self) -> Vec<Step> {
-        let mut steps = vec![
-            Step::CreateIndex,
-            Step::Fill,
-            Step::FillPeople,
-            Step::Check,
-            Step::Swap,
-            Step::Rotate,
-        ];
+        let mut steps = vec![Step::Works, Step::People];
         if self.revalidate {
             steps.push(Step::Isr);
         }
@@ -423,29 +355,15 @@ impl From<ReindexError> for AppError {
     }
 }
 
-/// Индексы, которые сейчас перестраиваются в этом процессе (в тестах у каждого свой префикс).
-static RUNNING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-/// Теневой индекс идущей перестройки: основной → теневой.
-static SHADOWS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+/// Идёт ли перестройка в этом процессе.
+static RUNNING: Mutex<bool> = Mutex::new(false);
 
-pub(crate) fn shadow_of(main: &str) -> Option<String> {
-    SHADOWS.lock().unwrap().as_ref()?.get(main).cloned()
-}
-
-fn set_shadow(main: &str, shadow: Option<String>) {
-    let mut shadows = SHADOWS.lock().unwrap();
-    let shadows = shadows.get_or_insert_with(HashMap::new);
-    match shadow {
-        Some(shadow) => shadows.insert(main.to_string(), shadow),
-        None => shadows.remove(main),
-    };
+pub(crate) fn unavailable() -> AppError {
+    AppError::Unavailable("search is temporarily unavailable".into())
 }
 
 /// Право на перестройку. Снимать через [`ReindexLock::release`]; в процессе снимается и при drop.
 pub struct ReindexLock {
-    main: String,
-    /// Индекс людей: его теневой тоже снимается при drop.
-    people: String,
     redis: bool,
     /// Продление блокировки в Redis, пока она взята.
     renew: Option<tokio::task::JoinHandle<()>>,
@@ -453,21 +371,17 @@ pub struct ReindexLock {
 
 impl ReindexLock {
     pub async fn acquire(state: &AppState) -> Result<Self, ReindexError> {
-        if !state.search.is_enabled() {
+        if state.config.search_index_dir.is_none() {
             return Err(ReindexError::Disabled);
         }
-        let main = state.search.index(INDEX);
-        if !RUNNING
-            .lock()
-            .unwrap()
-            .get_or_insert_with(HashSet::new)
-            .insert(main.clone())
         {
-            return Err(ReindexError::Busy);
+            let mut running = RUNNING.lock().unwrap();
+            if *running {
+                return Err(ReindexError::Busy);
+            }
+            *running = true;
         }
         let mut lock = Self {
-            main,
-            people: state.search.index(people_search::INDEX),
             redis: false,
             renew: None,
         };
@@ -508,11 +422,7 @@ impl Drop for ReindexLock {
         if let Some(renew) = self.renew.take() {
             renew.abort();
         }
-        if let Some(running) = RUNNING.lock().unwrap().as_mut() {
-            running.remove(&self.main);
-        }
-        set_shadow(&self.main, None);
-        set_shadow(&self.people, None);
+        *RUNNING.lock().unwrap() = false;
     }
 }
 
@@ -528,56 +438,59 @@ pub async fn reindex(
     result
 }
 
-/// Шаги перестройки (см. описание модуля). Каждый сообщает о себе в `report`; упавший шаг —
-/// `failed` и ошибка, следующие не выполняются.
+/// Имена поколений индексов в корне (`works.v<ms>`, `people.v<ms>`).
+fn generation_names(root: &std::path::Path) -> HashSet<String> {
+    std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.contains(".v"))
+        .collect()
+}
+
+/// Ошибка шага перестройки: слишком маленький индекс или сбой.
+fn step_error(
+    index: &'static str,
+    error: crate::works::sync::BuildError,
+    current: u64,
+    min: u64,
+) -> ReindexError {
+    match error {
+        crate::works::sync::BuildError::TooSmall { new } => ReindexError::TooSmall {
+            index,
+            new,
+            current,
+            min,
+        },
+        crate::works::sync::BuildError::Other(error) => ReindexError::Failed(error.to_string()),
+    }
+}
+
+/// Шаги перестройки (см. описание модуля): работы, люди, статика. Каждый сообщает о себе в
+/// `report`; упавший шаг — `failed` и ошибка, следующие не выполняются.
 pub async fn reindex_locked(
     state: &AppState,
-    lock: &ReindexLock,
+    _lock: &ReindexLock,
     options: ReindexOptions,
     report: &Reporter,
 ) -> Result<ReindexResult, ReindexError> {
-    let search = &state.search;
-    let stamp = unix_ms();
-    let main = lock.main.clone();
-    let version = format!("{main}_v{stamp}");
-    let people_main = lock.people.clone();
-    let people_version = format!("{people_main}_v{stamp}");
-    let fail = |step: Step, started: Instant, error: String| {
-        report.finish(step, StepStatus::Failed, error.clone(), started);
-        ReindexError::Failed(error)
+    let Some(root) = state.config.search_index_dir.as_deref() else {
+        return Err(ReindexError::Disabled);
     };
-    let drop_versions = || async {
-        drop_index(search, &version).await;
-        drop_index(search, &people_version).await;
-    };
+    let root = std::path::Path::new(root);
+    let min = state.config.search_reindex_min_percent;
+    let before = generation_names(root);
+    let previous_version = shared::tantivy::generations::current(root, "works")
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let previous_count = crate::works::sync::doc_count(state);
+    let people_before = crate::people_idx::sync::doc_count(state);
 
-    // 1. Теневые индексы. Основные создаются, если их нет: swap требует оба.
-    let started = report.start(Step::CreateIndex);
-    let created = async {
-        create_version(search, &main, &version, &entity_settings()).await?;
-        create_version(
-            search,
-            &people_main,
-            &people_version,
-            &people_search::settings(),
-        )
-        .await
-    };
-    if let Err(error) = created.await {
-        drop_versions().await;
-        return Err(fail(Step::CreateIndex, started, error.to_string()));
-    }
-    set_shadow(&main, Some(version.clone()));
-    set_shadow(&people_main, Some(people_version.clone()));
-    report.finish(
-        Step::CreateIndex,
-        StepStatus::Done,
-        format!("Созданы теневые индексы {version}, {people_version}"),
-        started,
-    );
-
-    // 2. Все сущности пачками. Перед ними — студии для новых названий в `metadata.studios`.
-    let started = report.start(Step::Fill);
+    // 1. Работы. Перед ними — студии для новых названий в `metadata.studios`.
+    let started = report.start(Step::Works);
     let studios_started = Instant::now();
     match crate::studios::sync(&state.db, None, &[]).await {
         Ok(created) => {
@@ -585,147 +498,38 @@ pub async fn reindex_locked(
         }
         Err(error) => tracing::warn!(%error, "studios sync failed"),
     }
-    let indexed = match fill(state, &version, report).await {
-        Ok(indexed) => indexed,
+    let indexed = match crate::works::sync::rebuild_with(state, report, options.force).await {
+        Ok(count) => count,
         Err(error) => {
-            drop_versions().await;
-            return Err(fail(Step::Fill, started, error.to_string()));
+            report.finish(Step::Works, StepStatus::Failed, error.to_string(), started);
+            return Err(step_error("works", error, previous_count, min));
         }
     };
     report.finish(
-        Step::Fill,
+        Step::Works,
         StepStatus::Done,
-        format!("Проиндексировано {indexed} сущностей"),
+        format!("Проиндексировано {indexed} работ"),
         started,
     );
 
-    // 2б. Известность людей и все публичные люди.
-    let started = report.start(Step::FillPeople);
-    let people_indexed = match people_search::fill(state, &people_version, report).await {
-        Ok(indexed) => indexed,
-        Err(error) => {
-            drop_versions().await;
-            return Err(fail(Step::FillPeople, started, error.to_string()));
-        }
-    };
+    // 2. Люди: известность и все публичные люди.
+    let started = report.start(Step::People);
+    let people_indexed =
+        match crate::people_idx::sync::rebuild_with(state, report, options.force).await {
+            Ok(count) => count,
+            Err(error) => {
+                report.finish(Step::People, StepStatus::Failed, error.to_string(), started);
+                return Err(step_error("people", error, people_before, min));
+            }
+        };
     report.finish(
-        Step::FillPeople,
+        Step::People,
         StepStatus::Done,
         format!("Проиндексировано {people_indexed} человек"),
         started,
     );
 
-    // 3. Не переключать на подозрительно маленький индекс.
-    let started = report.start(Step::Check);
-    let sizes = async {
-        Ok::<_, SearchError>([
-            (
-                INDEX,
-                documents(search, &version).await?,
-                documents(search, &main).await?,
-            ),
-            (
-                people_search::INDEX,
-                documents(search, &people_version).await?,
-                documents(search, &people_main).await?,
-            ),
-        ])
-    };
-    let sizes = match sizes.await {
-        Ok(sizes) => sizes,
-        Err(error) => {
-            drop_versions().await;
-            return Err(fail(Step::Check, started, error.to_string()));
-        }
-    };
-    let min = state.config.search_reindex_min_percent;
-    let describe = |(name, new, current): &(&str, u64, u64)| {
-        let percent = (new * 100).checked_div(*current).unwrap_or(100);
-        format!("{name}: {new} документов, текущий: {current} ({percent}%)")
-    };
-    let summary = sizes.iter().map(describe).collect::<Vec<_>>().join("; ");
-    let current = sizes[0].2;
-    match sizes
-        .iter()
-        .find(|(_, new, current)| new * 100 < current * min)
-    {
-        Some(&(index, new, current)) if !options.force => {
-            drop_versions().await;
-            report.finish(
-                Step::Check,
-                StepStatus::Failed,
-                format!(
-                    "Новые индексы — {summary}. Нужно не меньше {min}% — поиск не переключён, \
-                     теневые индексы удалены. Если данные удалены намеренно — повторить с \
-                     force=true"
-                ),
-                started,
-            );
-            return Err(ReindexError::TooSmall {
-                index,
-                new,
-                current,
-                min,
-            });
-        }
-        Some(_) => report.finish(
-            Step::Check,
-            StepStatus::Done,
-            format!("Новые индексы — {summary}: меньше {min}%, но force=true"),
-            started,
-        ),
-        None => report.finish(
-            Step::Check,
-            StepStatus::Done,
-            format!("Новые индексы — {summary}"),
-            started,
-        ),
-    }
-
-    // 4. Переключение одной задачей: entities ⇄ entities_v<ms>, people ⇄ people_v<ms>.
-    let started = report.start(Step::Swap);
-    search
-        .call_and_wait(
-            Method::POST,
-            "/swap-indexes",
-            Some(&json!([
-                { "indexes": [main, version] },
-                { "indexes": [people_main, people_version] },
-            ])),
-        )
-        .await
-        .map_err(|error| fail(Step::Swap, started, error.to_string()))?;
-    // До сих пор правки шли и в теневые: ни одна не осталась только в старой версии.
-    set_shadow(&main, None);
-    set_shadow(&people_main, None);
-    report.finish(
-        Step::Swap,
-        StepStatus::Done,
-        format!(
-            "Поиск переключён на новые индексы; предыдущие версии сохранены в {version}, \
-             {people_version}"
-        ),
-        started,
-    );
-
-    // 5. Ротация: текущая (main) и предыдущая (version), всё старше — удалить.
-    let started = report.start(Step::Rotate);
-    let rotated = async {
-        let mut deleted = rotate(search, &main, &version).await?;
-        deleted.extend(rotate(search, &people_main, &people_version).await?);
-        Ok::<_, SearchError>(deleted)
-    };
-    let deleted = rotated
-        .await
-        .map_err(|error| fail(Step::Rotate, started, error.to_string()))?;
-    let message = if deleted.is_empty() {
-        "Устаревших индексов нет".to_string()
-    } else {
-        format!("Удалены устаревшие индексы: {}", deleted.join(", "))
-    };
-    report.finish(Step::Rotate, StepStatus::Done, message, started);
-
-    // 6. Статика.
+    // 3. Статика.
     if options.revalidate {
         let started = report.start(Step::Isr);
         if !state.isr.is_enabled() {
@@ -757,164 +561,34 @@ pub async fn reindex_locked(
         }
     }
 
+    let after = generation_names(root);
+    let mut deleted: Vec<String> = before.difference(&after).cloned().collect();
+    deleted.sort();
     Ok(ReindexResult {
-        indexed,
-        people_indexed,
-        previous_count: current,
-        previous_version: version,
+        indexed: indexed as usize,
+        people_indexed: people_indexed as usize,
+        previous_count,
+        previous_version,
         deleted,
     })
-}
-
-fn unix_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-
-/// Метка версии: `entities_v1759912345123` → `1759912345123`.
-fn version_ms(main: &str, uid: &str) -> Option<u128> {
-    uid.strip_prefix(main)?.strip_prefix("_v")?.parse().ok()
-}
-
-async fn create_version(
-    search: &Search,
-    main: &str,
-    version: &str,
-    settings: &Value,
-) -> Result<(), SearchError> {
-    search
-        .call_and_wait(
-            Method::POST,
-            "/indexes",
-            Some(&json!({ "uid": version, "primaryKey": "id" })),
-        )
-        .await?;
-    search
-        .call_and_wait(
-            Method::PATCH,
-            &format!("/indexes/{version}/settings"),
-            Some(settings),
-        )
-        .await?;
-    ignore(
-        search
-            .call_and_wait(
-                Method::POST,
-                "/indexes",
-                Some(&json!({ "uid": main, "primaryKey": "id" })),
-            )
-            .await,
-        "index_already_exists",
-    )
-}
-
-/// Все видимые сущности из БД пачками по [`BATCH`] (keyset по id) в индекс `version`. Пока Meilisearch
-/// применяет пачку, читается следующая. Возвращает число отправленных документов.
-async fn fill(state: &AppState, version: &str, report: &Reporter) -> Result<usize, BoxError> {
-    let in_meili = crate::books::search::in_meili(state);
-    let total: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM entities e WHERE {VISIBLE} AND {in_meili}"
-    ))
-    .fetch_one(&state.db)
-    .await?;
-    let total = u64::try_from(total).unwrap_or(0);
-    report.progress(Step::Fill, 0, total);
-
-    let mut after: Option<Uuid> = None;
-    let mut indexed: usize = 0;
-    let mut pending: Option<(Value, usize)> = None;
-    loop {
-        let entities: Vec<Entity> = sqlx::query_as(&format!(
-            "SELECT {ENTITY_COLUMNS} FROM entities e {ENTITY_STATS_JOIN}
-             WHERE {VISIBLE} AND {in_meili} AND ($1::uuid IS NULL OR e.id > $1)
-             ORDER BY e.id LIMIT $2"
-        ))
-        .bind(after)
-        .bind(BATCH as i64)
-        .fetch_all(&state.db)
-        .await?;
-        let Some(last) = entities.last() else { break };
-        after = Some(last.id);
-        let docs = docs_of(&state.db, entities).await?;
-        let count = docs.len();
-        let task = state
-            .search
-            .call(
-                Method::POST,
-                &format!("/indexes/{version}/documents"),
-                Some(&serde_json::to_value(&docs)?),
-            )
-            .await?;
-        if let Some((task, count)) = pending.replace((task, count)) {
-            state.search.wait(&task).await?;
-            indexed += count;
-            report.progress(Step::Fill, indexed as u64, total.max(indexed as u64));
-        }
-    }
-    if let Some((task, count)) = pending {
-        state.search.wait(&task).await?;
-        indexed += count;
-        report.progress(Step::Fill, indexed as u64, total.max(indexed as u64));
-    }
-    Ok(indexed)
-}
-
-async fn documents(search: &Search, index: &str) -> Result<u64, SearchError> {
-    let stats = search
-        .call(Method::GET, &format!("/indexes/{index}/stats"), None)
-        .await?;
-    Ok(stats["numberOfDocuments"].as_u64().unwrap_or(0))
-}
-
-/// Удаляет версии `{main}_v*` старше `keep`. Более новые не трогает (их не бывает: перестройка
-/// одна за раз). Возвращает удалённые.
-async fn rotate(search: &Search, main: &str, keep: &str) -> Result<Vec<String>, SearchError> {
-    let keep_ms = version_ms(main, keep).unwrap_or(0);
-    let indexes = search
-        .call(Method::GET, "/indexes?limit=1000", None)
-        .await?;
-    let mut old: Vec<(u128, String)> = indexes["results"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|index| index["uid"].as_str())
-        .filter_map(|uid| Some((version_ms(main, uid)?, uid.to_string())))
-        .filter(|(ms, _)| *ms < keep_ms)
-        .collect();
-    old.sort_unstable();
-    for (_, uid) in &old {
-        ignore(
-            search
-                .call_and_wait(Method::DELETE, &format!("/indexes/{uid}"), None)
-                .await,
-            "index_not_found",
-        )?;
-    }
-    Ok(old.into_iter().map(|(_, uid)| uid).collect())
-}
-
-/// Удаляет недостроенный теневой индекс; ошибка — только в лог (уберёт следующая ротация).
-async fn drop_index(search: &Search, index: &str) {
-    let result = search
-        .call_and_wait(Method::DELETE, &format!("/indexes/{index}"), None)
-        .await;
-    if let Err(error) = ignore(result, "index_not_found") {
-        tracing::warn!(%error, %index, "shadow index cleanup failed");
-    }
 }
 
 /// Перестройка в фоне: сразу при старте приложения, затем каждые
 /// `SEARCH_REINDEX_INTERVAL_SECS` (если не 0). По расписанию перестраивает только один инстанс:
 /// блокировка в Redis. Статику фронтенда не трогает.
 pub fn spawn_reindex(state: AppState) {
-    if !state.search.is_enabled() {
+    if state.config.search_index_dir.is_none() {
         return;
     }
     let interval = Duration::from_secs(state.config.search_reindex_interval_secs);
     tokio::spawn(async move {
-        run_reindex(&state, "startup").await;
+        // Индексы уже построены (диск сохраняется между запусками; пустые строит `spawn_initial`):
+        // полная перестройка при каждом рестарте — десятки минут нагрузки впустую.
+        if crate::works::sync::doc_count(&state) == 0
+            || crate::people_idx::sync::doc_count(&state) == 0
+        {
+            run_reindex(&state, "startup").await;
+        }
         if interval.is_zero() {
             return;
         }
@@ -955,7 +629,7 @@ const RATINGS_SYNC_OVERLAP_SECS: i64 = 60;
 /// сводки. Оценки пишет `social` через `EntityRatings` (после каждой рецензии и при старте),
 /// модулю `social` о поиске знать не нужно. Повтор безопасен: документы строятся целиком из БД.
 pub fn spawn_ratings_sync(state: AppState) {
-    if !state.search.is_enabled() {
+    if state.config.search_index_dir.is_none() {
         return;
     }
     tokio::spawn(async move {
@@ -1036,7 +710,7 @@ pub async fn sync_ratings(
     responses(
         (status = 200, description = "Страница результатов. `total` — всего найдено (точно)", body = Page<EntitySummary>),
         (status = 400, description = "Неверный фильтр", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn search(
@@ -1054,56 +728,25 @@ pub async fn search(
     if let Some(page) = blended(&state, &repeated, &query, limit, offset).await? {
         return Ok(Json(page));
     }
-    let empty = |limit, offset| {
-        Json(Page {
+    // Ни одной работы (или нет такого человека) — искать нечего.
+    let Some(works) = works_query(&state, &repeated, &query).await? else {
+        return Ok(Json(Page {
             items: Vec::new(),
             total: 0,
             limit,
             offset,
-        })
+        }));
     };
-    // Ни одной работы (или нет такого человека) — искать нечего.
-    let Some(body) = request_body(&state, &repeated, &query).await? else {
-        return Ok(empty(limit, offset));
-    };
-    if matches!(query.sort, Some(SearchSort::Random)) {
-        return match random_window(&state, body, limit).await? {
-            Some((items, total, offset)) => Ok(Json(Page {
-                items,
-                total,
-                limit,
-                offset,
-            })),
-            None => Ok(empty(limit, 0)),
-        };
-    }
-
-    let path = format!("/indexes/{}/search", state.search.index(INDEX));
-    let (response, total) = match search_exact(&state.search, &path, body, limit, offset).await {
-        Ok(found) => found,
-        // Индекс ещё не построен — искать не в чем.
-        Err(error) if error.code() == Some("index_not_found") => (json!({ "hits": [] }), 0),
-        Err(SearchError::Disabled) => return Err(unavailable()),
-        Err(error) => {
-            tracing::warn!(%error, "search request failed");
-            return Err(unavailable());
-        }
-    };
-    let items: Vec<EntitySummary> = serde_json::from_value(response["hits"].clone())
-        .map_err(|e| AppError::Internal(format!("unexpected search hits: {e}")))?;
-
-    Ok(Json(Page {
-        items,
-        total,
-        limit,
-        offset,
-    }))
+    let random = matches!(query.sort, Some(SearchSort::Random));
+    Ok(Json(
+        crate::works::search::search(&state, works, random, limit, offset).await?,
+    ))
 }
 
 /// Запрос к книжному индексу, если отвечать должен он: запрос только про книги (`kind=book`) и
 /// книжный поиск включён ([`crate::books::search::routed`]). Внешний `None` — отвечает
-/// Meilisearch; внутренний — под фильтры у книг заведомо ничего нет. Параметры проверяются теми
-/// же правилами, что и для Meilisearch (неверный фильтр — 400).
+/// индекс; внутренний — под фильтры у книг заведомо ничего нет. Параметры проверяются теми
+/// же правилами, что и раньше (неверный фильтр — 400).
 fn books_query(
     state: &AppState,
     repeated: &Repeated,
@@ -1114,14 +757,14 @@ fn books_query(
         return Ok(None);
     }
     let countries = countries_of(repeated)?;
-    filters_of(query, &kinds, &countries)?;
+    filters_of(query)?;
     Ok(Some(crate::books::search::query_of(query, &countries)))
 }
 
-/// Сколько работ Meilisearch идёт в общей выдаче перед каждой книгой ([`blended`]).
+/// Сколько работ идёт в общей выдаче перед каждой книгой ([`blended`]).
 const BLEND_OTHERS_PER_BOOK: usize = 2;
 
-/// Порядок общей выдачи двух индексов: `true` — очередная работа из Meilisearch, `false` —
+/// Порядок общей выдачи двух индексов: `true` — очередная работа, `false` —
 /// книга. Чередование «две работы — книга», пока есть обе стороны, дальше — что осталось.
 /// Возвращает порядок страницы и сколько работ каждой стороны стоит перед ней.
 fn blend_order(
@@ -1161,11 +804,6 @@ fn blend_order(
     (order, before_o, before_b)
 }
 
-/// Общая выдача, когда книги живут в своём индексе (Tantivy), а запрос — про все разделы или
-/// про книги вместе с другими: оценки двух движков несравнимы, поэтому выдачи чередуются
-/// ([`blend_order`]) — так книги есть и в подсказках шапки, и в выборе работ для коллекций и
-/// чата, которые о двух индексах не знают. `total` — сумма. `None` — отвечает один Meilisearch:
-/// книжный поиск выключен, запрос не про книги, `sort=random` или книг под запрос нет.
 async fn blended(
     state: &AppState,
     repeated: &Repeated,
@@ -1184,21 +822,20 @@ async fn blended(
     let Some(books) = crate::books::search::query_of(query, &countries) else {
         return Ok(None);
     };
-    // Проверка параметров (400) и запрос к Meilisearch — как у обычного пути.
-    let body = request_body(state, repeated, query).await?;
+    // Проверка параметров (400) — как у обычного пути.
+    let works = works_query(state, repeated, query).await?;
     let books_total = crate::books::search::count(state, books.clone()).await?;
     if books_total == 0 {
         return Ok(None);
     }
-    let others_total = match &body {
-        Some(body) => {
-            let mut count = body.clone();
-            count["page"] = json!(1);
-            count["hitsPerPage"] = json!(0);
-            count["attributesToRetrieve"] = json!([]);
-            ask(state, &count).await?["totalHits"].as_i64().unwrap_or(0)
+    // Первая страница работ — одним проходом по индексу (и итог для чередования), как у подсказок
+    // шапки; дальше страницы запрашиваются со смещением.
+    let (first_items, others_total) = match &works {
+        Some(works) => {
+            let page = crate::works::search::search(state, works.clone(), false, limit, 0).await?;
+            (page.items, page.total)
         }
-        None => 0,
+        None => (Vec::new(), 0),
     };
     let (order, others_offset, books_offset) = blend_order(
         others_total as usize,
@@ -1208,12 +845,22 @@ async fn blended(
     );
     let others_limit = order.iter().filter(|other| **other).count();
     let books_limit = order.len() - others_limit;
-    let mut others: std::vec::IntoIter<EntitySummary> = match body {
-        Some(mut body) if others_limit > 0 => {
-            body["offset"] = json!(others_offset);
-            body["limit"] = json!(others_limit);
-            hits::<EntitySummary>(&ask(state, &body).await?)?.into_iter()
+    let mut others: std::vec::IntoIter<EntitySummary> = match works {
+        Some(_) if others_limit > 0 && others_offset == 0 => {
+            let mut items = first_items;
+            items.truncate(others_limit);
+            items.into_iter()
         }
+        Some(works) if others_limit > 0 => crate::works::search::search(
+            state,
+            works,
+            false,
+            others_limit as i64,
+            others_offset as i64,
+        )
+        .await?
+        .items
+        .into_iter(),
         _ => Vec::new().into_iter(),
     };
     let mut books = if books_limit > 0 {
@@ -1242,107 +889,6 @@ async fn blended(
     }))
 }
 
-/// Тело запроса к индексу по фильтрам и сортировке `GET /search`, без `limit` и `offset`:
-/// общее для самого поиска, соседей и случайной работы — ряд должен совпадать с тем, который
-/// человек видел в списке. `None` — под фильтры заведомо ничего не подходит.
-async fn request_body(
-    state: &AppState,
-    repeated: &Repeated,
-    query: &SearchQuery,
-) -> AppResult<Option<Value>> {
-    let kinds = kinds_of(repeated)?;
-    let countries = countries_of(repeated)?;
-    let mut filters = filters_of(query, &kinds, &countries)?;
-    // Книги живут в своём индексе: строки книг, оставшиеся в Meilisearch с прежнего режима (до
-    // очередной перестройки), в выдачу попасть не должны — иначе в общей выдаче они задвоятся.
-    if crate::books::sync::enabled(state) {
-        filters.push("kind != book".to_owned());
-    }
-    if let Some(person) = &query.person {
-        match person_filter(&state.db, person, query.role.as_deref()).await? {
-            Some(filter) => filters.push(filter),
-            None => return Ok(None),
-        }
-    }
-    // `random` — порядок релевантности, случайно только смещение окна (см. `random_window`).
-    let sort = match query.sort {
-        Some(SearchSort::Recommended) => Some("rank_score:desc"),
-        Some(SearchSort::Trending) => Some("popularity:desc"),
-        Some(SearchSort::TopRated) => Some("quality:desc"),
-        Some(SearchSort::New) => {
-            filters.push(format!("release_ts <= {}", day_ts(Utc::now().date_naive())));
-            Some("release_ts:desc")
-        }
-        Some(SearchSort::Soon) => {
-            filters.push(format!("release_ts > {}", day_ts(Utc::now().date_naive())));
-            Some("release_ts:asc")
-        }
-        Some(SearchSort::Title) => Some("title:asc"),
-        Some(SearchSort::Popular) => Some("nexus_ratings_count:desc"),
-        Some(SearchSort::Rating) => Some("nexus_rating_avg:desc"),
-        Some(SearchSort::Awarded) => Some("award_wins:desc"),
-        Some(SearchSort::Random) | None => None,
-    };
-    let mut body = json!({
-        "q": query.q.as_deref().unwrap_or_default().trim(),
-        "filter": if filters.is_empty() { Value::Null } else { filters.join(" AND ").into() },
-        "attributesToRetrieve": SUMMARY_FIELDS,
-    });
-    if let Some(sort) = sort {
-        // Как в `GET /entities`: при равной средней — больше оценок, затем новее.
-        body["sort"] = match query.sort {
-            Some(SearchSort::Popular) => json!([sort, "release_ts:desc"]),
-            Some(SearchSort::Rating) => {
-                json!([sort, "nexus_ratings_count:desc", "release_ts:desc"])
-            }
-            _ => json!([sort]),
-        };
-    }
-    Ok(Some(body))
-}
-
-/// Запрос к индексу сущностей: индекса ещё нет — пустая выдача, Meilisearch недоступен — 503.
-async fn ask(state: &AppState, body: &Value) -> AppResult<Value> {
-    let path = format!("/indexes/{}/search", state.search.index(INDEX));
-    match state.search.call(Method::POST, &path, Some(body)).await {
-        Ok(response) => Ok(response),
-        Err(error) if error.code() == Some("index_not_found") => {
-            Ok(json!({ "hits": [], "totalHits": 0 }))
-        }
-        Err(SearchError::Disabled) => Err(unavailable()),
-        Err(error) => {
-            tracing::warn!(%error, "search request failed");
-            Err(unavailable())
-        }
-    }
-}
-
-fn hits<T: serde::de::DeserializeOwned>(response: &Value) -> AppResult<Vec<T>> {
-    serde_json::from_value(response["hits"].clone())
-        .map_err(|e| AppError::Internal(format!("unexpected search hits: {e}")))
-}
-
-/// `sort=random`: случайное окно выдачи — сколько всего нашлось, затем `limit` подряд со
-/// случайного смещения. Два запроса к Meilisearch вместо двух обходов с фронта. `None` — пусто.
-async fn random_window(
-    state: &AppState,
-    mut body: Value,
-    limit: i64,
-) -> AppResult<Option<(Vec<EntitySummary>, i64, i64)>> {
-    let mut count = body.clone();
-    count["page"] = json!(1);
-    count["hitsPerPage"] = json!(0);
-    count["attributesToRetrieve"] = json!([]);
-    let total = ask(state, &count).await?["totalHits"].as_i64().unwrap_or(0);
-    if total == 0 {
-        return Ok(None);
-    }
-    let offset = random_below(total - total.min(limit) + 1);
-    body["offset"] = json!(offset);
-    body["limit"] = json!(limit);
-    Ok(Some((hits(&ask(state, &body).await?)?, total, offset)))
-}
-
 /// Случайное число 0..`n` (`n` > 0). Отдельной зависимости ради выбора одной карточки не нужно:
 /// наносекунды часов, перемешанные splitmix64, — этого хватает.
 pub(crate) fn random_below(n: i64) -> i64 {
@@ -1357,12 +903,6 @@ pub(crate) fn random_below(n: i64) -> i64 {
     (x % n.max(1) as u64) as i64
 }
 
-/// Сколько документов выдачи просматриваем за раз, разыскивая работу (`neighbors`).
-const NEIGHBORS_PAGE: i64 = 1000;
-/// И сколько всего: дальше ряд считается слишком длинным — края `null`, фронт покажет похожие.
-/// Ряды листания (художник, музей, тег, запрос) короче на порядки.
-const NEIGHBORS_SCAN: i64 = 5000;
-
 /// Предыдущая и следующая работа в той же выдаче, что отдаёт `GET /search`: листание на карточке
 /// идёт по тому списку, откуда человек пришёл (художник, тег, музей, поиск).
 ///
@@ -1373,7 +913,7 @@ const NEIGHBORS_SCAN: i64 = 5000;
 /// Работы нет в выдаче (фильтры ей не подходят, слишком длинный ряд) — `{"prev": null,
 /// "next": null}`, а не 404: фронт в этом случае показывает похожие.
 ///
-/// Позиции и длины ряда здесь нет намеренно: Meilisearch не умеет «дай номер документа в
+/// Позиции и длины ряда здесь нет намеренно: индекс не отдаёт «номер документа в
 /// выдаче», а счётчика «14 из 142» в интерфейсе нет.
 #[utoipa::path(
     get, path = "/entities/{slug}/neighbors", tag = "catalog",
@@ -1389,7 +929,7 @@ const NEIGHBORS_SCAN: i64 = 5000;
     responses(
         (status = 200, description = "Соседи; на краях ряда — `null`", body = Neighbors),
         (status = 400, description = "Неверный фильтр или `sort=random`", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn neighbors(
@@ -1408,107 +948,20 @@ pub async fn neighbors(
             crate::books::search::neighbors(&state, books, slug).await?,
         ));
     }
-    let none = Json(Neighbors {
-        prev: None,
-        next: None,
-    });
-    let Some(mut body) = request_body(&state, &repeated, &query).await? else {
-        return Ok(none);
+    let Some(works) = works_query(&state, &repeated, &query).await? else {
+        return Ok(Json(Neighbors {
+            prev: None,
+            next: None,
+        }));
     };
-    // Ряд ищем по slug'ам: тысяча коротких строк дешевле тысячи карточек, а порядок тот же.
-    body["attributesToRetrieve"] = json!(["slug"]);
-    body["hitsPerPage"] = json!(NEIGHBORS_PAGE);
-
-    #[derive(serde::Deserialize)]
-    struct SlugHit {
-        slug: String,
-    }
-
-    let (mut prev, mut next) = (None, None);
-    let mut found = false;
-    for page in 1..=NEIGHBORS_SCAN / NEIGHBORS_PAGE {
-        body["page"] = json!(page);
-        let row: Vec<SlugHit> = hits(&ask(&state, &body).await?)?;
-        let full = row.len() as i64 == NEIGHBORS_PAGE;
-        if found {
-            // Работа была последней на прошлой странице — следующая открывает эту.
-            next = row.into_iter().next().map(|hit| hit.slug);
-            break;
-        }
-        match row.iter().position(|hit| hit.slug == slug) {
-            Some(at) => {
-                found = true;
-                if at > 0 {
-                    prev = Some(row[at - 1].slug.clone());
-                }
-                if at + 1 < row.len() {
-                    next = Some(row[at + 1].slug.clone());
-                    break;
-                }
-                if !full {
-                    break; // Конец выдачи: следующей нет.
-                }
-            }
-            // Последняя работа страницы — кандидат в `prev` для первой работы следующей.
-            None => {
-                if !full {
-                    break; // Вся выдача просмотрена, работы в ней нет.
-                }
-                prev = row.last().map(|hit| hit.slug.clone());
-            }
-        }
-    }
-    if !found {
-        return Ok(none);
-    }
-
-    let wanted: Vec<&String> = [prev.as_ref(), next.as_ref()]
-        .into_iter()
-        .flatten()
-        .collect();
-    if wanted.is_empty() {
-        return Ok(none);
-    }
-    let by_slug = json!({
-        "q": "",
-        "filter": format!(
-            "slug IN [{}]",
-            wanted.iter().map(|s| filter_string(s)).collect::<Vec<_>>().join(", ")
-        ),
-        "limit": wanted.len(),
-        "attributesToRetrieve": SUMMARY_FIELDS,
-    });
-    let found: Vec<EntitySummary> = hits(&ask(&state, &by_slug).await?)?;
-    let pick = |slug: &Option<String>| {
-        slug.as_ref()
-            .and_then(|slug| found.iter().find(|item| &item.slug == slug))
-            .cloned()
-    };
-    Ok(Json(Neighbors {
-        prev: pick(&prev),
-        next: pick(&next),
-    }))
+    Ok(Json(
+        crate::works::search::neighbors(&state, works, slug).await?,
+    ))
 }
-
-/// Поля выдачи (`EntitySummary`) из документа индекса.
-const SUMMARY_FIELDS: [&str; 12] = [
-    "id",
-    "kind",
-    "slug",
-    "title",
-    "original_title",
-    "release_date",
-    "cover_url",
-    "cover_width",
-    "cover_height",
-    "release_status",
-    "imdb_rating",
-    "imdb_votes",
-];
 
 /// Похожие для `GET /entities/{slug}/similar`: видимые того же типа, у которых есть хотя бы один из
 /// тегов `tags`, кроме `exclude` (сама сущность и связанные); сверху — по баллу «Рекомендуемые»,
-/// затем новее. Теги и исключения — slug'и (проверены форматом БД, экранируются как строки).
+/// затем новее.
 pub(crate) async fn similar(
     state: &AppState,
     kind: EntityKind,
@@ -1519,75 +972,14 @@ pub(crate) async fn similar(
     if crate::books::search::routed(state, &[kind]) {
         return crate::books::search::similar(state, tags, exclude, limit).await;
     }
-    let quoted = |values: &[String]| {
-        values
-            .iter()
-            .map(|value| filter_string(value))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let body = json!({
-        "q": "",
-        "filter": format!(
-            "kind = {} AND tags IN [{}] AND slug NOT IN [{}]",
-            kind.as_str(),
-            quoted(tags),
-            quoted(exclude)
-        ),
-        "sort": ["rank_score:desc", "release_ts:desc"],
-        "attributesToRetrieve": SUMMARY_FIELDS,
-    });
-    let path = format!("/indexes/{}/search", state.search.index(INDEX));
-    let (response, total) = match search_exact(&state.search, &path, body, limit, 0).await {
-        Ok(found) => found,
-        Err(error) if error.code() == Some("index_not_found") => (json!({ "hits": [] }), 0),
-        Err(SearchError::Disabled) => return Err(unavailable()),
-        Err(error) => {
-            tracing::warn!(%error, "similar search failed");
-            return Err(unavailable());
-        }
-    };
-    let items = serde_json::from_value(response["hits"].clone())
-        .map_err(|e| AppError::Internal(format!("unexpected search hits: {e}")))?;
-    Ok((items, total))
+    crate::works::search::similar(state, kind.as_str(), tags, exclude, limit).await
 }
 
 /// Длина значения фильтра `studio` и запроса подсказок.
 const MAX_STUDIO: usize = 200;
 
-/// Фильтры Meilisearch из запроса. Всё, что подставляется строкой, проверено или экранировано.
-fn filters_of(
-    query: &SearchQuery,
-    kinds: &[EntityKind],
-    countries: &[String],
-) -> AppResult<Vec<String>> {
-    let mut filters = Vec::new();
-    // Страны — ИЛИ между собой («снято в Великобритании или США») и И с остальным. Коды уже
-    // проверены [`countries_of`], в строке фильтра безопасны.
-    if !countries.is_empty() {
-        filters.push(format!(
-            "countries IN [{}]",
-            countries
-                .iter()
-                .map(|code| format!("\"{code}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    // Типы — ИЛИ между собой и И со всеми остальными фильтрами: «фильмы и игры, но только
-    // с тегом sci-fi». Один тип выглядит в фильтре так же, как раньше.
-    if !kinds.is_empty() {
-        let any = kinds
-            .iter()
-            .map(|kind| format!("kind = {}", kind.as_str()))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        filters.push(if kinds.len() > 1 {
-            format!("({any})")
-        } else {
-            any
-        });
-    }
+/// Проверка параметров запроса (неверный фильтр — 400). Сами фильтры строит [`works_query`].
+fn filters_of(query: &SearchQuery) -> AppResult<()> {
     if let Some(form) = &query.book_form {
         if crate::books::search::parse_forms(form).is_none() {
             return Err(AppError::BadRequest(
@@ -1596,9 +988,7 @@ fn filters_of(
         }
     }
     if let Some(tag) = &query.tag {
-        // Проверенный slug безопасно подставлять в строку фильтра.
         validate::slug("tag", tag)?;
-        filters.push(format!("tags = \"{tag}\""));
     }
     match (query.year, query.year_from, query.year_to) {
         (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
@@ -1608,7 +998,6 @@ fn filters_of(
         }
         (Some(year), None, None) => {
             check_year(year)?;
-            filters.push(format!("year = {year}"));
         }
         (None, from, to) => {
             for year in [from, to].into_iter().flatten() {
@@ -1620,10 +1009,7 @@ fn filters_of(
                         "year_from must not be greater than year_to".into(),
                     ))
                 }
-                (Some(from), Some(to)) => filters.push(format!("year {from} TO {to}")),
-                (Some(from), None) => filters.push(format!("year >= {from}")),
-                (None, Some(to)) => filters.push(format!("year <= {to}")),
-                (None, None) => {}
+                _ => {}
             }
         }
     }
@@ -1634,7 +1020,6 @@ fn filters_of(
                 "studio must be 1-{MAX_STUDIO} characters"
             )));
         }
-        filters.push(format!("studios = {}", filter_string(studio)));
     }
     if let Some(publisher) = &query.publisher {
         let publisher = publisher.trim();
@@ -1643,7 +1028,6 @@ fn filters_of(
                 "publisher must be 1-{MAX_STUDIO} characters"
             )));
         }
-        filters.push(format!("publishers = {}", filter_string(publisher)));
     }
     if let Some(museum) = &query.museum {
         let museum = museum.trim();
@@ -1652,28 +1036,15 @@ fn filters_of(
                 "museum must be 1-{MAX_STUDIO} characters"
             )));
         }
-        filters.push(format!("museums = {}", filter_string(museum)));
     }
     if let Some(studio) = &query.studio_slug {
-        // Проверенный slug безопасно подставлять в строку фильтра.
         validate::slug("studio_slug", studio)?;
-        filters.push(format!("studio_slugs = \"{studio}\""));
     }
     if let Some(award) = &query.award {
-        // Проверенный slug безопасно подставлять в строку фильтра.
         validate::slug("award", award)?;
-        filters.push(format!("award_slugs = \"{award}\""));
     }
     if let Some(year) = query.award_year {
         check_year(year)?;
-        filters.push(format!("award_years = {year}"));
-    }
-    if let Some(awarded) = query.awarded {
-        filters.push(if awarded {
-            "award_wins > 0".to_owned()
-        } else {
-            "award_wins = 0".to_owned()
-        });
     }
     match (&query.person, &query.role) {
         (None, Some(_)) => {
@@ -1688,7 +1059,7 @@ fn filters_of(
         }
         (None, None) => {}
     }
-    Ok(filters)
+    Ok(())
 }
 
 /// Типы из запроса: `?kind=movie&kind=game` или `?kind=movie,game`. Неизвестный — 400, как и
@@ -1721,15 +1092,12 @@ fn countries_of(repeated: &Repeated) -> AppResult<Vec<String>> {
     Ok(countries)
 }
 
-/// Фильтр `person` (+ `role`): работы человека — из `entity_credits` (индекс по `person_id`), в
-/// Meilisearch — `slug IN [...]`; список, сортировка, `total` и пагинация остаются в индексе.
-/// Участников в документе нет: 2,75 млн значений фильтра делали перестройку часовой (Meilisearch
-/// не успевал индексировать пачки). `None` — работ нет. `person` и `role` уже проверены.
-async fn person_filter(
+/// Slug'и работ человека (`None` — работ нет): общая часть [`person_filter`] и Tantivy-ветки.
+async fn person_slugs(
     db: &sqlx::PgPool,
     person: &str,
     role: Option<&str>,
-) -> sqlx::Result<Option<String>> {
+) -> sqlx::Result<Option<Vec<String>>> {
     let slugs: Vec<String> = sqlx::query_scalar(&format!(
         "SELECT DISTINCT e.slug FROM people p
          JOIN entity_credits ec ON ec.person_id = p.id
@@ -1740,19 +1108,79 @@ async fn person_filter(
     .bind(role.map(str::trim))
     .fetch_all(db)
     .await?;
-    if slugs.is_empty() {
+    Ok((!slugs.is_empty()).then_some(slugs))
+}
+
+/// Виды запроса без книг: книги отвечают отдельным индексом.
+fn others_of(kinds: &[EntityKind]) -> Vec<EntityKind> {
+    kinds
+        .iter()
+        .copied()
+        .filter(|kind| *kind != EntityKind::Book)
+        .collect()
+}
+
+/// Запрос к индексу работ Tantivy по параметрам `GET /search`. `None` — под фильтры заведомо
+/// ничего не подходит (запрос только про книги, а книжного индекса нет; у человека нет работ).
+/// Параметры проверяются теми же правилами, что и раньше (неверный фильтр — 400).
+async fn works_query(
+    state: &AppState,
+    repeated: &Repeated,
+    query: &SearchQuery,
+) -> AppResult<Option<crate::works::index::WorksQuery>> {
+    use crate::works::index::{WorksQuery, WorksSort, YearRange};
+    let kinds = kinds_of(repeated)?;
+    let others = others_of(&kinds);
+    let countries = countries_of(repeated)?;
+    filters_of(query)?;
+    if !kinds.is_empty() && others.is_empty() {
         return Ok(None);
     }
-    let quoted: Vec<String> = slugs.iter().map(|slug| filter_string(slug)).collect();
-    Ok(Some(format!("slug IN [{}]", quoted.join(", "))))
+    let trimmed = |value: &Option<String>| value.as_deref().map(|v| v.trim().to_owned());
+    let only_slugs = match &query.person {
+        Some(person) => match person_slugs(&state.db, person, query.role.as_deref()).await? {
+            Some(slugs) => Some(slugs),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    let (from, to) = match query.year {
+        Some(year) => (Some(year), Some(year)),
+        None => (query.year_from, query.year_to),
+    };
+    let sort = query.sort.map(|sort| match sort {
+        SearchSort::Recommended => WorksSort::Recommended,
+        SearchSort::Trending => WorksSort::Trending,
+        SearchSort::TopRated => WorksSort::TopRated,
+        SearchSort::New => WorksSort::New,
+        SearchSort::Soon => WorksSort::Soon,
+        SearchSort::Title => WorksSort::Title,
+        SearchSort::Popular => WorksSort::Popular,
+        SearchSort::Rating => WorksSort::Rating,
+        SearchSort::Awarded => WorksSort::Awarded,
+        SearchSort::Random => WorksSort::Relevance,
+    });
+    Ok(Some(WorksQuery {
+        q: query.q.as_deref().unwrap_or_default().trim().to_owned(),
+        kinds: others.iter().map(|kind| kind.as_str().to_owned()).collect(),
+        countries,
+        tags: query.tag.iter().cloned().collect(),
+        years: YearRange { from, to },
+        studio: trimmed(&query.studio),
+        publisher: trimmed(&query.publisher),
+        museum: trimmed(&query.museum),
+        studio_slug: query.studio_slug.clone(),
+        award: query.award.clone(),
+        award_year: query.award_year,
+        awarded: query.awarded,
+        only_slugs,
+        exclude_slugs: Vec::new(),
+        now_ts: day_ts(Utc::now().date_naive()),
+        sort,
+    }))
 }
 
-/// Строка в кавычках для фильтра Meilisearch: `\` и `"` экранируются.
-fn filter_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-/// Подсказки студий для фильтра `studio` (facet search Meilisearch по полю `studios`): по части
+/// Подсказки студий для фильтра `studio` (фасет по полю `studios`): по части
 /// названия с опечатками; без `q` — самые частые. `count` — сколько видимых сущностей в индексе,
 /// `slug` и `logo_url` — из `studios` (одним запросом на ответ), логотип тот же, что на странице
 /// студии.
@@ -1762,7 +1190,7 @@ fn filter_string(value: &str) -> String {
     responses(
         (status = 200, description = "Студии", body = Vec<StudioHit>),
         (status = 400, description = "Слишком длинный `q`", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn studios(
@@ -1805,9 +1233,6 @@ async fn studio_refs(
     Ok(crate::studios::refs(&state.db, &names).await?)
 }
 
-/// Значения фасета с числом видимых сущностей: по части значения с опечатками, без `q` — самые
-/// частые (`sortFacetValuesBy`). `kind` сужает до типа: набор фильтров свой у каждого раздела.
-/// Индекса ещё нет — пусто, Meilisearch недоступен — 503.
 async fn facet_hits(
     state: &AppState,
     facet: &str,
@@ -1815,30 +1240,7 @@ async fn facet_hits(
     kind: Option<EntityKind>,
     limit: Option<i64>,
 ) -> AppResult<Vec<(String, i64)>> {
-    let limit = limit.unwrap_or(10).clamp(1, 50) as usize;
-    let body = json!({
-        "facetName": facet,
-        "facetQuery": q,
-        "filter": kind.map(|kind| format!("kind = {}", kind.as_str())),
-    });
-    let path = format!("/indexes/{}/facet-search", state.search.index(INDEX));
-    let response = match state.search.call(Method::POST, &path, Some(&body)).await {
-        Ok(response) => response,
-        Err(error) if error.code() == Some("index_not_found") => json!({ "facetHits": [] }),
-        Err(SearchError::Disabled) => return Err(unavailable()),
-        Err(error) => {
-            tracing::warn!(%error, %facet, "facet search failed");
-            return Err(unavailable());
-        }
-    };
-    Ok(response["facetHits"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .take(limit)
-        .filter_map(|hit| Some((hit["value"].as_str()?.to_string(), hit["count"].as_i64()?)))
-        .collect())
+    crate::works::search::facet(state, facet, q, kind.map(EntityKind::as_str), limit).await
 }
 
 /// Подсказки издателей для фильтра `publisher` (facet search по полю `publishers`): издательство
@@ -1849,7 +1251,7 @@ async fn facet_hits(
     responses(
         (status = 200, description = "Издатели", body = Vec<PublisherHit>),
         (status = 400, description = "Слишком длинный `q`", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn publishers(
@@ -1898,7 +1300,7 @@ async fn publisher_hits(
     responses(
         (status = 200, description = "Музеи", body = Vec<PublisherHit>),
         (status = 400, description = "Слишком длинный `q`", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn museums(
@@ -1924,7 +1326,7 @@ pub async fn museums(
     responses(
         (status = 200, description = "Страны", body = Vec<CountryHit>),
         (status = 400, description = "Слишком длинный `q`", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn countries(
@@ -1955,7 +1357,7 @@ pub async fn countries(
     responses(
         (status = 200, description = "Теги и жанры", body = Vec<TagHit>),
         (status = 400, description = "Слишком длинный `q`", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn tags(
@@ -2020,7 +1422,7 @@ pub async fn tags(
         (status = 400, description = "Нужен ровно один из `slugs` / `ids`, не больше 1000", body = ErrorBody),
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Нужна роль admin", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn index_entities(
@@ -2050,7 +1452,7 @@ pub async fn index_entities(
         }
     };
     let requested = ids.len();
-    // Та же дорога, что у правки в админке: пачками, с ожиданием применения Meilisearch.
+    // Та же дорога, что у правки в админке: пачками, синхронно.
     for chunk in ids.chunks(BATCH) {
         if let Err(error) = update_entities(&state, &Touched::entities(chunk)).await {
             tracing::warn!(%error, "index entities failed");
@@ -2098,7 +1500,7 @@ fn check_count(count: usize) -> AppResult<()> {
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Нужна роль admin", body = ErrorBody),
         (status = 409, description = "Перестройка уже идёт или новый индекс меньше 80% текущего (поиск не переключён)", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn reindex_handler(
@@ -2132,7 +1534,7 @@ pub async fn reindex_handler(
         (status = 401, description = "Нет токена", body = ErrorBody),
         (status = 403, description = "Нужна роль admin", body = ErrorBody),
         (status = 409, description = "Перестройка уже идёт", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn reindex_stream(
@@ -2188,18 +1590,6 @@ mod tests {
         assert!(blend_order(1, 1, 5, 2).0.is_empty());
     }
 
-    #[test]
-    fn version_names() {
-        assert_eq!(
-            version_ms("entities", "entities_v1759912345123"),
-            Some(1_759_912_345_123)
-        );
-        assert_eq!(version_ms("t_entities", "t_entities_v12"), Some(12));
-        assert_eq!(version_ms("entities", "entities"), None);
-        assert_eq!(version_ms("entities", "entities_reindex"), None);
-        assert_eq!(version_ms("entities", "other_entities_v1"), None);
-    }
-
     fn query(params: Value) -> SearchQuery {
         serde_json::from_value(params).unwrap()
     }
@@ -2230,19 +1620,6 @@ mod tests {
             kinds("kind=movie&kind=comic").unwrap_err().code(),
             "validation"
         );
-
-        // В фильтр типы идут как ИЛИ, остальное — через И.
-        let filters = filters_of(
-            &query(json!({ "year": 2001 })),
-            &[EntityKind::Movie, EntityKind::Game],
-            &[],
-        )
-        .unwrap();
-        assert_eq!(filters, ["(kind = movie OR kind = game)", "year = 2001"]);
-        assert_eq!(
-            filters_of(&query(json!({})), &[EntityKind::Movie], &[]).unwrap(),
-            ["kind = movie"]
-        );
     }
 
     /// Страны запроса — как их видит обработчик.
@@ -2264,32 +1641,15 @@ mod tests {
         for bad in ["country=USA", "country=%D0%A1%D0%A8%D0%90", "country=ZZ"] {
             assert_eq!(countries(bad).unwrap_err().code(), "validation", "{bad}");
         }
-
-        // В фильтр страны идут как ИЛИ, остальное — через И.
-        let filters = filters_of(
-            &query(json!({ "year": 2001 })),
-            &[],
-            &["US".to_owned(), "GB".to_owned()],
-        )
-        .unwrap();
-        assert_eq!(filters, [r#"countries IN ["US", "GB"]"#, "year = 2001"]);
     }
 
     #[test]
     fn filters() {
-        let ok = |params| filters_of(&query(params), &[], &[]).unwrap();
-        assert_eq!(ok(json!({ "year": 2001 })), ["year = 2001"]);
-        assert_eq!(
-            ok(json!({ "year_from": 2000, "year_to": 2010 })),
-            ["year 2000 TO 2010"]
-        );
-        assert_eq!(ok(json!({ "year_from": 2000 })), ["year >= 2000"]);
-        assert_eq!(ok(json!({ "year_to": 2010 })), ["year <= 2010"]);
-        // Кавычка и обратный слеш не выходят из строки фильтра.
-        assert_eq!(
-            ok(json!({ "studio": r#" A" OR kind = book \"# })),
-            [r#"studios = "A\" OR kind = book \\""#]
-        );
+        let ok = |params| filters_of(&query(params)).unwrap();
+        ok(json!({ "year": 2001 }));
+        ok(json!({ "year_from": 2000, "year_to": 2010 }));
+        ok(json!({ "person": "christopher-nolan", "role": "director" }));
+        ok(json!({ "book_form": "collection,all" }));
         for bad in [
             json!({ "year": 2001, "year_from": 2000 }),
             json!({ "year_from": 2010, "year_to": 2000 }),
@@ -2300,19 +1660,15 @@ mod tests {
             json!({ "person": "christopher-nolan", "role": "Director" }),
             json!({ "book_form": "book,magazine" }),
         ] {
-            let error = filters_of(&query(bad.clone()), &[], &[]).unwrap_err();
+            let error = filters_of(&query(bad.clone())).unwrap_err();
             assert_eq!(error.code(), "validation", "{bad}");
         }
-        // Фильтр по людям собирает `person_filter` (по БД), здесь — только проверка.
-        assert!(ok(json!({ "person": "christopher-nolan", "role": "director" })).is_empty());
-        // Вид текста — фильтр книжного индекса, в Meilisearch не уходит.
-        assert!(ok(json!({ "book_form": "collection,all" })).is_empty());
     }
 
     #[test]
     fn steps_follow_options() {
         let steps = ReindexOptions::default().steps();
-        assert_eq!(steps.last(), Some(&Step::Rotate));
+        assert_eq!(steps, [Step::Works, Step::People]);
         let options = ReindexOptions {
             revalidate: true,
             ..ReindexOptions::default()

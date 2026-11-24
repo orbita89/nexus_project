@@ -8,7 +8,6 @@ use shared::cache::{Cache, CacheSettings, L2Store, RedisStore};
 use shared::directory::Directories;
 use shared::isr::Isr;
 use shared::mail::{Mailer, Outbox};
-use shared::search::Search;
 use shared::{AppState, Config};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -22,13 +21,12 @@ pub fn state(pool: PgPool) -> (AppState, Outbox) {
 }
 
 /// То же, но с изменённой конфигурацией (включить dev login, добавить OAuth-провайдера, ...).
-/// Поиск и ревалидация статики выключены: тесты не пишут в Meilisearch и не ходят во фронтенд.
-/// Включить поиск — [`with_search`].
+/// Индексы поиска (`SEARCH_INDEX_DIR`) и ревалидация статики выключены: тесты не пишут на диск и
+/// не ходят во фронтенд. Включить поиск — [`with_index`].
 pub fn state_with_config(pool: PgPool, config: Config) -> (AppState, Outbox) {
     let (mailer, outbox) = Mailer::memory();
     let directories = directories(pool.clone());
     let mut state = AppState::new(config, pool, mailer, directories);
-    state.search = Search::disabled();
     state.isr = Isr::disabled();
     (state, outbox)
 }
@@ -51,16 +49,25 @@ pub fn directories(db: PgPool) -> Directories {
     }
 }
 
-/// Включает Meilisearch (`MEILI_URL`, `MEILI_MASTER_KEY`) со своим префиксом индексов,
-/// чтобы параллельные тесты не мешали друг другу и dev-индексу.
-pub fn with_search(mut state: AppState) -> AppState {
-    let prefix = format!("test_{}_", uuid::Uuid::new_v4().simple());
-    state.search = Search::new(
-        &state.config.meili_url,
-        state.config.meili_master_key.clone(),
-        &prefix,
-    );
-    state
+/// Каталог индексов Tantivy теста; удаляется при drop.
+pub struct IndexDir(pub std::path::PathBuf);
+
+impl Drop for IndexDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Включает поиск: `SEARCH_INDEX_DIR` во временном каталоге (свой у каждого теста, чтобы
+/// параллельные тесты не мешали друг другу). Индексы строятся вручную:
+/// `catalog::works::sync::rebuild` и `catalog::people_idx::sync::rebuild`.
+pub fn with_index(mut state: AppState) -> (AppState, IndexDir) {
+    let dir = std::env::temp_dir().join(format!("nexus-test-{}", uuid::Uuid::new_v4()));
+    let mut config = (*state.config).clone();
+    config.search_index_dir = Some(dir.to_string_lossy().into_owned());
+    config.books_index_dir = Some(dir.join("books").to_string_lossy().into_owned());
+    state.config = Arc::new(config);
+    (state, IndexDir(dir))
 }
 
 /// Включает кэш карточек с Redis из `REDIS_URL` и своим префиксом ключей.
@@ -81,12 +88,9 @@ pub fn with_cache_at(mut state: AppState, redis_url: &str) -> AppState {
     state
 }
 
-/// Удаляет индексы Meilisearch и ключи Redis теста при drop — и когда тест упал.
+/// Удаляет ключи Redis теста при drop — и когда тест упал.
 /// Drop синхронный, поэтому очистка идёт в отдельном потоке со своим runtime.
 pub struct Cleanup {
-    meili_url: String,
-    meili_key: Option<String>,
-    index_prefix: Option<String>,
     redis_url: String,
     key_prefix: Option<String>,
 }
@@ -94,9 +98,6 @@ pub struct Cleanup {
 impl Cleanup {
     pub fn new(state: &AppState) -> Self {
         Self {
-            meili_url: state.config.meili_url.clone(),
-            meili_key: state.config.meili_master_key.clone(),
-            index_prefix: state.search.is_enabled().then(|| state.search.index("")),
             redis_url: state.config.redis_url.clone(),
             key_prefix: state.cache.is_enabled().then(|| state.cache.full_key("")),
         }
@@ -105,9 +106,6 @@ impl Cleanup {
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let meili_url = self.meili_url.clone();
-        let meili_key = self.meili_key.clone();
-        let index_prefix = self.index_prefix.clone().filter(|p| !p.is_empty());
         let redis_url = self.redis_url.clone();
         let key_prefix = self.key_prefix.clone().filter(|p| !p.is_empty());
         let cleanup = std::thread::spawn(move || {
@@ -116,20 +114,6 @@ impl Drop for Cleanup {
                 .build()
                 .expect("cleanup runtime");
             runtime.block_on(async {
-                if let Some(prefix) = index_prefix {
-                    let search = Search::new(&meili_url, meili_key, "");
-                    if let Ok(indexes) = search.call(Method::GET, "/indexes?limit=1000", None).await
-                    {
-                        let uids = indexes["results"].as_array().cloned().unwrap_or_default();
-                        for uid in uids.iter().filter_map(|index| index["uid"].as_str()) {
-                            if uid.starts_with(&prefix) {
-                                let _ = search
-                                    .call(Method::DELETE, &format!("/indexes/{uid}"), None)
-                                    .await;
-                            }
-                        }
-                    }
-                }
                 if let Some(prefix) = key_prefix {
                     if let Ok(store) = RedisStore::new(&redis_url) {
                         let _ = store.del_prefix(&prefix).await;

@@ -6,7 +6,7 @@
 #   docker compose -f infra/docker-compose.prod.yml --env-file infra/.env.prod up -d
 #
 # Обязательные переменные заданы как ${VAR:?...}: без них compose не стартует, а не поднимает
-# прод с паролем по умолчанию. Наружу открыт только nginx; Postgres, Redis и Meilisearch — нет.
+# прод с паролем по умолчанию. Наружу открыт только nginx; Postgres и Redis — нет.
 
 name: "nexus-${NEXUS_ENV:?NEXUS_ENV is required (staging or production)}"
 
@@ -41,25 +41,6 @@ services:
       timeout: 3s
       retries: 10
 
-  meilisearch:
-    image: getmeili/meilisearch:v1.15
-    restart: always
-    environment:
-      # production: без веб-панели, ключ обязателен (не короче 16 байт).
-      MEILI_ENV: production
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?MEILI_MASTER_KEY is required}
-      # Без ограничений индексация берёт до 2/3 RAM и потоки на все ядра, а память после пика
-      # не отдаёт: прогон тестов каталога поднимал Meilisearch с 50 MiB до 2,8 GiB.
-      MEILI_MAX_INDEXING_MEMORY: ${MEILI_MAX_INDEXING_MEMORY:-256Mb}
-      MEILI_MAX_INDEXING_THREADS: ${MEILI_MAX_INDEXING_THREADS:-2}
-    volumes:
-      - meilidata:/meili_data
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:7700/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   app:
     # Тег — sha коммита из CI: на прод уходит ровно тот образ, что прошёл staging.
     image: ${NEXUS_IMAGE:?NEXUS_IMAGE is required, e.g. ghcr.io/orbita89/nexus_project:<sha>}
@@ -67,8 +48,6 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexus}
       REDIS_URL: redis://redis:6379
-      MEILI_URL: http://meilisearch:7700
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (openssl rand -base64 48)}
       SMTP_URL: ${SMTP_URL:?SMTP_URL is required (smtps://user:pass@host:465)}
       MAIL_FROM: ${MAIL_FROM:?MAIL_FROM is required}
@@ -96,8 +75,10 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       # Холодный архив каталога (Tantivy, mmap): ~1 млн фильмов — сотни МБ на диске.
       ARCHIVE_DIR: /var/lib/nexus/archive
-      # Книжный поиск на Tantivy: каталог задан — книги ищутся в нём, а не в Meilisearch
-      # (пустое значение BOOKS_INDEX_DIR= возвращает книги в Meilisearch).
+      # Все индексы Tantivy: books, people, works, archive, collections. Обязателен: без него поиск отвечает 503.
+      SEARCH_INDEX_DIR: ${SEARCH_INDEX_DIR-/var/lib/nexus/tantivy}
+      # Индекс книг (по умолчанию <SEARCH_INDEX_DIR>/books). Строит `nexus books index` (и сам
+      # сервер, если каталог пуст).
       BOOKS_INDEX_DIR: ${BOOKS_INDEX_DIR-/var/lib/nexus/books-index}
       # Обложки книг библиотеки Cassandra: раздаёт gateway по /covers/books/.
       BOOK_COVERS_DIR: /var/lib/nexus/book-covers
@@ -123,8 +104,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      meilisearch:
-        condition: service_healthy
 
   # Единственная точка входа. Тот же конфиг, что в dev. HTTPS добавляется, когда будут сервер
   # и домен (documents/deploy.md, «HTTPS»).
@@ -149,5 +128,4 @@ volumes:
   epubcache:
   pgdata18:
   redisdata:
-  meilidata:
   archivedata:

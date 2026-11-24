@@ -1,10 +1,10 @@
 //! Книжный поиск в API: `GET /search`, соседи, похожие и подсказки фильтров для книг идут в
-//! индекс Tantivy ([`super::index`]), когда он включён (`BOOKS_INDEX_DIR`) и запрос — только
-//! про книги (`kind=book`). Остальные разделы и смешанные запросы остаются в Meilisearch; книг в
-//! его индексе при включённом книжном поиске нет ([`in_meili`]).
+//! индекс Tantivy ([`super::index`]), когда запрос — только про книги
+//! (`kind=book`). Остальные разделы — индекс работ ([`crate::works`]); смешанные запросы
+//! чередуют оба ([`crate::search`]).
 //!
-//! Параметры и ответы — те же, что у Meilisearch: фронтенд не различает, кто ответил. Отличия:
-//! - `q` ищет по названию, авторам и серии (в Meilisearch — название и издательство);
+//! Параметры и ответы — те же, что у остальных разделов: фронтенд не различает, кто ответил. Отличия:
+//! - `q` ищет по названию, авторам и серии (у работ — название и студии);
 //! - в строке выдачи есть `authors`;
 //! - работает фильтр `has_cover`;
 //! - `sort=trending` — то же, что `popular`, `awarded` — то же, что `recommended`: своей
@@ -26,16 +26,6 @@ use crate::models::{
 const NEIGHBORS_SCAN: usize = 5000;
 /// Тегов в подсказках книг: жанров FB2 больше двухсот, а панель фильтров показывает их все.
 pub const MAX_TAG_HITS: usize = 300;
-
-/// Какие сущности идут в Meilisearch (SQL, алиас `e`): разделы каталога, а при включённом
-/// книжном поиске — без книг.
-pub fn in_meili(state: &AppState) -> &'static str {
-    if sync::enabled(state) {
-        "e.kind NOT IN ('season', 'book')"
-    } else {
-        crate::models::IN_CATALOG
-    }
-}
 
 /// Запрос — только про книги, и книжный поиск включён: отвечает Tantivy.
 pub fn routed(state: &AppState, kinds: &[EntityKind]) -> bool {
@@ -127,7 +117,7 @@ fn forms_of(value: &str) -> Vec<BookForm> {
     parse_forms(value).unwrap_or_default()
 }
 
-/// `GET /search` для книг. `random` — случайное окно выдачи (как у Meilisearch).
+/// `GET /search` для книг. `random` — случайное окно выдачи (как у остальных разделов).
 pub async fn search(
     state: &AppState,
     query: Option<BookQuery>,

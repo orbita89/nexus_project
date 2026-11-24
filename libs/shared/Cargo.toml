@@ -29,6 +29,7 @@ moka = { workspace = true }
 deadpool-redis = { workspace = true }
 tokio-util = { workspace = true }
 mockall = { workspace = true, optional = true }
+tantivy = { workspace = true }
 
 [features]
 # MockL2Store для тестов других крейтов: `shared = { features = ["mock"] }` в dev-dependencies.

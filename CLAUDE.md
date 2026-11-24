@@ -1,6 +1,6 @@
 # CLAUDE.md — AI agent instructions (Nexus backend)
 
-Nexus: modular monolith — Rust 1.98, axum 0.8, sqlx 0.8, PostgreSQL 18, Redis, Meilisearch.
+Nexus: modular monolith — Rust 1.98, axum 0.8, sqlx 0.8, PostgreSQL 18, Redis, Tantivy.
 Workspace: `app/` (bin `nexus`), `modules/{auth,catalog,social,realtime}` (one crate each), `libs/shared`, `libs/test-utils`.
 
 ## 1. Context Loading (CRITICAL)

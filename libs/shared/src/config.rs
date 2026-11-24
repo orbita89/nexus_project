@@ -11,8 +11,6 @@ pub struct Config {
     pub bind_addr: String,
     pub database_url: String,
     pub redis_url: String,
-    pub meili_url: String,
-    pub meili_master_key: Option<String>,
     /// Куда класть вложения чата. Файлы раздаёт приложение, а не nginx: вложение из личной
     /// переписки не должно открываться по прямой ссылке.
     pub attachments_dir: String,
@@ -41,8 +39,11 @@ pub struct Config {
     /// Не задан — архив выключен: его эндпоинты отвечают 503.
     pub archive_dir: Option<String>,
     /// Каталог индекса Tantivy с книгами (`catalog::books::index`), `BOOKS_INDEX_DIR`. Не задан —
-    /// книги ищутся в Meilisearch, как остальные разделы.
+    /// по умолчанию `<SEARCH_INDEX_DIR>/books`.
     pub books_index_dir: Option<String>,
+    /// Корень индексов Tantivy (`<root>/{books,people,works,archive,collections}`),
+    /// `SEARCH_INDEX_DIR`. Обязателен: без него поиск отвечает 503.
+    pub search_index_dir: Option<String>,
     /// Каталог с файлами обложек книг (`nexus books cassandra` копирует их сюда), `BOOK_COVERS_DIR`.
     /// Раздаёт gateway по `/covers/books/...`. Не задан — обложки не копируются.
     pub book_covers_dir: Option<String>,
@@ -191,6 +192,9 @@ pub const MIN_JWT_SECRET_LEN: usize = 32;
 
 impl Config {
     pub fn from_env() -> Self {
+        let search_index_dir = env::var("SEARCH_INDEX_DIR")
+            .ok()
+            .filter(|dir| !dir.is_empty());
         Self {
             bind_addr: var_or("BIND_ADDR", "0.0.0.0:8080"),
             database_url: var_or(
@@ -198,8 +202,6 @@ impl Config {
                 "postgres://nexus_user:nexus_password@localhost:5432/nexus_db",
             ),
             redis_url: var_or("REDIS_URL", "redis://localhost:6379"),
-            meili_url: var_or("MEILI_URL", "http://localhost:7700"),
-            meili_master_key: env::var("MEILI_MASTER_KEY").ok(),
             attachments_dir: var_or("ATTACHMENTS_DIR", "data/attachments"),
             avatars_dir: var_or("AVATARS_DIR", "data/avatars"),
             cache_l1_ttl_secs: number_or("CACHE_L1_TTL_SECS", 30),
@@ -213,10 +215,23 @@ impl Config {
             imdb_datasets_url: var_or("IMDB_DATASETS_URL", "https://datasets.imdbws.com")
                 .trim_end_matches('/')
                 .to_string(),
-            archive_dir: env::var("ARCHIVE_DIR").ok().filter(|dir| !dir.is_empty()),
+            archive_dir: env::var("ARCHIVE_DIR")
+                .ok()
+                .filter(|dir| !dir.is_empty())
+                .or_else(|| {
+                    search_index_dir
+                        .as_ref()
+                        .map(|root| format!("{root}/archive"))
+                }),
             books_index_dir: env::var("BOOKS_INDEX_DIR")
                 .ok()
-                .filter(|dir| !dir.is_empty()),
+                .filter(|dir| !dir.is_empty())
+                .or_else(|| {
+                    search_index_dir
+                        .as_ref()
+                        .map(|root| format!("{root}/books"))
+                }),
+            search_index_dir: search_index_dir.clone(),
             book_covers_dir: env::var("BOOK_COVERS_DIR")
                 .ok()
                 .filter(|dir| !dir.is_empty()),

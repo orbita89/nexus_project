@@ -22,21 +22,12 @@ use utoipa::ToSchema;
 pub enum Step {
     /// Публикация: запись в PostgreSQL.
     Db,
-    /// Публикация: документы в Meilisearch.
+    /// Публикация: индексы Tantivy.
     Search,
-    /// Перестройка: теневые индексы `entities_v<ms>` и `people_v<ms>`.
-    CreateIndex,
-    /// Перестройка: все сущности из БД пачками в теневой индекс (с `progress`).
-    Fill,
-    /// Перестройка: известность людей и все публичные люди в теневой индекс `people_v<ms>`
-    /// (с `progress`).
-    FillPeople,
-    /// Перестройка: новый индекс не меньше 80% текущего.
-    Check,
-    /// Перестройка: поиск переключается на новый индекс.
-    Swap,
-    /// Перестройка: удаление версий старше предыдущей.
-    Rotate,
+    /// Перестройка: индекс работ `works.v<ms>` (с `progress`).
+    Works,
+    /// Перестройка: известность людей и индекс `people.v<ms>` (с `progress`).
+    People,
     /// Пересборка статических страниц фронтенда.
     Isr,
     /// TMDB: скачивание ежедневного дампа.
@@ -55,13 +46,10 @@ impl Step {
     pub fn title(self) -> &'static str {
         match self {
             Self::Db => "Сохранение в БД",
-            Self::Search => "Обновление поиска (Meilisearch)",
-            Self::CreateIndex => "Создание теневого индекса",
-            Self::Fill => "Индексация сущностей",
-            Self::FillPeople => "Индексация людей",
-            Self::Check => "Проверка размера нового индекса",
-            Self::Swap => "Переключение поиска на новый индекс",
-            Self::Rotate => "Удаление устаревших индексов",
+            Self::Search => "Обновление поиска",
+
+            Self::Works => "Индексация работ",
+            Self::People => "Индексация людей",
             Self::Isr => "Пересборка статики (ISR)",
             Self::TmdbExport => "Скачивание дампа TMDB",
             Self::ImdbRatings => "Скачивание рейтингов IMDb",
@@ -77,7 +65,7 @@ impl Step {
 pub enum StepStatus {
     Running,
     Done,
-    /// Не настроено (Meilisearch или ISR выключены) или не нужно.
+    /// Не настроено (ISR выключен) или не нужно.
     Skipped,
     Failed,
 }
@@ -88,7 +76,7 @@ pub struct StepEvent {
     pub step: Step,
     pub status: StepStatus,
     /// Строка для лога в админке.
-    #[schema(example = "Meilisearch обновлён")]
+    #[schema(example = "Индексы обновлены")]
     pub message: String,
     /// Сколько шёл шаг; только у итога.
     #[serde(skip_serializing_if = "Option::is_none")]

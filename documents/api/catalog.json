@@ -4702,7 +4702,225 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/search/indexes": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Все поисковые индексы: размер, документы, сегменты, поколения, число по БД, ход операций.",
+        "operationId": "list_search_indexes",
+        "responses": {
+          "200": {
+            "description": "Индексы",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchIndexInfo"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/search/indexes/{id}/merge": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Слить сегменты индекса в один и убрать старые файлы — в фоне: освобождает место удалённых\nдокументов и ускоряет поиск. Данные не меняются.",
+        "operationId": "merge_search_index",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "`works`, `people`, `books` или `collections`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Слияние запущено"
+          },
+          "400": {
+            "description": "Неизвестный индекс",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже идёт операция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Индекс выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/search/indexes/{id}/rebuild": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Перестроить индекс из БД в фоне: `works`, `people`, `books` или `all` (работы, люди, книги).\nХод — в `operation` у `GET /admin/search/indexes`. Пока идёт перестройка, поиск читает старое\nпоколение.",
+        "operationId": "rebuild_search_index",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "`works`, `people`, `books` или `all`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "description": "Переключить, даже если новый индекс меньше `SEARCH_REINDEX_MIN_PERCENT`% текущего.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Перестройка запущена"
+          },
+          "400": {
+            "description": "Неизвестный индекс или его нельзя перестроить здесь",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже идёт операция или перестройка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Индекс выключен",
             "content": {
               "application/json": {
                 "schema": {
@@ -4780,7 +4998,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -4858,7 +5076,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -6221,7 +6439,7 @@
           "catalog"
         ],
         "summary": "Список видимых сущностей (активные; фильмы из TMDB — вышедшие или «Скоро премьера»). `sort`:\n`recommended` (по умолчанию: балл — рейтинг IMDb + популярность + свежесть), `trending`\n(смотрят сейчас), `top_rated` (рейтинг IMDb), `new` (вышедшие, новые сверху), `soon` (ближайшие\nпремьеры), `popular` (больше наших оценок), `rating` (выше наша средняя), `title`. Фильмы с датой\nв будущем — только в `soon`.",
-        "description": "Наши оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в\nтаблицы рецензий не ходит.\n\nПоиска по названию здесь нет: весь поиск на сайте — `GET /search` (Meilisearch); `q` — 400\n`use_search`.",
+        "description": "Наши оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в\nтаблицы рецензий не ходит.\n\nПоиска по названию здесь нет: весь поиск на сайте — `GET /search` (Tantivy); `q` — 400\n`use_search`.",
         "operationId": "list_entities",
         "parameters": [
           {
@@ -6324,7 +6542,7 @@
           "catalog"
         ],
         "summary": "Карточка сущности: поля, теги и участники в порядке титров.",
-        "description": "Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика\nфронтенда (SSG/ISR), сюда приходят её пересборка и админка.\n\nНевидимая (скрыта или фильм из TMDB ещё не в окне «Скоро премьера») — 404 для всех, кроме\nадмина (ему — и невидимые связанные).",
+        "description": "Читается из PostgreSQL, без кэша и индекса: публичные страницы отдаёт статика\nфронтенда (SSG/ISR), сюда приходят её пересборка и админка.\n\nНевидимая (скрыта или фильм из TMDB ещё не в окне «Скоро премьера») — 404 для всех, кроме\nадмина (ему — и невидимые связанные).",
         "operationId": "get_entity",
         "parameters": [
           {
@@ -6446,7 +6664,7 @@
           "catalog"
         ],
         "summary": "Предыдущая и следующая работа в той же выдаче, что отдаёт `GET /search`: листание на карточке\nидёт по тому списку, откуда человек пришёл (художник, тег, музей, поиск).",
-        "description": "Фильтры, запрос и сортировка — ровно как у `GET /search` (`limit` и `offset` не нужны и\nигнорируются), поэтому порядок совпадает со списком. `sort=random` — 400: у случайного\nпорядка соседей нет.\n\nРаботы нет в выдаче (фильтры ей не подходят, слишком длинный ряд) — `{\"prev\": null,\n\"next\": null}`, а не 404: фронт в этом случае показывает похожие.\n\nПозиции и длины ряда здесь нет намеренно: Meilisearch не умеет «дай номер документа в\nвыдаче», а счётчика «14 из 142» в интерфейсе нет.",
+        "description": "Фильтры, запрос и сортировка — ровно как у `GET /search` (`limit` и `offset` не нужны и\nигнорируются), поэтому порядок совпадает со списком. `sort=random` — 400: у случайного\nпорядка соседей нет.\n\nРаботы нет в выдаче (фильтры ей не подходят, слишком длинный ряд) — `{\"prev\": null,\n\"next\": null}`, а не 404: фронт в этом случае показывает похожие.\n\nПозиции и длины ряда здесь нет намеренно: индекс не отдаёт «номер документа в\nвыдаче», а счётчика «14 из 142» в интерфейсе нет.",
         "operationId": "entity_neighbors",
         "parameters": [
           {
@@ -6697,7 +6915,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -6774,7 +6992,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Похожие на сущность: того же типа, с хотя бы одним из её тегов (Meilisearch), сверху — по\nбаллу «Рекомендуемые», затем новее. Только видимые; у невидимой — 404. Без самой сущности и её\nсвязанных (они и так на карточке). Нет тегов — пустая страница.",
+        "summary": "Похожие на сущность: того же типа, с хотя бы одним из её тегов (Tantivy), сверху — по\nбаллу «Рекомендуемые», затем новее. Только видимые; у невидимой — 404. Без самой сущности и её\nсвязанных (они и так на карточке). Нет тегов — пустая страница.",
         "operationId": "list_similar_entities",
         "parameters": [
           {
@@ -6830,7 +7048,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -7248,7 +7466,7 @@
           "catalog"
         ],
         "summary": "Карточка человека: данные и все его работы любых типов, новые сверху.",
-        "description": "Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика\nфронтенда (SSG/ISR), сюда приходят её пересборка и админка.",
+        "description": "Читается из PostgreSQL, без кэша и индекса: публичные страницы отдаёт статика\nфронтенда (SSG/ISR), сюда приходят её пересборка и админка.",
         "operationId": "get_person",
         "parameters": [
           {
@@ -7551,7 +7769,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -7626,7 +7844,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -7701,7 +7919,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -7783,7 +8001,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -7858,7 +8076,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -7875,7 +8093,7 @@
         "tags": [
           "catalog"
         ],
-        "summary": "Подсказки студий для фильтра `studio` (facet search Meilisearch по полю `studios`): по части\nназвания с опечатками; без `q` — самые частые. `count` — сколько видимых сущностей в индексе,\n`slug` и `logo_url` — из `studios` (одним запросом на ответ), логотип тот же, что на странице\nстудии.",
+        "summary": "Подсказки студий для фильтра `studio` (фасет по полю `studios`): по части\nназвания с опечатками; без `q` — самые частые. `count` — сколько видимых сущностей в индексе,\n`slug` и `logo_url` — из `studios` (одним запросом на ответ), логотип тот же, что на странице\nстудии.",
         "operationId": "search_studios",
         "parameters": [
           {
@@ -7933,7 +8151,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -8008,7 +8226,7 @@
             }
           },
           "503": {
-            "description": "Meilisearch недоступен",
+            "description": "Поиск недоступен",
             "content": {
               "application/json": {
                 "schema": {
@@ -11808,6 +12026,30 @@
         },
         "additionalProperties": false
       },
+      "GenerationInfo": {
+        "type": "object",
+        "description": "Поколение каталога индекса (`<name>.v<ms>`).",
+        "required": [
+          "name",
+          "current",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "current": {
+            "type": "boolean",
+            "description": "Его читает поиск."
+          },
+          "name": {
+            "type": "string",
+            "example": "works.v1795475848838"
+          }
+        }
+      },
       "IndexEntities": {
         "type": "object",
         "description": "Какие сущности дослать в поисковый индекс: `slugs` или `ids`, ровно одно из двух.",
@@ -12568,7 +12810,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений).",
             "example": 137
           }
         }
@@ -12618,7 +12860,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений).",
             "example": 137
           }
         }
@@ -12710,7 +12952,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений).",
             "example": 137
           }
         }
@@ -12778,7 +13020,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений).",
             "example": 137
           }
         }
@@ -12947,7 +13189,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений).",
             "example": 137
           }
         }
@@ -13002,7 +13244,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений).",
             "example": 137
           }
         }
@@ -13125,7 +13367,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений).",
             "example": 137
           }
         }
@@ -13243,7 +13485,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений).",
             "example": 137
           }
         }
@@ -13310,7 +13552,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "Всего записей под фильтром (в поиске — точное число совпадений Meilisearch).",
+            "description": "Всего записей под фильтром (в поиске — точное число совпадений).",
             "example": 137
           }
         }
@@ -14310,6 +14552,119 @@
           }
         }
       },
+      "SearchIndexInfo": {
+        "type": "object",
+        "description": "Состояние одного индекса.",
+        "required": [
+          "id",
+          "title",
+          "description",
+          "enabled",
+          "segments",
+          "deleted_docs",
+          "disk_bytes",
+          "generations",
+          "can_rebuild",
+          "can_merge"
+        ],
+        "properties": {
+          "can_merge": {
+            "type": "boolean"
+          },
+          "can_rebuild": {
+            "type": "boolean"
+          },
+          "db_docs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Сколько должно быть по БД (`null` — не считается)."
+          },
+          "deleted_docs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "description": {
+            "type": "string",
+            "description": "Что в индексе."
+          },
+          "dir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Каталог текущего поколения."
+          },
+          "disk_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Размер текущего поколения на диске.",
+            "minimum": 0
+          },
+          "docs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Документов в индексе (`null` — индекса ещё нет).",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Каталог индекса задан (`SEARCH_INDEX_DIR`, `BOOKS_INDEX_DIR`, `ARCHIVE_DIR`)."
+          },
+          "generations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GenerationInfo"
+            },
+            "description": "Все поколения каталога; у книг и архива — одно."
+          },
+          "id": {
+            "type": "string",
+            "description": "`works`, `people`, `books`, `collections`, `archive`.",
+            "example": "works"
+          },
+          "operation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IndexOperation",
+                "description": "Текущая или последняя операция в этом процессе."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rebuild_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Перестройка не здесь, а по этому адресу (коллекции живут в `social`)."
+          },
+          "schema_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Версия схемы (файл `nexus-schema`)."
+          },
+          "segments": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string",
+            "example": "Работы"
+          }
+        }
+      },
       "SearchSort": {
         "type": "string",
         "description": "Сортировка поиска (без неё — по релевантности); у кого значения нет — в конце.",
@@ -15005,12 +15360,8 @@
         "enum": [
           "db",
           "search",
-          "create_index",
-          "fill",
-          "fill_people",
-          "check",
-          "swap",
-          "rotate",
+          "works",
+          "people",
           "isr",
           "tmdb_export",
           "imdb_ratings",
@@ -15040,7 +15391,7 @@
           "message": {
             "type": "string",
             "description": "Строка для лога в админке.",
-            "example": "Meilisearch обновлён"
+            "example": "Индексы обновлены"
           },
           "status": {
             "$ref": "#/components/schemas/StepStatus"

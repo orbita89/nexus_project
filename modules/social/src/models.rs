@@ -306,7 +306,7 @@ pub struct PageQuery {
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct CollectionsQuery {
-    /// Поиск по названию и описанию (Meilisearch, опечатки допустимы). Пустой или не передан —
+    /// Поиск по названию и описанию (опечатки допустимы). Пустой или не передан —
     /// новые публичные коллекции, как и раньше.
     #[param(example = "фильмы про космос")]
     pub q: Option<String>,

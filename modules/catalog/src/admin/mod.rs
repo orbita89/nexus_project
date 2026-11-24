@@ -10,6 +10,7 @@ pub mod covers;
 pub mod entities;
 pub mod episodes;
 pub mod fragments;
+pub mod indexes;
 pub mod people;
 pub mod prompts;
 pub mod relations;

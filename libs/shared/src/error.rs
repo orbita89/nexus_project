@@ -54,7 +54,7 @@ pub enum AppError {
     #[error("too many requests, try again later")]
     TooManyRequests { retry_after_secs: u64 },
 
-    /// Внешний сервис (например, Meilisearch) недоступен. Сообщение уходит клиенту.
+    /// Внешний сервис (например, почта) недоступен. Сообщение уходит клиенту.
     #[error("{0}")]
     Unavailable(String),
 

@@ -21,7 +21,7 @@
     ... python3 tags_llm.py apply --in /tmp/tags.jsonl --apply              # записать
 
 Теги должны существовать (миграция `20261207100000_catalog_curated_tags.sql`). После записи —
-`scripts/reindex-search.sh`, чтобы теги попали в Meilisearch. Ключ — только из окружения.
+`scripts/reindex-search.sh`, чтобы теги попали в индекс. Ключ — только из окружения.
 """
 
 import argparse

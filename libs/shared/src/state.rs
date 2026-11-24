@@ -9,7 +9,6 @@ use crate::directory::{
 use crate::events::EventBus;
 use crate::isr::Isr;
 use crate::mail::Mailer;
-use crate::search::Search;
 use crate::Config;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -21,8 +20,6 @@ pub struct AppState {
     pub db: PgPool,
     pub jwt: Arc<Jwt>,
     pub mailer: Mailer,
-    /// Meilisearch. В тестах по умолчанию выключен (`Search::disabled`).
-    pub search: Search,
     /// Кэш L1 (память) + L2 (Redis); каталог берёт из него блокировки перестройки. В тестах выключен.
     pub cache: Cache,
     /// Ревалидация статики фронтенда. Выключена, если не заданы `ISR_URL` и `ISR_SECRET`.
@@ -56,7 +53,6 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: Config, db: PgPool, mailer: Mailer, directories: Directories) -> Self {
         let jwt = Jwt::new(config.jwt_secret.as_bytes());
-        let search = Search::new(&config.meili_url, config.meili_master_key.clone(), "");
         let cache = Cache::redis(CacheSettings::from_config(&config), &config.redis_url);
         let isr = Isr::from_config(&config);
         Self {
@@ -64,7 +60,6 @@ impl AppState {
             db,
             jwt: Arc::new(jwt),
             mailer,
-            search,
             cache,
             isr,
             entities: directories.entities,

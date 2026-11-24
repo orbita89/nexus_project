@@ -1,5 +1,5 @@
 //! catalog — контентное ядро: фильмы, сериалы, книги, игры (таблица `entities`), люди, теги
-//! и поиск через Meilisearch; холодный архив фильмов — Tantivy (`archive`). Монтируется под `/api/v1/catalog`.
+//! и поиск на Tantivy (`works`, `people_idx`, `books`); холодный архив фильмов — Tantivy (`archive`). Монтируется под `/api/v1/catalog`.
 //!
 //! Чтение — без авторизации, запись — `/admin/...`, только роль admin.
 
@@ -17,6 +17,7 @@ pub mod media;
 pub mod metadata;
 pub mod models;
 pub mod people;
+pub mod people_idx;
 pub mod people_search;
 pub mod publish;
 pub mod ranking;
@@ -28,6 +29,7 @@ pub mod tags;
 pub mod tmdb;
 pub mod tutor;
 mod validate;
+pub mod works;
 
 use shared::AppState;
 use utoipa_axum::router::OpenApiRouter;
@@ -113,6 +115,9 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::books::rebuild_index))
         .routes(routes!(admin::books::merge_index))
         .routes(routes!(admin::books::clear_cache))
+        .routes(routes!(admin::indexes::list))
+        .routes(routes!(admin::indexes::rebuild))
+        .routes(routes!(admin::indexes::merge))
         .routes(routes!(admin::static_pages::regenerate))
         .routes(routes!(admin::static_pages::regenerate_pages))
         .routes(routes!(admin::static_pages::status))

@@ -797,3 +797,29 @@ async fn set_locked(state: &AppState, id: Uuid, locked: bool) -> AppResult<()> {
     );
     Ok(())
 }
+
+/// Перестроить поисковый индекс коллекций (Tantivy) из БД: новое поколение, в фоне. Вызывается
+/// со страницы «Индексы» админки; сам индекс описывает `GET /catalog/admin/search/indexes`.
+#[utoipa::path(
+    post, operation_id = "rebuild_collections_index", path = "/admin/collections/index/rebuild", tag = "social-admin",
+    security(("bearer" = [])),
+    responses(
+        (status = 202, description = "Перестройка запущена"),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 503, description = "Поиск выключен (`SEARCH_INDEX_DIR` не задан)", body = ErrorBody),
+    )
+)]
+pub async fn rebuild_collections_index(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+) -> AppResult<StatusCode> {
+    if state.config.search_index_dir.is_none() {
+        return Err(AppError::Unavailable(
+            "search is temporarily unavailable".into(),
+        ));
+    }
+    tracing::info!(admin_id = %admin.id, "collections index rebuild started");
+    collection_search::spawn_fill(state);
+    Ok(StatusCode::ACCEPTED)
+}

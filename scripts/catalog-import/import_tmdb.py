@@ -18,7 +18,7 @@ ETL:
 он привязывается без изменений, и его титры и жанры не трогаются; занятый другим фильмом TMDB —
 новый получает slug с суффиксом `-<tmdb_id>`. Люди — так же по slug имени.
 
-После загрузки перестройте поиск: scripts/reindex-search.sh (Meilisearch не знает о строках,
+После загрузки перестройте поиск: scripts/reindex-search.sh (индекс не знает о строках,
 записанных в обход API).
 
 Запуск: TMDB_API_KEY=... DATABASE_URL=postgres://... python3 import_tmdb.py [--help]
@@ -328,7 +328,7 @@ async def run_export_only(args, dsn: str):
     finally:
         await pool.close()
     log.info("done: entities +%d, adopted %d", stats.created, stats.adopted)
-    log.info("next: scripts/reindex-search.sh — rebuild Meilisearch")
+    log.info("next: scripts/reindex-search.sh — rebuild search index")
 
 
 # ---------------------------------------------------------------- TMDB client
@@ -736,7 +736,7 @@ async def run(args):
     log.info("done: entities +%d, adopted %d, people +%d, credits +%d, tags +%d, skipped %d, "
              "errors %d (rerun to retry errors)", stats.created, stats.adopted, stats.people,
              stats.credits, stats.tags, stats.skipped, errors)
-    log.info("next: scripts/reindex-search.sh — rebuild Meilisearch")
+    log.info("next: scripts/reindex-search.sh — rebuild search index")
 
 
 def main():

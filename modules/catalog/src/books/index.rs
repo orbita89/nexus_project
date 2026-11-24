@@ -1,9 +1,8 @@
-//! Книжный поиск на Tantivy: индекс книг каталога вместо Meilisearch.
+//! Книжный поиск на Tantivy: индекс книг каталога.
 //!
 //! Источник правды — PostgreSQL, индекс производный: его целиком строит [`super::sync::rebuild`]
 //! (`nexus books index`), а правки в админке и новые оценки досылает [`super::sync::update`].
-//! Включается каталогом `BOOKS_INDEX_DIR`; не задан — книги ищутся в Meilisearch, как раньше.
-//!
+//! Каталог — `BOOKS_INDEX_DIR` (по умолчанию `<SEARCH_INDEX_DIR>/books`).
 //! **Два слоя.** Tantivy (слой А) держит только то, что меняется редко: текст для поиска
 //! (название, авторы, серия), номер книги `ord` и хранимое (`STORED`) поле `card` — готовую
 //! строку выдачи (`EntitySummary` в JSON), так что список книг отдаётся без похода в БД.
@@ -44,15 +43,13 @@ use tantivy::query::{
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED, STRING,
 };
-use tantivy::tokenizer::{
-    Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, TextAnalyzer, Token,
-    TokenFilter, TokenStream, Tokenizer,
-};
 use tantivy::{
     DocAddress, DocId, Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy, Score,
     Searcher, SegmentOrdinal, SegmentReader, TantivyDocument, TantivyError, Term,
 };
 use uuid::Uuid;
+
+use shared::tantivy::{ru_raw_analyzer, ru_stem_analyzer, RU_RAW, RU_STEM, STOP_WORDS_RU};
 
 use super::sidecar::Sidecar;
 use crate::models::{EntityKind, EntitySummary, ReleaseStatus, SummaryAuthor};
@@ -85,52 +82,6 @@ const PREFIX_MAX_TERMS: usize = 64;
 /// Сколько слов словаря просматривать на сегмент в поисках частых.
 const PREFIX_SCAN_LIMIT: usize = 4_000;
 /// Токены длиннее (в байтах) — мусор (хеши, склейки слов): в индекс не идут.
-const MAX_TOKEN_BYTES: usize = 80;
-
-/// Служебные слова: опечатки и автодополнение по ним — чистый шум.
-const STOP_WORDS_RU: &[&str] = &[
-    "и",
-    "в",
-    "во",
-    "на",
-    "не",
-    "что",
-    "с",
-    "со",
-    "а",
-    "по",
-    "за",
-    "из",
-    "к",
-    "ко",
-    "о",
-    "об",
-    "от",
-    "для",
-    "же",
-    "бы",
-    "ли",
-    "или",
-    "но",
-    "да",
-    "ни",
-    "у",
-    "при",
-    "про",
-    "без",
-    "над",
-    "под",
-    "это",
-    "как",
-    "то",
-    "все",
-    "чтобы",
-    "который",
-    "когда",
-    "если",
-    "этот",
-    "весь",
-];
 
 // Веса клауз. BM25 Tantivy считает сам; константы задают только взаимный приоритет: точное
 // название (несколько слов) > точное имя автора > фраза > точное название (одно слово) > слово
@@ -157,9 +108,6 @@ const CACHE_MAX_ITEMS: usize = 100;
 
 /// Колонка номера книги (`ord`): индекс в массивах слоя Б.
 const ORD: &str = "ord";
-
-const RU_STEM: &str = "ru_stem";
-const RU_RAW: &str = "ru_raw";
 
 /// Ошибка индекса. `Busy` — писатель занят (идёт перестройка или другая запись).
 #[derive(Debug)]
@@ -453,91 +401,7 @@ fn schema() -> (Schema, Fields) {
     (b.build(), fields)
 }
 
-/// Анализатор названий, авторов и серий: слова, нижний регистр, `ё` → `е`, стеммер.
-fn ru_stem_analyzer() -> TextAnalyzer {
-    TextAnalyzer::builder(SimpleTokenizer::default())
-        .filter(RemoveLongFilter::limit(MAX_TOKEN_BYTES))
-        .filter(LowerCaser)
-        .filter(YoFilter)
-        .filter(Stemmer::new(Language::Russian))
-        .build()
-}
-
-/// То же без стеммера. Фильтры до стеммера у обоих одинаковые — токены запроса выравниваются
-/// один к одному ([`BookIndex::query_terms`]).
-fn ru_raw_analyzer() -> TextAnalyzer {
-    TextAnalyzer::builder(SimpleTokenizer::default())
-        .filter(RemoveLongFilter::limit(MAX_TOKEN_BYTES))
-        .filter(LowerCaser)
-        .filter(YoFilter)
-        .build()
-}
-
-/// Фильтр токенов «ё → е» (после `LowerCaser`): «ёжик»/«ежик» совпадают как точные термы и не
-/// тратят единственную разрешённую опечатку.
-#[derive(Clone)]
-struct YoFilter;
-
-impl TokenFilter for YoFilter {
-    type Tokenizer<T: Tokenizer> = YoFilterWrapper<T>;
-
-    fn transform<T: Tokenizer>(self, tokenizer: T) -> Self::Tokenizer<T> {
-        YoFilterWrapper(tokenizer)
-    }
-}
-
-#[derive(Clone)]
-struct YoFilterWrapper<T>(T);
-
-impl<T: Tokenizer> Tokenizer for YoFilterWrapper<T> {
-    type TokenStream<'a> = YoFilterStream<T::TokenStream<'a>>;
-
-    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
-        YoFilterStream(self.0.token_stream(text))
-    }
-}
-
-struct YoFilterStream<T>(T);
-
-impl<T: TokenStream> TokenStream for YoFilterStream<T> {
-    fn advance(&mut self) -> bool {
-        if !self.0.advance() {
-            return false;
-        }
-        let text = &mut self.0.token_mut().text;
-        if !text.is_ascii() && text.contains('ё') {
-            *text = text.replace('ё', "е");
-        }
-        true
-    }
-
-    fn token(&self) -> &Token {
-        self.0.token()
-    }
-
-    fn token_mut(&mut self) -> &mut Token {
-        self.0.token_mut()
-    }
-}
-
-/// Ключ названия, имени и издательства: нижний регистр, любая последовательность не букв и не
-/// цифр — один пробел, `ё` → `е`. Одна функция при индексации и при запросе.
-pub fn normalize_key(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut gap = false;
-    for c in text.chars().flat_map(char::to_lowercase) {
-        if c.is_alphanumeric() {
-            if gap && !out.is_empty() {
-                out.push(' ');
-            }
-            gap = false;
-            out.push(if c == 'ё' { 'е' } else { c });
-        } else {
-            gap = true;
-        }
-    }
-    out
-}
+pub use shared::tantivy::normalize_key;
 
 /// Ключ сортировки по названию: первые 9 знаков ключа названия, по 7 бит — порядок «пробел,
 /// цифры, латиница, кириллица». Книги с общим началом длиннее 9 знаков идут в порядке индекса.
@@ -857,7 +721,7 @@ pub struct BookIndex {
 static OPEN: Mutex<Option<HashMap<PathBuf, Arc<BookIndex>>>> = Mutex::new(None);
 
 /// Файл с версией схемы рядом с индексом: другая версия — индекс пересоздаётся.
-const SCHEMA_FILE: &str = "nexus-schema";
+const SCHEMA_FILE: &str = shared::tantivy::SCHEMA_FILE;
 /// Версия схемы и анализаторов. Увеличить при любом их изменении.
 const SCHEMA_VERSION: &str = "books-4";
 

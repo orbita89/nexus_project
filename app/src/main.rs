@@ -10,8 +10,8 @@
 //! строки) в `catalog_manual_ranks`; `nexus books sidecar` — пересобрать слой Б (фасеты и
 //! сортировки в RAM) и его снимок без записи в Tantivy.
 //! `nexus ai list|add|set|test|rm` — провайдеры ИИ (`catalog::ai`), ключи шифруются в БД.
-//! `nexus search reindex` — перестроить индексы Meilisearch (как `POST /admin/search/reindex`);
-//! `nexus search bench [ROUNDS]` — замер поиска: книги (Tantivy) против фильмов (Meilisearch).
+//! `nexus search reindex` — перестроить индексы Tantivy (как `POST /admin/search/reindex`);
+//! `nexus search bench [ROUNDS]` — замер поиска: книги и фильмы (Tantivy).
 
 mod ai_cli;
 mod bench;
@@ -107,11 +107,65 @@ async fn main() -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 println!("search reindexed: {result:?}");
             }
+            Some("rebuild") => {
+                let what = args.get(2).map(String::as_str).unwrap_or("all");
+                if !["works", "people", "all"].contains(&what) {
+                    anyhow::bail!("usage: nexus search rebuild [works|people|all]");
+                }
+                let reporter = catalog::jobs::Reporter::silent();
+                let started = std::time::Instant::now();
+                // Последовательно: память на слабом железе.
+                if what != "people" {
+                    let n = catalog::works::sync::rebuild(&state, &reporter)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    println!("works indexed: {n} in {:.1?}", started.elapsed());
+                }
+                if what != "works" {
+                    let n = catalog::people_idx::sync::rebuild(&state, &reporter)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    println!("people indexed: {n} in {:.1?}", started.elapsed());
+                }
+            }
+            Some("query") => {
+                let (Some(index), Some(q)) = (args.get(2), args.get(3)) else {
+                    anyhow::bail!("usage: nexus search query <works|people> <q>");
+                };
+                let hits = match index.as_str() {
+                    "works" => {
+                        let index = catalog::works::search::index(&state)?;
+                        let query = catalog::works::index::WorksQuery {
+                            q: q.clone(),
+                            ..Default::default()
+                        };
+                        index.search(&query, 10, 0)?
+                    }
+                    "people" => match catalog::people_idx::sync::open(&state) {
+                        Some(index) => {
+                            index?
+                                .search(
+                                    q,
+                                    None,
+                                    catalog::people_idx::index::PeopleSort::Relevance,
+                                    10,
+                                    0,
+                                )?
+                                .0
+                        }
+                        None => anyhow::bail!("SEARCH_INDEX_DIR is not set"),
+                    },
+                    _ => anyhow::bail!("usage: nexus search query <works|people> <q>"),
+                };
+                for hit in hits {
+                    println!("{}", hit);
+                }
+            }
             Some("bench") => {
                 let rounds = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(5);
                 bench::run(&state, rounds).await?;
             }
-            _ => anyhow::bail!("usage: nexus search reindex\n       nexus search bench [ROUNDS]"),
+            _ => anyhow::bail!("usage: nexus search reindex\n       nexus search rebuild [works|people|all]\n       nexus search query <works|people> <q>\n       nexus search bench [ROUNDS]"),
         }
         state.cache.wait_pending().await;
         return Ok(());
@@ -125,7 +179,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     auth::cleanup::spawn(state.db.clone());
-    catalog::search::spawn_reindex(state.clone());
+    // Индексы работ и людей автоматически не перестраиваются (ни при старте, ни по расписанию):
+    // только вручную — страница «Индексы» админки, `nexus search rebuild`.
     catalog::search::spawn_ratings_sync(state.clone());
     // Книжный индекс Tantivy: пуст (первый запуск, новая схема) — строится в фоне из БД.
     catalog::books::sync::spawn_initial(state.clone());
@@ -428,7 +483,7 @@ async fn run_cassandra(
     Ok(())
 }
 
-/// Импорт книг, затем перестройка поиска (новые книги и авторы — в Meilisearch).
+/// Импорт книг, затем перестройка поиска (новые книги и авторы — в индексы).
 async fn run_books(
     state: &AppState,
     options: &catalog::books::ImportOptions,
@@ -437,7 +492,7 @@ async fn run_books(
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     print!("{report}");
-    if state.search.is_enabled() && report.books_created > 0 {
+    if state.config.search_index_dir.is_some() && report.books_created > 0 {
         let options = catalog::search::ReindexOptions {
             force: false,
             revalidate: true,
@@ -470,7 +525,7 @@ async fn run_archive(state: &AppState, command: ArchiveCommand) -> anyhow::Resul
                 .map_err(|e| anyhow::anyhow!(e))?;
             print!("{report}");
             // Отложенное удаление: до archive-purge.sql холодные строки ещё в БД.
-            if state.search.is_enabled() && !options.defer_delete {
+            if state.config.search_index_dir.is_some() && !options.defer_delete {
                 let options = catalog::search::ReindexOptions {
                     force: true,
                     revalidate: true,

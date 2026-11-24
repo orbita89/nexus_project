@@ -1288,6 +1288,18 @@ data: {"type":"done","ok":true,"entity":{ ...карточка как в GET /ent
 | `nexus media` (отдельный процесс) | изменённые сущности и их участники |
 | `make seed` (SQL в обход API) | перестройка |
 
+## Поиск на Tantivy (Meilisearch удалён, 2026-11-24)
+
+Meilisearch полностью удалён: сервис из compose и CI, `MEILI_*`, `shared::search`, `state.search`. Весь поиск — Tantivy; корень индексов `SEARCH_INDEX_DIR` **обязателен** (без него поиск, перестройка и промоушен отвечают 503 / шаг `skipped`). Раскладка: `books/` (или `BOOKS_INDEX_DIR`), `people.v<ms>`, `works.v<ms>`, `archive/` (`ARCHIVE_DIR` по умолчанию), `collections.v<ms>` (social). Указатель текущего поколения — `<name>.current`; смена поколения атомарна (`shared::tantivy::generations::switch`: `*.current.tmp` + `rename`, хранятся два поколения).
+- `shared::tantivy` — анализаторы `ru_stem`/`ru_raw`, `normalize_key`, стоп-слова, `open_versioned` (файл версии схемы `nexus-schema`), `blocking`, `generations`, `strict_query` → при 0 хитов `fuzzy_query`, `prefix_query`.
+- `works/` — индекс `works` (`works-1`): movie/series/game/painting, `VISIBLE`. Термы-фильтры (STRING): `kind`, `tags`, `studios`, `publishers`, `museums`, `countries`, `studio_slugs`, `award_slugs`, `award_years`, `awarded`, `slug`; FAST: `year`, `release_ts`, `rank_score`, `popularity`, `quality`, `nexus_rating_avg`, `nexus_ratings_count`, `award_wins`, `title_sort`. STORED `card` = `EntitySummary`: выдача не ходит в PG. Сортировки как `SearchSort` (`random` — случайное окно). Фильтр `person` — `slug IN` по `entity_credits` из PG. Фасеты `/search/studios|publishers|museums|countries|tags` — словарь термов с `doc_freq` (внутри `kind` — пересчёт `Count`). Общая выдача без `kind` чередует книги и работы «2 работы — книга».
+- `people_idx/` — индекс `people` (`people-1`): `full_name`, `original_name`, `known_for`, `fame`; контракт `PeoplePage` (счётчики ролей, чередование ролей без запроса).
+- Правки: `publish::run` → `search::update_entities` → `books::sync::update` + `works::sync::update`; `people_search::update_index` → `people_idx::sync::update`. Перестройка (`POST /admin/search/reindex[/stream]`, `nexus search rebuild [works|people|all]`; **только вручную**: ни при старте, ни по расписанию индексы работ и людей не перестраиваются, книги и коллекции строятся при старте только если индекс пуст): шаги SSE `works`, `people`, `isr`; новое поколение должно быть не меньше `SEARCH_REINDEX_MIN_PERCENT`% текущего, иначе поколение не переключается (409 / шаг `failed`), `force` пропускает; правки во время перестройки повторяются после переключения; блокировки Redis `catalog:reindex-lock` / `catalog:reindex-running`. Ответ `ReindexResult`: `indexed` = работ, `people_indexed`, `previous_count` = работ до, `previous_version` = прежнее поколение `works.v<ms>`, `deleted` = удалённые поколения. Книги — отдельно (`nexus books index`). Поиск: `nexus search query <works|people> <q>`.
+- Архив: promote/demote идут через `publish::run`, поэтому добавляют/убирают документ в `works`.
+- Тесты: `test_utils::with_index` (временный `SEARCH_INDEX_DIR`), `app/tests/{works_tantivy,people_tantivy}.rs`.
+
+> Разделы «Поиск», «Что лежит в индексе», «Поиск людей», «Перестройка поиска» и часть остальных ниже написаны для Meilisearch и **устарели**: теневые индексы `entities_v<ms>`, swap, ротация, `MEILI_*`, настройки ранжирования Meilisearch. Актуально описание выше; контракт эндпоинтов и параметров поиска не менялся.
+
 ## Перестройка поиска ✅
 
 **Точечная индексация** (2026-10-30): данные, залитые в БД мимо API (импорты `scripts/`,
@@ -2069,6 +2081,9 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 
 | Метод | Путь | Что делает |
 |---|---|---|
+| GET | `/admin/search/indexes` | admin | Все индексы Tantivy (`works`, `people`, `books`, `collections`, `archive`): `docs`, `db_docs` (ожидаемое по БД), `segments`, `deleted_docs`, `disk_bytes`, `schema_version`, `generations[]` (`name`, `current`, `bytes`), `can_rebuild`, `can_merge`, `rebuild_path`, `operation` (ход последней операции в процессе) → `Vec<SearchIndexInfo>` |
+| POST | `/admin/search/indexes/{id}/rebuild?force=` | admin | Перестройка в фоне: `id` = `works` \| `people` \| `books` \| `all` (работы, люди, книги). 202; 400 — другой `id`; 409 — уже идёт операция/перестройка (блокировка `catalog:reindex-running`); 503 — индекс выключен. Ход — `operation` в списке |
+| POST | `/admin/search/indexes/{id}/merge` | admin | Слияние сегментов (`shared::tantivy::merge_all`), `id` = `works` \| `people` \| `books` \| `collections`. 202 / 400 / 409 / 503 |
 | GET | `/admin/entities` | Все сущности, включая скрытые: фильтры и `sort` как у `/entities` плюс `q` (подстрока в названии или оригинальном, без учёта регистра, по БД) и `active=true\|false` → `Page<AdminEntitySummary>` (`EntitySummary` + `active`). Без `sort` — новые сверху (`e.id DESC`, uuidv7). `total` — не больше 10 000 (`ADMIN_TOTAL_CAP`, подсчёт `count(*)` по подзапросу с `LIMIT`). **Книги** (`kind=book`, `active` не `false`, без `studio`, задан `BOOKS_INDEX_DIR`) — из Tantivy (`books::search::admin_query`, все виды текста): без `sort` — наш порядок (ручные места `catalog_manual_ranks`, затем балл; с `q` — релевантность с местами), `sort` → `BookSort` как в `/search`, `total` точный; флаги `active`/`active_manual`/`visible` — один запрос по id страницы. Только скрытые книги (`active=false`, в индексе их нет) — из PostgreSQL. Было: сортировка по `entity_stats` + полный `count(*)` по 1,1 млн строк — 5–50 с (2026-11-23) |
 | POST | `/admin/entities` | Создать сущность (можно сразу с `tags`: slug'и; `active`, по умолчанию `true`) → 201, карточка. `series_slug` — сериал сезона (`kind = season`): обязателен для сезона, запрещён остальным типам и указывает только на сериал — иначе 400. Пишется в `parent_id` |
 | PATCH | `/admin/entities/{id}` | Изменить: переданные поля заменяются, `null` очищает необязательное, `metadata` заменяется целиком, `active` включает или скрывает (и ставит `active_manual`). `kind` не меняется. `series_slug` переносит сезон к другому сериалу (не передан — родитель прежний) |
@@ -2479,6 +2494,10 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | Файл | Что внутри |
 |---|---|
 | `lib.rs` | Роутер |
+| `admin/indexes.rs` | Админка всех индексов Tantivy: список (размер, документы, сегменты, поколения, число по БД), перестройка и слияние; ход операций в процессе |
+| `engine.rs` | Маршрутизатор Meilisearch ↔ Tantivy по `SEARCH_TANTIVY` |
+| `works/{index,sync,search}.rs` | Индекс работ на Tantivy: схема/запросы, перестройка и правки, ответы API |
+| `people_idx/{index,sync}.rs` | Индекс людей на Tantivy |
 | `models.rs` | `EntityKind`, DTO; `Page<T>` реэкспортируется из `shared::pagination` |
 | `directory.rs` | `PgEntityDirectory`: справочник сущностей для других модулей (`shared::directory::EntityDirectory`) |
 | `metadata.rs` | Схемы `metadata` по типам и их проверка (у книг — `LibgenSource`, `LibgenFile`) |

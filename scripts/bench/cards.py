@@ -1,4 +1,4 @@
-"""Замеры задержки карточек каталога: L3 (Meilisearch), L2 (Redis), L1 (память), сравнение с БД.
+"""Замеры задержки карточек каталога: L3 (индекс Tantivy), L2 (Redis), L1 (память), сравнение с БД.
 
 Запуск: python3 scripts/bench/cards.py <base_url> <phase> (обычно через cards.sh)
   phase = cold  — первый запрос к каждой карточке (кэш пуст → L3)
@@ -68,7 +68,7 @@ def repeated(name, path, n=500):
 
 
 if phase == "cold":
-    once_each("L3 Meilisearch")
+    once_each("L3 Tantivy")
 elif phase == "l2":
     once_each("L2 Redis")
 elif phase == "warm":

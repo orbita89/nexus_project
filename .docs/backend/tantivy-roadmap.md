@@ -14,7 +14,7 @@
 </rules>
 
 <target>
-Фаза 2 (≈ дек 2026, 1 день): PostgreSQL — источник правды (всё, включая social/auth); Tantivy — read-only денормализованный каталог (поиск, фасеты, списки, карточка без PG), заменяет Meilisearch для каталога (переключатель `CATALOG_READ=meili|tantivy`, Meili не удаляется 2 недели).
+Фаза 2 (≈ дек 2026, 1 день): PostgreSQL — источник правды (всё, включая social/auth); Tantivy — read-only денормализованный каталог (поиск, фасеты, списки, карточка без PG), заменяет Meilisearch для каталога. **Выполнено 2026-11-24 для поиска** (works, people, books, collections под `SEARCH_INDEX_DIR`: `<root>/{books,people,works,archive,collections}`; Meilisearch удалён, `CATALOG_READ` не реализован — карточки по-прежнему из PG).
 - В Tantivy НЕ попадают: форум, комментарии, тексты рецензий, коллекции, лента. Допустимы агрегаты (`rating_avg`, `reviews_count`).
 - Индексы раздельно: `/var/lib/nexus/tantivy/{movies,movies_archive,series,series_archive,books,books_archive,people}`; индекс = `<entity_kind>[_archive]` по `is_archived`. Сегодняшний `ARCHIVE_DIR` = будущий `movies_archive`.
 - Сквозной поиск: в Tantivy нет MultiSearcher — параллельный `TopDocs(offset+limit)` по индексам, k-way merge по score, архив с весом < 1, `total` = сумма `Count`, `offset` ≤ 1000.

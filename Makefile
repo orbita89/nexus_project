@@ -3,11 +3,9 @@
 
 DATABASE_URL ?= postgres://nexus_user:nexus_password@localhost:5432/nexus_db
 export DATABASE_URL
-# Тесты поиска и карточек каталога ходят в Meilisearch и Redis из make up.
-MEILI_URL ?= http://localhost:7700
-MEILI_MASTER_KEY ?= nexus_dev_master_key
+# Тесты карточек каталога ходят в Redis из make up.
 REDIS_URL ?= redis://localhost:6379
-export MEILI_URL MEILI_MASTER_KEY REDIS_URL
+export REDIS_URL
 
 COMPOSE = docker compose -f infra/docker-compose.yml
 # Контейнер с тулчейном (сервис tools) от пользователя хоста: Rust на машине не нужен.
@@ -58,7 +56,7 @@ CARGO_TEST = cargo nextest run --no-fail-fast
 else
 CARGO_TEST = cargo test --no-fail-fast
 endif
-# Тяжёлые наборы (Meilisearch/Redis, минуты): только в полном make test.
+# Тяжёлые наборы (Redis, индексы Tantivy, минуты): только в полном make test.
 HEAVY_TESTS = catalog archive auth
 
 test:        ## Все тесты (нужен Postgres) — один раз перед закрытием задачи

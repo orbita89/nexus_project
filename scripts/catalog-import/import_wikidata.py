@@ -21,7 +21,7 @@
 Существующие фильмы (сиды, админка) не перезаписываются: совпадение по slug или по «название +
 год» — привязка без изменений. Люди — так же по slug имени.
 
-После загрузки: scripts/reindex-search.sh (Meilisearch о новых строках не знает).
+После загрузки: scripts/reindex-search.sh (индекс о новых строках не знает).
 Вместе с TMDB: этот скрипт — только этапы download и wiki, в БД пишет merge.py (этап load
 отказывается работать, если есть схема catalog_import).
 Запуск: WIKIMEDIA_CONTACT=<почта или URL> DATABASE_URL=postgres://... \
@@ -809,7 +809,7 @@ async def load(args, dsn: str, data: Dataset, top: list[str]):
         await fill_from_wiki(conn, data)
     finally:
         await conn.close()
-    log.info("next: scripts/reindex-search.sh — rebuild Meilisearch")
+    log.info("next: scripts/reindex-search.sh — rebuild search index")
 
 
 async def fill_from_wiki(conn, data: Dataset):

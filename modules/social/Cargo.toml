@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tantivy = { workspace = true }
 shared = { workspace = true }
 axum = { workspace = true }
 image = { workspace = true }

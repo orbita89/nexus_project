@@ -720,7 +720,7 @@ pub struct ListEntitiesQuery {
     /// Slug студии (`GET /studios/{slug}`): её фильмы. Неизвестный slug — пустой список.
     #[param(example = "mosfilm")]
     pub studio: Option<String>,
-    /// Не поддерживается: поиск по названию — только `GET /search` (Meilisearch), здесь — 400
+    /// Не поддерживается: поиск по названию — только `GET /search`, здесь — 400
     /// `use_search`.
     #[param(ignore)]
     pub q: Option<String>,

@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 /// Новые публичные коллекции, а с `?q=` — поиск по названию и описанию.
 ///
-/// Поиск идёт через Meilisearch (индекс [`crate::collection_search`]): опечатки, сортировка по
+/// Поиск идёт через Tantivy (индекс [`crate::collection_search`]): опечатки, сортировка по
 /// релевантности, при равной — свежие выше. В индексе только публичные коллекции, поэтому
 /// приватные не найдёт и их владелец. Страница ответа та же, что и без запроса.
 #[utoipa::path(
@@ -34,7 +34,7 @@ use uuid::Uuid;
     responses(
         (status = 200, description = "Страница коллекций", body = Page<Collection>),
         (status = 400, description = "Слишком длинный запрос", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn list_public(
@@ -53,7 +53,7 @@ pub async fn list_public(
     }
 }
 
-/// Страница поиска: порядок задаёт Meilisearch, строки читаются из БД (счётчики, обложка,
+/// Страница поиска: порядок задаёт индекс, строки читаются из БД (счётчики, обложка,
 /// автор — как в обычном списке).
 async fn found(
     state: &AppState,

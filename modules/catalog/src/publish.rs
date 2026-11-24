@@ -1,6 +1,6 @@
 //! Публикация правки каталога после коммита в БД: поисковый индекс и статика фронтенда (ISR).
 //!
-//! Шаги идут по порядку: [`Step::Search`] — документы в Meilisearch (с ожиданием применения),
+//! Шаги идут по порядку: [`Step::Search`] — индексы Tantivy (с ожиданием применения),
 //! затем [`Step::Isr`] — пересборка страниц затронутых сущностей и людей (`/films/dune-2021`,
 //! `/people/denis-villeneuve`), старых и новых адресов. Ошибка шага запись не отменяет и следующий
 //! шаг не останавливает: индекс догонит перестройка, статику — следующая правка.
@@ -288,21 +288,16 @@ pub async fn run(state: &AppState, touched: Touched, report: &Reporter) -> bool 
     }
 
     let started = report.start(Step::Search);
-    if !state.search.is_enabled() {
+    if state.config.search_index_dir.is_none() {
         report.finish(
             Step::Search,
             StepStatus::Skipped,
-            "Meilisearch выключен",
+            "Поиск выключен (SEARCH_INDEX_DIR не задан)",
             started,
         );
     } else {
         match search::update_index(state, &touched).await {
-            Ok(()) => report.finish(
-                Step::Search,
-                StepStatus::Done,
-                "Meilisearch обновлён",
-                started,
-            ),
+            Ok(()) => report.finish(Step::Search, StepStatus::Done, "Индексы обновлены", started),
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -313,7 +308,7 @@ pub async fn run(state: &AppState, touched: Touched, report: &Reporter) -> bool 
                 report.finish(
                     Step::Search,
                     StepStatus::Failed,
-                    format!("Meilisearch не обновлён: {error}"),
+                    format!("Индексы не обновлены: {error}"),
                     started,
                 );
             }

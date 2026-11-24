@@ -42,7 +42,7 @@ pub(crate) fn is_admin(viewer: Option<&AuthUser>) -> bool {
 /// Наши оценки — из сводок `entity_ratings`, которые присылает `social` (`EntityRatings`): каталог в
 /// таблицы рецензий не ходит.
 ///
-/// Поиска по названию здесь нет: весь поиск на сайте — `GET /search` (Meilisearch); `q` — 400
+/// Поиска по названию здесь нет: весь поиск на сайте — `GET /search` (Tantivy); `q` — 400
 /// `use_search`.
 #[utoipa::path(
     get, operation_id = "list_entities", path = "/entities", tag = "catalog",
@@ -75,7 +75,7 @@ pub async fn list(
 pub(crate) const ADMIN_TOTAL_CAP: i64 = 10_000;
 
 /// Страница списка: публичный (`active = Some(true)`: видимые) и админский (`active` из запроса).
-/// `q` — подстрока в названии, только для админки (скрытых сущностей нет в Meilisearch).
+/// `q` — подстрока в названии, только для админки (скрытых сущностей нет в индексе).
 /// `admin` — админский список: без `sort` — новые сверху (`e.id DESC`, uuidv7, проход по
 /// индексу), `total` — не больше [`ADMIN_TOTAL_CAP`]. Сортировка по баллу и полный `count(*)`
 /// по миллиону строк занимали 5–50 с.
@@ -218,7 +218,7 @@ pub(crate) async fn list_page(
 
 /// Карточка сущности: поля, теги и участники в порядке титров.
 ///
-/// Читается из PostgreSQL, без кэша и Meilisearch: публичные страницы отдаёт статика
+/// Читается из PostgreSQL, без кэша и индекса: публичные страницы отдаёт статика
 /// фронтенда (SSG/ISR), сюда приходят её пересборка и админка.
 ///
 /// Невидимая (скрыта или фильм из TMDB ещё не в окне «Скоро премьера») — 404 для всех, кроме
@@ -251,7 +251,7 @@ pub async fn get(
     Ok(Json(detail(&state.db, entity, admin).await?))
 }
 
-/// Похожие на сущность: того же типа, с хотя бы одним из её тегов (Meilisearch), сверху — по
+/// Похожие на сущность: того же типа, с хотя бы одним из её тегов (Tantivy), сверху — по
 /// баллу «Рекомендуемые», затем новее. Только видимые; у невидимой — 404. Без самой сущности и её
 /// связанных (они и так на карточке). Нет тегов — пустая страница.
 #[utoipa::path(
@@ -264,7 +264,7 @@ pub async fn get(
         (status = 200, description = "Похожие, `total` — всего подходящих", body = Page<EntitySummary>),
         (status = 400, description = "Неверный параметр", body = ErrorBody),
         (status = 404, description = "Не найдена", body = ErrorBody),
-        (status = 503, description = "Meilisearch недоступен", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
     )
 )]
 pub async fn similar(
