@@ -194,6 +194,20 @@ async fn run() -> anyhow::Result<()> {
                     println!("{hit}");
                 }
             }
+            Some("merge") => {
+                // Перед выкладкой на прод: один сегмент (меньше обходов словарей на запрос) и без
+                // файлов удалённых документов.
+                let index = catalog::index::sync::open(&state)
+                    .ok_or_else(|| anyhow::anyhow!("SEARCH_INDEX_DIR is not set"))?
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let started = std::time::Instant::now();
+                let n = index.merge()?;
+                println!(
+                    "catalog index: {n} segments merged into one, {} documents, {:.1?}",
+                    index.len(),
+                    started.elapsed()
+                );
+            }
             Some("explain") => {
                 // Разбор запросов по шагам (как «Проверить запрос» в админке): где тратится время.
                 // `nexus search explain [--merge] [--items] [запрос|вид …]`.
@@ -312,7 +326,7 @@ async fn run() -> anyhow::Result<()> {
                 let rounds = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(5);
                 bench::run(&state, rounds).await?;
             }
-            _ => anyhow::bail!("usage: nexus search reindex\n       nexus search rebuild [book|film|series|game|painting|people|all] [--force]\n       nexus search query <works|people> <q>\n       nexus search bench [ROUNDS]\n       nexus search explain [--merge] [--items] [q|kind ...]"),
+            _ => anyhow::bail!("usage: nexus search reindex\n       nexus search rebuild [book|film|series|game|painting|people|all] [--force]\n       nexus search query <works|people> <q>\n       nexus search bench [ROUNDS]\n       nexus search explain [--merge] [--items] [q|kind ...]\n       nexus search merge"),
         }
         state.cache.wait_pending().await;
         return Ok(());

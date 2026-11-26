@@ -122,7 +122,20 @@ pub const READONLY: &str = "search index is read-only on this server (SEARCH_IND
                             build it locally and upload the files";
 
 pub fn open(state: &AppState) -> Option<Result<Arc<CatalogIndex>, IndexError>> {
-    Some(CatalogIndex::open(&dir(state)?))
+    let dir = dir(state)?;
+    // Прод (только чтение) индекс не строит: чужая схема — ошибка, а не удаление файлов и пустой
+    // индекс (так `CatalogIndex::open` поступает при сборке).
+    if readonly(state) {
+        let found = std::fs::read_to_string(dir.join(shared::tantivy::SCHEMA_FILE)).unwrap_or_default();
+        if found.trim() != super::schema::SCHEMA_VERSION {
+            return Some(Err(IndexError::from(tantivy::TantivyError::InvalidArgument(format!(
+                "catalog index schema is {:?}, this build needs {:?}: upload an index built by this version",
+                found.trim(),
+                super::schema::SCHEMA_VERSION
+            )))));
+        }
+    }
+    Some(CatalogIndex::open(&dir))
 }
 
 /// Слой Б устарел (правка): фоновая задача [`spawn_initial`] пересоберёт его.

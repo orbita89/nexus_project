@@ -22,3 +22,6 @@ plans/
 
 # knigi*.txt — все файлы knigi*.txt игнорируются
 knigi*.txt
+
+# Архивы индекса для публикации (scripts/search-publish.sh pack).
+/dist/

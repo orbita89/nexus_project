@@ -118,6 +118,24 @@ curl http://localhost:8088/health
 docker compose -f infra/docker-compose.prod.yml --env-file /tmp/nexus-local.env down -v
 ```
 
+### Поисковый индекс: собирается локально, выкладывается файлами
+
+Прод индекс не строит (`SEARCH_INDEX_READONLY=1`): ни перестройки, ни пересборки слоя Б, ни фоновых циклов.
+Индекс версии схемы, отличной от сборки приложения, прод не открывает (ошибка в логе, файлы не трогаются).
+
+1. Локально: свежий дамп прод-базы в локальный Postgres.
+2. `docker exec -w /app nexus-app /target/release/nexus search rebuild all` — по изменившимся документам
+   (`--force` — с нуля, после смены схемы; ~30 мин на 2 млн документов).
+3. `scripts/search-publish.sh pack` — слияние в один сегмент (`nexus search merge`), архив
+   `dist/search/catalog-<схема>-<время>.tar.zst` и `.sha256`.
+4. `scripts/search-publish.sh push user@host` — копирование, проверка суммы, распаковка в том
+   (`VOLUME`, по умолчанию `infra_archivedata`) как `tantivy/catalog.new`, подмена `catalog → catalog.prev`,
+   `catalog.new → catalog`, `docker compose restart app`, проверка поиска; не ответил — автоматический откат.
+5. `scripts/search-publish.sh rollback user@host` — вернуть предыдущий индекс вручную.
+
+На сервере нужны `docker`, `zstd`, `curl`; приложение и индекс одной версии схемы выкладываются вместе
+(сначала образ, затем индекс — до подмены поиск вернёт 503).
+
 ## HTTPS 🕓
 
 Нужны сервер и домен. Варианты: certbot рядом с nginx (сертификат в том, `listen 443 ssl`), или
