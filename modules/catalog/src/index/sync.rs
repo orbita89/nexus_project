@@ -240,23 +240,19 @@ async fn entity_docs(
     rows: Vec<Row>,
 ) -> Result<(Vec<EntityDoc>, HashMap<Uuid, i64>), sqlx::Error> {
     let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
-    let book_ids: Vec<Uuid> = rows
-        .iter()
-        .filter(|row| row.kind == EntityKind::Book)
-        .map(|row| row.id)
-        .collect();
     let ords = entity_ords(db, &ids).await?;
-    // Книги — весь состав (фильтр `person`, `role`), остальные — только верхушка титров для
-    // текста. `active_credits` — сколько видимых работ у человека: известность автора для ранга.
-    let credits: Vec<(Uuid, String, String, String, i32)> = sqlx::query_as(
-        "SELECT ec.entity_id, ec.role, p.slug, p.full_name, coalesce(pc.active_credits, 0)
+    // Весь состав — термы фильтра `person`/`role` у всех видов (поиск не спрашивает БД); в текст
+    // имён идёт только верхушка титров (`top`). `active_credits` — сколько видимых работ у
+    // человека: известность автора для ранга.
+    let credits: Vec<(Uuid, String, String, String, i32, bool)> = sqlx::query_as(
+        "SELECT ec.entity_id, ec.role, p.slug, p.full_name, coalesce(pc.active_credits, 0),
+                ec.position < $2
          FROM entity_credits ec JOIN people p ON p.id = ec.person_id
          LEFT JOIN person_credit_counts pc ON pc.person_id = p.id
-         WHERE ec.entity_id = ANY($1) AND (ec.entity_id = ANY($2) OR ec.position < $3)
+         WHERE ec.entity_id = ANY($1)
          ORDER BY ec.entity_id, ec.position",
     )
     .bind(&ids)
-    .bind(&book_ids)
     .bind(TOP_CREDITS)
     .fetch_all(db)
     .await?;
@@ -359,7 +355,7 @@ async fn entity_docs(
             Some((row.id, doc))
         })
         .collect();
-    for (id, role, slug, name, works) in credits {
+    for (id, role, slug, name, works, top) in credits {
         let Some(doc) = docs.get_mut(&id) else {
             continue;
         };
@@ -373,8 +369,11 @@ async fn entity_docs(
                 doc.people.push(name);
             }
             doc.credits.push((role, slug));
-        } else if !doc.people.contains(&name) {
-            doc.people.push(name);
+        } else {
+            if top && !doc.people.contains(&name) {
+                doc.people.push(name);
+            }
+            doc.credits.push((role, slug));
         }
     }
     for (id, slug) in tags {
@@ -791,8 +790,13 @@ async fn build(
     match target {
         Target::All => {
             let sidecar = entities.finish();
+            let refs = load_refs(&state.db).await?;
             let index = index.clone();
-            tokio::task::spawn_blocking(move || index.set_entities(sidecar)).await??;
+            tokio::task::spawn_blocking(move || {
+                index.set_refs(refs)?;
+                index.set_entities(sidecar)
+            })
+            .await??;
             remember(&LAST_SIDECAR, started, total);
         }
         Target::Kinds(_) => {
@@ -843,6 +847,7 @@ pub async fn reload_sidecar(state: &AppState) -> Result<u64, BoxError> {
     }
     let seen = pages.seen;
     let sidecar = builder.finish();
+    let refs = load_refs(&state.db).await?;
     let people = {
         let mut people = PeopleBuilder::default();
         for facts in load_people_facts(&state.db).await? {
@@ -851,6 +856,7 @@ pub async fn reload_sidecar(state: &AppState) -> Result<u64, BoxError> {
         people.finish()
     };
     tokio::task::spawn_blocking(move || {
+        index.set_refs(refs)?;
         index.set_entities(sidecar)?;
         index.set_people(people)
     })
@@ -858,6 +864,20 @@ pub async fn reload_sidecar(state: &AppState) -> Result<u64, BoxError> {
     tracing::info!(entities = seen, took = ?started.elapsed(), "catalog sidecar rebuilt");
     remember(&LAST_SIDECAR, started, seen);
     Ok(seen)
+}
+
+/// Справочники студий и тегов для подсказок фильтров ([`super::refs`]): ответ поиска их не
+/// ищет в БД.
+async fn load_refs(db: &sqlx::PgPool) -> Result<super::refs::Refs, sqlx::Error> {
+    let studios: Vec<super::refs::StudioRow> =
+        sqlx::query_as("SELECT name, slug, logo_url FROM studios")
+            .fetch_all(db)
+            .await?;
+    let tags: Vec<super::refs::TagRow> =
+        sqlx::query_as("SELECT slug, name, kind, description FROM tags")
+            .fetch_all(db)
+            .await?;
+    Ok(super::refs::Refs::build(studios, tags))
 }
 
 /// Ручные места сущностей: `ord → место`.

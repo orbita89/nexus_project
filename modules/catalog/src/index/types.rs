@@ -82,11 +82,10 @@ pub struct Query {
     pub award: Option<String>,
     pub award_year: Option<i32>,
     pub awarded: Option<bool>,
-    /// Slug человека и роль (`None` — любая): только книги, у остальных видов состав в слое Б
-    /// не хранится (для них — [`Query::only_ords`]).
+    /// Slug человека и роль (`None` — любая): термы `person:`/`role:` поля `facet` у всех видов.
     pub person: Option<String>,
     pub role: Option<String>,
-    /// Только эти номера (работы человека из БД).
+    /// Только эти номера.
     pub only_ords: Option<Vec<u32>>,
     /// Кроме этих номеров (похожие).
     pub exclude_ords: Vec<u32>,

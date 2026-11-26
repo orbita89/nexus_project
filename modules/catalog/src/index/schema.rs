@@ -14,7 +14,7 @@ use tantivy::IndexSettings;
 
 /// Версия схемы и анализаторов. Увеличить при любом их изменении: индекс на диске будет
 /// пересоздан пустым и построен заново кнопкой в админке или `nexus search rebuild`.
-pub const SCHEMA_VERSION: &str = "catalog-4";
+pub const SCHEMA_VERSION: &str = "catalog-5";
 
 /// Вид документа-человека (в `kind` и в выдаче).
 pub const PERSON_KIND: &str = "person";

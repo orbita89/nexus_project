@@ -955,30 +955,6 @@ fn countries_of(repeated: &Repeated) -> AppResult<Vec<String>> {
     Ok(countries)
 }
 
-/// Номера работ человека в индексе (`None` — работ нет): общая часть фильтра `person`.
-async fn person_ords(
-    db: &sqlx::PgPool,
-    person: &str,
-    role: Option<&str>,
-) -> sqlx::Result<Option<Vec<u32>>> {
-    let ords: Vec<i32> = sqlx::query_scalar(&format!(
-        "SELECT DISTINCT o.ord FROM people p
-         JOIN entity_credits ec ON ec.person_id = p.id
-         JOIN entities e ON e.id = ec.entity_id
-         JOIN catalog_entity_ords o ON o.entity_id = e.id
-         WHERE p.slug = $1 AND ($2::text IS NULL OR ec.role = $2) AND {VISIBLE}"
-    ))
-    .bind(person)
-    .bind(role.map(str::trim))
-    .fetch_all(db)
-    .await?;
-    let ords: Vec<u32> = ords
-        .into_iter()
-        .filter_map(|o| u32::try_from(o).ok())
-        .collect();
-    Ok((!ords.is_empty()).then_some(ords))
-}
-
 /// Виды запроса без книг: книги отвечают отдельным индексом.
 fn others_of(kinds: &[EntityKind]) -> Vec<EntityKind> {
     kinds
@@ -992,7 +968,7 @@ fn others_of(kinds: &[EntityKind]) -> Vec<EntityKind> {
 /// ничего не подходит (запрос только про книги, а книжного индекса нет; у человека нет работ).
 /// Параметры проверяются теми же правилами, что и раньше (неверный фильтр — 400).
 async fn works_query(
-    state: &AppState,
+    _state: &AppState,
     repeated: &Repeated,
     query: &SearchQuery,
 ) -> AppResult<Option<crate::index::Query>> {
@@ -1005,13 +981,6 @@ async fn works_query(
         return Ok(None);
     }
     let trimmed = |value: &Option<String>| value.as_deref().map(|v| v.trim().to_owned());
-    let only_ords = match &query.person {
-        Some(person) => match person_ords(&state.db, person, query.role.as_deref()).await? {
-            Some(ords) => Some(ords),
-            None => return Ok(None),
-        },
-        None => None,
-    };
     let (year_from, year_to) = match query.year {
         Some(year) => (Some(year), Some(year)),
         None => (query.year_from, query.year_to),
@@ -1054,15 +1023,17 @@ async fn works_query(
         award: query.award.clone(),
         award_year: query.award_year,
         awarded: query.awarded,
-        only_ords,
+        // Человек и роль — термы `person:`/`role:` индекса у всех видов, без БД.
+        person: query.person.as_deref().map(|p| p.trim().to_owned()),
+        role: query.role.as_deref().map(|r| r.trim().to_owned()),
         ..Query::default()
     }))
 }
 
 /// Подсказки студий для фильтра `studio` (фасет по полю `studios`): по части
 /// названия с опечатками; без `q` — самые частые. `count` — сколько видимых сущностей в индексе,
-/// `slug` и `logo_url` — из `studios` (одним запросом на ответ), логотип тот же, что на странице
-/// студии.
+/// `slug` и `logo_url` — из справочника индекса (`sidecar-refs.cols`, собирается из `studios`),
+/// логотип тот же, что на странице студии. В БД не ходит.
 #[utoipa::path(
     get, operation_id = "search_studios", path = "/search/studios", tag = "catalog",
     params(StudiosQuery),
@@ -1083,8 +1054,7 @@ pub async fn studios(
         )));
     }
     let hits = facet_hits(&state, "studios", q, query.kind, query.limit).await?;
-    // Slug'и страниц студий и логотипы — одним запросом на ответ.
-    let refs = studio_refs(&state, &hits).await?;
+    let refs = studio_refs(&state, &hits)?;
     Ok(Json(
         hits.into_iter()
             .map(|(name, count)| {
@@ -1100,16 +1070,17 @@ pub async fn studios(
     ))
 }
 
-/// Строки `studios` для значений фасета — одним запросом на ответ, а не по хиту: панель фильтров
-/// открывается одним запросом в поиск, и девяти походов в БД за логотипами там быть не должно.
-/// В документе индекса логотипа нет и быть не может: facet search возвращает только само значение
-/// и счётчик.
-async fn studio_refs(
+/// Студии для значений фасета — из справочника индекса ([`crate::index::refs`], mmap), не из
+/// БД: подсказки фильтров отвечают без единого запроса в Postgres.
+fn studio_refs(
     state: &AppState,
     hits: &[(String, i64)],
-) -> AppResult<HashMap<String, crate::studios::StudioRef>> {
-    let names: Vec<String> = hits.iter().map(|(name, _)| name.clone()).collect();
-    Ok(crate::studios::refs(&state.db, &names).await?)
+) -> AppResult<HashMap<String, crate::index::refs::StudioRef>> {
+    let refs = crate::index::search::index(state)?.refs();
+    Ok(hits
+        .iter()
+        .filter_map(|(name, _)| refs.studio(name).map(|r| (name.clone(), r)))
+        .collect())
 }
 
 async fn facet_hits(
@@ -1162,13 +1133,13 @@ pub async fn publishers(
 }
 
 /// Издатели и музеи в карточках подсказок. Своей таблицы с логотипами у них нет, поэтому логотип
-/// берётся из `studios` по совпадению названия (издатель игры часто и есть студия-разработчик) —
-/// тем же одним запросом, что и у студий; не нашлось — `null`, карточка без картинки.
+/// берётся из справочника студий индекса по совпадению названия (издатель игры часто и есть
+/// студия-разработчик); не нашлось — `null`, карточка без картинки.
 async fn publisher_hits(
     state: &AppState,
     hits: Vec<(String, i64)>,
 ) -> AppResult<Vec<PublisherHit>> {
-    let refs = studio_refs(state, &hits).await?;
+    let refs = studio_refs(state, &hits)?;
     Ok(hits
         .into_iter()
         .map(|(name, count)| PublisherHit {
@@ -1235,7 +1206,7 @@ pub async fn countries(
 
 /// Подсказки тегов и жанров для фильтра `tag` (facet search по полю `tags`): только те, что есть
 /// у сущностей этого типа — жанры фильмов не предлагаются в книгах. Фасет хранит slug'и, поэтому
-/// названия и `kind` тегов дочитываются из `tags` одним запросом на ответ. Запрос `q` по названию
+/// названия и `kind` тегов берутся из справочника индекса (собирается из `tags`), без БД. Запрос `q` по названию
 /// бессмысленен (в фасете slug'и), фильтровать по названию — на стороне клиента.
 #[utoipa::path(
     get, operation_id = "search_tags", path = "/search/tags", tag = "catalog",
@@ -1264,23 +1235,15 @@ pub async fn tags(
     } else {
         facet_hits(&state, "tags", q, query.kind, query.limit).await?
     };
-    let slugs: Vec<String> = hits.iter().map(|(slug, _)| slug.clone()).collect();
-    let rows: Vec<(String, String, String, Option<String>)> =
-        sqlx::query_as("SELECT slug, name, kind, description FROM tags WHERE slug = ANY($1)")
-            .bind(&slugs)
-            .fetch_all(&state.db)
-            .await?;
-    let named: HashMap<String, (String, String, Option<String>)> = rows
-        .into_iter()
-        .map(|(slug, name, kind, description)| (slug, (name, kind, description)))
-        .collect();
+    // Название, вид и описание — из справочника индекса, не из БД.
+    let refs = crate::index::search::index(&state)?.refs();
     Ok(Json(
         hits.into_iter()
             .map(|(slug, count)| {
-                let (name, kind, description) = named
-                    .get(&slug)
-                    .cloned()
-                    .unwrap_or_else(|| (slug.clone(), "tag".to_owned(), None));
+                let (name, kind, description) = match refs.tag(&slug) {
+                    Some(tag) => (tag.name, tag.kind, tag.description),
+                    None => (slug.clone(), "tag".to_owned(), None),
+                };
                 TagHit {
                     slug,
                     name,

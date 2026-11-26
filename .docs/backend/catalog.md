@@ -774,7 +774,7 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 (`index::weights`, RAM, загрузка при старте и после сохранения). У `person` — только она.
 
 **Память слоя Б (2026-11-26).** Цель — минимум RAM и CPU на слабом проде.
-- Схема `catalog-4`: `title_key` — 8-байтный хеш FNV-1a нормализованного названия (`schema::title_key_term`,
+- Схема `catalog-5` (с 2026-11-26; `catalog-4` — до справочников и полного состава): `title_key` — 8-байтный хеш FNV-1a нормализованного названия (`schema::title_key_term`,
   поле bytes), а не строка: словарь был ~53 МБ. Ключ сортировки названия пропускает знаки в начале, названия
   без букв и цифр — в конце порядка `title`.
 - Схема `catalog-3`. Поле `facet` слоя А (`STRING`, `sidecar::text_facets`): `person:<slug>`, `role:<роль>:<slug>`,
@@ -805,6 +805,19 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 - Замеры: `nexus search memory [--reload]`, `GET /admin/search/sidecar` (части с меткой «в куче / в файле»),
   нагрузка — `pnpm search:load` во фронте (`BASE`, `CONCURRENCY`, `SECONDS`).
 - Прогрев (`CatalogIndex::warm`) открывает и первую страницу людей каждой роли.
+
+**Поиск без Postgres (2026-11-26).** Ни один публичный эндпоинт поиска не ходит в БД. Схема `catalog-5`:
+- Фильтр `person`/`role` у всех видов — термы `person:<slug>`/`role:<роль>:<slug>` поля `facet` (весь состав из
+  `entity_credits`; в текст имён — только первые `TOP_CREDITS`). Раньше у фильмов, сериалов и картин номера
+  работ брались из `entity_credits` на каждый запрос (`person_ords`, ~100 мс).
+- Номер по slug (`/entities/{slug}/neighbors`, «похожие» с `exclude`) — терм `slug:<slug>`
+  (`CatalogIndex::ords_of_slugs`), а не `catalog_entity_ords`.
+- Подсказки `/search/studios`, `/search/publishers`, `/search/museums` (slug и логотип студии) и `/search/tags`
+  (название, вид, описание) — из справочника `sidecar-refs.cols` (`index::refs`: отсортированные ключи и
+  значения, двоичный поиск через mmap, в куче ничего). Собирается вместе со слоем Б (`reload_sidecar`, полная
+  перестройка) из `studios` и `tags`.
+- Кэшируются `count()` (через ряды выдачи) и счётчики ролей людей; «Новинки»/«Скоро» считают итог проходом по
+  фильтру, а не по всему порядку.
 
 **Скорость текстового поиска (2026-11-26).** Замер — `nexus search bench [--merge] [запросы…]` (release,
 шаги как в «Проверить запрос»). Опечатки (`FuzzyTermQuery` по `title` и `people`) — только в резервном запросе

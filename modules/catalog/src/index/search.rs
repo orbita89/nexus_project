@@ -37,23 +37,15 @@ pub async fn blocking<T: Send + 'static>(
         .map_err(|e| AppError::Internal(format!("catalog index task failed: {e}")))??)
 }
 
-/// Номера сущностей по slug'ам (неизвестные пропускаются). Индекс slug'ов не хранит: номер
-/// берётся из `catalog_entity_ords`.
+/// Номера сущностей по slug'ам (неизвестные пропускаются) — из индекса (термы `slug:`), не из
+/// БД.
 pub async fn ords_of_slugs(state: &AppState, slugs: &[String]) -> AppResult<Vec<u32>> {
     if slugs.is_empty() {
         return Ok(Vec::new());
     }
-    let rows: Vec<i32> = sqlx::query_scalar(
-        "SELECT o.ord FROM catalog_entity_ords o JOIN entities e ON e.id = o.entity_id
-         WHERE e.slug = ANY($1)",
-    )
-    .bind(slugs)
-    .fetch_all(&state.db)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|o| u32::try_from(o).ok())
-        .collect())
+    let index = index(state)?;
+    let slugs = slugs.to_vec();
+    blocking(move || index.ords_of_slugs(&slugs)).await
 }
 
 /// Страница выдачи. `random` — случайное окно (тот же порядок, смещение случайно).

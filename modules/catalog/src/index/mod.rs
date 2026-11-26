@@ -23,6 +23,7 @@ pub mod collect;
 pub mod columns;
 pub mod people_sidecar;
 pub mod query;
+pub mod refs;
 pub mod schema;
 pub mod search;
 pub mod sidecar;
@@ -321,6 +322,8 @@ pub struct CatalogIndex {
     cached: AtomicBool,
     entities: ArcSwap<EntitySidecar>,
     people: ArcSwap<PeopleSidecar>,
+    /// Справочники студий и тегов для подсказок фильтров ([`refs`]).
+    refs: ArcSwap<refs::Refs>,
     present: Mutex<Option<Arc<Present>>>,
 }
 
@@ -374,6 +377,7 @@ impl CatalogIndex {
             // Снимки слоя Б с диска: поиск работает сразу, до первой сборки из БД.
             entities: ArcSwap::from_pointee(EntitySidecar::load(dir).unwrap_or_default()),
             people: ArcSwap::from_pointee(PeopleSidecar::load(dir).unwrap_or_default()),
+            refs: ArcSwap::from_pointee(refs::Refs::load(dir).unwrap_or_default()),
             present: Mutex::new(None),
         });
         open.insert(dir.to_path_buf(), index.clone());
@@ -406,6 +410,18 @@ impl CatalogIndex {
         };
         self.entities.store(Arc::new(sidecar));
         self.warm()
+    }
+
+    pub fn refs(&self) -> Arc<refs::Refs> {
+        self.refs.load_full()
+    }
+
+    /// Подменить справочники студий и тегов: файл пишется и читается обратно через mmap.
+    pub fn set_refs(&self, refs: refs::Refs) -> Result<(), IndexError> {
+        refs.save(&self.dir).map_err(TantivyError::from)?;
+        let refs = refs::Refs::load(&self.dir).map_err(TantivyError::from)?;
+        self.refs.store(Arc::new(refs));
+        Ok(())
     }
 
     /// Подменить слой Б людей.
@@ -1130,6 +1146,27 @@ impl CatalogIndex {
     }
 
     /// Сколько сущностей под запрос (без самой выдачи).
+    /// Номера сущностей по slug'ам (порядок — как у `slugs`, неизвестные пропускаются): термы
+    /// `slug:` поля `facet`, без БД.
+    pub fn ords_of_slugs(&self, slugs: &[String]) -> Result<Vec<u32>, IndexError> {
+        let searcher = self.reader.searcher();
+        let present = self.present(&searcher)?;
+        let all = Arc::new(present.entities.clone());
+        let mut out = Vec::with_capacity(slugs.len());
+        for slug in slugs {
+            let term = Term::from_field_text(self.f.facet, &sidecar::slug_key(slug));
+            let found = searcher.search(
+                &TermQuery::new(term, IndexRecordOption::Basic),
+                &OrdSet {
+                    filter: all.clone(),
+                    space: Space::Entity,
+                },
+            )?;
+            out.extend(found.min());
+        }
+        Ok(out)
+    }
+
     pub fn count(&self, q: &Query) -> Result<usize, IndexError> {
         let searcher = self.reader.searcher();
         let present = self.present(&searcher)?;

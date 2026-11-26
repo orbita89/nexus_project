@@ -86,6 +86,9 @@ pub fn person_key(slug: &str) -> String {
 pub fn role_key(role: &str, slug: &str) -> String {
     format!("role:{role}:{slug}")
 }
+pub fn slug_key(slug: &str) -> String {
+    format!("slug:{slug}")
+}
 
 /// Термы поля `facet` слоя А: значения с большим числом вариантов (студии, издатели, музеи,
 /// награды, люди). В RAM их нет — 74 тыс. студий или 180 тыс. людей битовыми картами стоили бы
@@ -112,6 +115,8 @@ pub fn text_facets(doc: &EntityDoc) -> Vec<String> {
         out.push(person_key(slug));
         out.push(role_key(role, slug));
     }
+    // Номер по slug (соседи в выдаче, «кроме этих») — без БД.
+    out.push(slug_key(&doc.slug));
     out.sort_unstable();
     out.dedup();
     out
