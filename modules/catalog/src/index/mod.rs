@@ -856,6 +856,15 @@ impl CatalogIndex {
         };
         let mut hits = collect(strict.as_ref())?;
         let mut approximate = false;
+        let mut title = title;
+        if hits.is_empty() {
+            // Опечатка: сначала исправленные слова (обычный BM25), не нашлось — нечёткий запрос.
+            if let Some((fixed, fixed_title)) = self.builder().corrected(searcher, &query)? {
+                hits = collect(fixed.as_ref())?;
+                title = fixed_title;
+                approximate = true;
+            }
+        }
         if hits.is_empty() {
             if let Some(fallback) = fallback {
                 hits = collect(fallback.as_ref())?;
@@ -867,7 +876,13 @@ impl CatalogIndex {
         }
         let total = hits.len();
         if q.sort == Sort::Relevance {
-            let (exact, titled) = self.title_sets(searcher, &query, title.as_ref(), &hits)?;
+            // С опечаткой уровни «точное / в названии» вводят в заблуждение (исправленное «брат»
+            // в названии книги обгоняет фильмы Брэда Питта): только текст и популярность.
+            let (exact, titled) = if approximate {
+                (RoaringBitmap::new(), RoaringBitmap::new())
+            } else {
+                self.title_sets(searcher, &query, title.as_ref(), &hits)?
+            };
             return Ok(Ranked {
                 ords: sidecar.rank_hits(&hits, &exact, &titled, len),
                 total,
@@ -1001,11 +1016,20 @@ impl CatalogIndex {
         };
         let mut hits = collect(strict.as_ref())?;
         step(&mut out, "Текст: все слова (название, люди, серия)", hits.len() as u64);
+        let mut title = title;
+        if hits.is_empty() {
+            if let Some((fixed, fixed_title)) = self.builder().corrected(&searcher, &query)? {
+                hits = collect(fixed.as_ref())?;
+                title = fixed_title;
+                out.approximate = true;
+                step(&mut out, "Текст: исправленные слова (строгий запрос пуст)", hits.len() as u64);
+            }
+        }
         if hits.is_empty() {
             if let Some(fallback) = fallback {
                 hits = collect(fallback.as_ref())?;
                 out.approximate = true;
-                step(&mut out, "Текст: с опечаткой (строгий запрос пуст)", hits.len() as u64);
+                step(&mut out, "Текст: нечёткий запрос (исправление не нашло)", hits.len() as u64);
             }
         }
         out.total = hits.len() as u64;
@@ -1027,7 +1051,11 @@ impl CatalogIndex {
             return Ok(out);
         }
         out.relevance = true;
-        let (exact, titled) = self.title_sets(&searcher, &query, title.as_ref(), &hits)?;
+        let (exact, titled) = if out.approximate {
+            (RoaringBitmap::new(), RoaringBitmap::new())
+        } else {
+            self.title_sets(&searcher, &query, title.as_ref(), &hits)?
+        };
         step(
             &mut out,
             &format!("Точное название (title_key): {}; совпало в названии (title)", exact.len()),

@@ -194,8 +194,9 @@ async fn run() -> anyhow::Result<()> {
                     println!("{hit}");
                 }
             }
-            Some("bench") => {
+            Some("explain") => {
                 // Разбор запросов по шагам (как «Проверить запрос» в админке): где тратится время.
+                // `nexus search explain [--merge] [--items] [запрос|вид …]`.
                 let index = catalog::index::sync::open(&state)
                     .ok_or_else(|| anyhow::anyhow!("SEARCH_INDEX_DIR is not set"))?
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -205,7 +206,7 @@ async fn run() -> anyhow::Result<()> {
                     println!("merged {n} segments into one in {:.1?}", started.elapsed());
                 }
                 let words: Vec<String> = if args.len() > 2 && !args[2].starts_with("--") {
-                    args[2..].to_vec()
+                    args[2..].iter().filter(|a| !a.starts_with("--")).cloned().collect()
                 } else {
                     ["мастер", "маст", "матр", "дом", "любовь", "война", "star", "harry", "звёздные войны", "мастер и маргарита", "брэд питт", "властелин колец", "ночь"]
                         .iter().map(ToString::to_string).collect()
@@ -238,6 +239,18 @@ async fn run() -> anyhow::Result<()> {
                         if round == 1 {
                             let steps: Vec<String> = e.steps.iter().map(|s| format!("{}={}µs/{}", s.name.split(' ').next().unwrap_or(""), s.micros, s.count)).collect();
                             println!("{w:>22} {total:>7}µs  {}", steps.join("  "));
+                            if args.iter().any(|a| a == "--items") {
+                                for it in e.items.iter().take(6) {
+                                    let d = it.detail.as_ref();
+                                    println!(
+                                        "{:>26} {} [{}] tier {} text {:.2} pop {:.2} w {:.2} bm25 {:.2} total {:.3}",
+                                        "", it.title, it.kind,
+                                        d.map_or(9, |d| d.tier), d.map_or(0.0, |d| d.text),
+                                        d.map_or(0.0, |d| d.popularity), d.map_or(0.0, |d| d.weight),
+                                        d.map_or(0.0, |d| d.bm25), d.map_or(0.0, |d| d.total)
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -299,7 +312,7 @@ async fn run() -> anyhow::Result<()> {
                 let rounds = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(5);
                 bench::run(&state, rounds).await?;
             }
-            _ => anyhow::bail!("usage: nexus search reindex\n       nexus search rebuild [book|film|series|game|painting|people|all] [--force]\n       nexus search query <works|people> <q>\n       nexus search bench [ROUNDS]"),
+            _ => anyhow::bail!("usage: nexus search reindex\n       nexus search rebuild [book|film|series|game|painting|people|all] [--force]\n       nexus search query <works|people> <q>\n       nexus search bench [ROUNDS]\n       nexus search explain [--merge] [--items] [q|kind ...]"),
         }
         state.cache.wait_pending().await;
         return Ok(());

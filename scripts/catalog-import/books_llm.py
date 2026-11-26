@@ -293,7 +293,9 @@ def parse_line(line: str) -> dict | None:
     return {
         "n": int(parts[0]),
         "type": kind or "other",
-        "clean_title": None if title in ("", "=") else title,
+        # Лишняя колонка «=» склеивалась в название «=|=» (так испорчено ~270 книг): без единой
+        # буквы или цифры — «чистить нечего».
+        "clean_title": None if not any(c.isalnum() for c in title) else title,
         "authors": None if authors in ("", "=") else [a.strip() for a in authors.split(";") if a.strip()],
         "genres_add": split(tail[0].lstrip("+")),
         "genres_wrong": split(tail[1].lstrip("-")),

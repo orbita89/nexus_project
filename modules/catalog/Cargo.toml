@@ -33,6 +33,9 @@ tantivy = { workspace = true }
 roaring = { workspace = true }
 # Колонки слоя Б из отображённого файла в `&[T]` без своего unsafe.
 bytemuck = { version = "1", features = ["derive"] }
+# Те же версии, что у Tantivy: исправление опечатки обходит словарь автоматом Левенштейна.
+tantivy-fst = "0.5"
+levenshtein_automata = "0.2"
 regex = { workspace = true }
 arc-swap = { workspace = true }
 # Читалка книг: EPUB из архивов .arx (catalog::books::reader).

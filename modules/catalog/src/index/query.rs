@@ -371,6 +371,43 @@ impl QueryBuilder<'_> {
     /// Совпадения только по названию: каждое слово — в названии (последнее недописанное — и
     /// автодополнением по названию). Делит выдачу на «нашлось в названии» и «только по людям,
     /// серии…»: популярность не поднимает второе над первым.
+    /// «Возможно, вы имели в виду»: каждое слово от [`FUZZY_MIN_TERM_LEN`] букв заменяется самым
+    /// частым словом словаря на расстоянии одной правки (оно само тоже кандидат) — в названиях
+    /// по стему, в именах по слову. Возвращает строгий запрос и «все слова в названии» по
+    /// исправленным словам (`None` — ничего не исправилось). Нечёткий запрос Tantivy даёт всем
+    /// совпадениям одну оценку, а исправленный — обычный BM25: «матрца» ставит «Матрицу» выше
+    /// «Литературной матрицы. Учебника…».
+    pub fn corrected(
+        &self,
+        searcher: &Searcher,
+        text: &str,
+    ) -> Result<Option<(Box<dyn Query>, Box<dyn Query>)>, TantivyError> {
+        // Автодополнение последнего слова — как в строгом запросе («брэт пит» → «питт»).
+        let mut parsed = self.parse(searcher, text)?;
+        let mut changed = false;
+        for term in &mut parsed.terms {
+            if is_stop_word(&term.raw) || term.raw.chars().count() < FUZZY_MIN_TERM_LEN {
+                continue;
+            }
+            if let Some(stem) = closest(searcher, self.f.title, &term.stem)? {
+                changed |= stem != term.stem;
+                term.stem = stem;
+            }
+            if let Some(raw) = closest(searcher, self.f.people, &term.raw)? {
+                changed |= raw != term.raw;
+                term.raw = raw;
+            }
+        }
+        if !changed {
+            return Ok(None);
+        }
+        let Some(strict) = self.strict("", &parsed) else {
+            return Ok(None);
+        };
+        let title = self.title_only(&parsed);
+        Ok(Some((strict, title)))
+    }
+
     fn title_only(&self, parsed: &Parsed) -> Box<dyn Query> {
         let n = parsed.terms.len();
         let clauses: Vec<(Occur, Box<dyn Query>)> = parsed
@@ -405,6 +442,58 @@ impl QueryBuilder<'_> {
             IndexRecordOption::Basic,
         ))
     }
+}
+
+/// Автомат Левенштейна для обхода словаря (как у `FuzzyTermQuery` Tantivy).
+struct Dfa(levenshtein_automata::DFA);
+
+impl tantivy_fst::Automaton for Dfa {
+    type State = u32;
+
+    fn start(&self) -> u32 {
+        self.0.initial_state()
+    }
+
+    fn is_match(&self, state: &u32) -> bool {
+        matches!(self.0.distance(*state), levenshtein_automata::Distance::Exact(_))
+    }
+
+    fn can_match(&self, state: &u32) -> bool {
+        *state != levenshtein_automata::SINK_STATE
+    }
+
+    fn accept(&self, state: &u32, byte: u8) -> u32 {
+        self.0.transition(*state, byte)
+    }
+}
+
+/// Одна правка, перестановка соседних букв — тоже одна. Строитель дорогой — один на процесс.
+fn levenshtein() -> &'static levenshtein_automata::LevenshteinAutomatonBuilder {
+    static BUILDER: std::sync::OnceLock<levenshtein_automata::LevenshteinAutomatonBuilder> =
+        std::sync::OnceLock::new();
+    BUILDER.get_or_init(|| levenshtein_automata::LevenshteinAutomatonBuilder::new(1, true))
+}
+
+/// Самое частое слово словаря `field` на расстоянии одной правки от `word` (по всем
+/// сегментам); `None` — таких нет.
+fn closest(searcher: &Searcher, field: Field, word: &str) -> Result<Option<String>, TantivyError> {
+    let mut freq: HashMap<Vec<u8>, u64> = HashMap::new();
+    for segment in searcher.segment_readers() {
+        let inverted = segment.inverted_index(field)?;
+        let dfa = Dfa(levenshtein().build_dfa(word));
+        let mut stream = inverted
+            .terms()
+            .search(dfa)
+            .into_stream()
+            .map_err(TantivyError::from)?;
+        while stream.advance() {
+            *freq.entry(stream.key().to_vec()).or_default() += u64::from(stream.value().doc_freq);
+        }
+    }
+    Ok(freq
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .and_then(|(word, _)| String::from_utf8(word).ok()))
 }
 
 #[cfg(test)]
