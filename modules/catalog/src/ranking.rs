@@ -85,46 +85,10 @@ fn validate(s: &RankingSettings) -> AppResult<()> {
     Ok(())
 }
 
-/// Пересчитать `quality` и `rank_score` всех строк `entity_stats` по сохранённым настройкам.
-/// Возвращает, у скольких строк балл есть.
+/// Пересчитать `quality` и `rank_score` всех видов по сохранённым настройкам
+/// ([`crate::rank_kinds`]). Возвращает, у скольких сущностей балл есть.
 pub(crate) async fn recompute(db: &PgPool) -> Result<i64, sqlx::Error> {
-    let mut tx = db.begin().await?;
-    let s = settings(&mut *tx).await?;
-    sqlx::query(&format!(
-        "CREATE TEMP TABLE ranked ON COMMIT DROP AS
-         SELECT entity_id, quality, q_part + p_part + r_part AS score FROM ({FORMULA}) f"
-    ))
-    .bind(s.weight_quality)
-    .bind(s.weight_popularity)
-    .bind(s.weight_recency)
-    .bind(f64::from(s.trust_votes))
-    .bind(s.half_life_years)
-    .bind(s.min_votes)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("CREATE UNIQUE INDEX ON ranked (entity_id)")
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "UPDATE entity_stats s SET quality = r.quality, rank_score = r.score
-         FROM ranked r
-         WHERE s.entity_id = r.entity_id
-           AND (s.quality, s.rank_score) IS DISTINCT FROM (r.quality, r.score)",
-    )
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "UPDATE entity_stats s SET quality = NULL, rank_score = NULL
-         WHERE (s.quality IS NOT NULL OR s.rank_score IS NOT NULL)
-           AND NOT EXISTS (SELECT 1 FROM ranked r WHERE r.entity_id = s.entity_id)",
-    )
-    .execute(&mut *tx)
-    .await?;
-    let ranked: i64 = sqlx::query_scalar("SELECT count(*) FROM ranked")
-        .fetch_one(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(ranked)
+    crate::rank_kinds::recompute_all(db).await
 }
 
 /// Шаг `rank` в потоке: пересчёт балла.
@@ -135,7 +99,7 @@ pub(crate) async fn recompute_step(db: &PgPool, report: &Reporter) -> bool {
             report.finish(
                 Step::Rank,
                 StepStatus::Done,
-                format!("Балл «Рекомендуемые» у {ranked} фильмов"),
+                format!("Балл «Рекомендуемые» у {ranked}"),
                 started,
             );
             true
@@ -247,6 +211,22 @@ pub async fn save_stream(
     .bind(s.half_life_years)
     .bind(s.min_votes)
     .bind(s.soon_days)
+    .bind(admin.id)
+    .execute(&state.db)
+    .await?;
+    // Фильмы считаются по `catalog_rank_kinds` — та же строка.
+    sqlx::query(
+        "UPDATE catalog_rank_kinds SET weight_quality = $1, weight_popularity = $2,
+             weight_recency = $3, trust_votes = $4, half_life_years = $5, min_votes = $6,
+             updated_at = now(), updated_by = $7
+         WHERE kind = 'movie'",
+    )
+    .bind(s.weight_quality)
+    .bind(s.weight_popularity)
+    .bind(s.weight_recency)
+    .bind(s.trust_votes)
+    .bind(s.half_life_years)
+    .bind(s.min_votes)
     .bind(admin.id)
     .execute(&state.db)
     .await?;

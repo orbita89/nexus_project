@@ -1,10 +1,10 @@
-//! Книжный поиск в API: `GET /search`, соседи, похожие и подсказки фильтров для книг идут в
-//! индекс Tantivy ([`super::index`]), когда запрос — только про книги
-//! (`kind=book`). Остальные разделы — индекс работ ([`crate::works`]); смешанные запросы
-//! чередуют оба ([`crate::search`]).
+//! Книжный поиск в API: `GET /search`, соседи, похожие и подсказки фильтров для запросов только
+//! про книги (`kind=book`) идут в единый индекс ([`crate::index`]) с фильтром вида `book`.
+//! Остальные разделы — тот же индекс с другими видами; смешанные запросы чередуют оба
+//! ([`crate::search`]).
 //!
 //! Параметры и ответы — те же, что у остальных разделов: фронтенд не различает, кто ответил. Отличия:
-//! - `q` ищет по названию, авторам и серии (у работ — название и студии);
+//! - `q` ищет по названию, авторам и серии (у работ — название, люди и студии);
 //! - в строке выдачи есть `authors`;
 //! - работает фильтр `has_cover`;
 //! - `sort=trending` — то же, что `popular`, `awarded` — то же, что `recommended`: своей
@@ -12,54 +12,24 @@
 //! - фильтры, которых у книг не бывает (`studio`, `museum`, `country`, `award`, `awarded=true`),
 //!   дают пустую выдачу.
 
-use std::sync::Arc;
+use shared::{AppResult, AppState};
 
-use shared::{AppError, AppResult, AppState};
-
-use super::index::{BookForm, BookIndex, BookQuery, BookSort, Found, IndexError};
-use super::sync;
+use crate::index::{sync, BookForm, Query, Sort};
 use crate::models::{
     EntityKind, EntitySort, EntitySummary, Neighbors, Page, SearchQuery, SearchSort,
 };
 
-/// Сколько книг выдачи просматривать, разыскивая работу для «предыдущая / следующая».
-const NEIGHBORS_SCAN: usize = 5000;
 /// Тегов в подсказках книг: жанров FB2 больше двухсот, а панель фильтров показывает их все.
 pub const MAX_TAG_HITS: usize = 300;
 
-/// Запрос — только про книги, и книжный поиск включён: отвечает Tantivy.
+/// Запрос — только про книги, и поиск включён: отвечает единый индекс.
 pub fn routed(state: &AppState, kinds: &[EntityKind]) -> bool {
     sync::enabled(state) && kinds == [EntityKind::Book]
 }
 
-fn unavailable() -> AppError {
-    AppError::Unavailable("books search is not available".into())
-}
-
-impl From<IndexError> for AppError {
-    fn from(error: IndexError) -> Self {
-        tracing::warn!(%error, "books index error");
-        unavailable()
-    }
-}
-
-fn open(state: &AppState) -> AppResult<Arc<BookIndex>> {
-    Ok(sync::open(state).ok_or_else(unavailable)??)
-}
-
-/// Работа с индексом (mmap может уйти в page fault, разбор и подсчёт — процессор) — вне
-/// потоков async.
-async fn blocking<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T, IndexError> + Send + 'static,
-) -> AppResult<T> {
-    Ok(tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| AppError::Internal(format!("books index task failed: {e}")))??)
-}
-
 /// Запрос к индексу из параметров `GET /search` (уже проверенных `search::filters_of`).
 /// `None` — фильтр, которого у книг не бывает: выдача пуста.
-pub fn query_of(query: &SearchQuery, countries: &[String]) -> Option<BookQuery> {
+pub fn query_of(query: &SearchQuery, countries: &[String]) -> Option<Query> {
     let foreign = query.studio.is_some()
         || query.studio_slug.is_some()
         || query.museum.is_some()
@@ -74,18 +44,19 @@ pub fn query_of(query: &SearchQuery, countries: &[String]) -> Option<BookQuery> 
         Some(year) => (Some(year), Some(year)),
         None => (query.year_from, query.year_to),
     };
-    Some(BookQuery {
+    Some(Query {
         q: query.q.as_deref().unwrap_or_default().trim().to_string(),
+        kinds: vec![EntityKind::Book],
         sort: match query.sort {
-            Some(SearchSort::Recommended | SearchSort::Awarded) => BookSort::Recommended,
-            Some(SearchSort::Trending | SearchSort::Popular) => BookSort::Popular,
-            Some(SearchSort::TopRated | SearchSort::Rating) => BookSort::Rating,
-            Some(SearchSort::New) => BookSort::New,
-            Some(SearchSort::Soon) => BookSort::Soon,
-            Some(SearchSort::Title) => BookSort::Title,
-            Some(SearchSort::Random) | None => BookSort::Relevance,
+            Some(SearchSort::Recommended | SearchSort::Awarded) => Sort::Recommended,
+            Some(SearchSort::Trending | SearchSort::Popular) => Sort::Popular,
+            Some(SearchSort::TopRated | SearchSort::Rating) => Sort::Rating,
+            Some(SearchSort::New) => Sort::New,
+            Some(SearchSort::Soon) => Sort::Soon,
+            Some(SearchSort::Title) => Sort::Title,
+            Some(SearchSort::Random) | None => Sort::Relevance,
         },
-        tag: query.tag.clone(),
+        tags: query.tag.iter().cloned().collect(),
         year_from,
         year_to,
         publisher: query.publisher.as_ref().map(|p| p.trim().to_string()),
@@ -93,7 +64,7 @@ pub fn query_of(query: &SearchQuery, countries: &[String]) -> Option<BookQuery> 
         role: query.role.as_ref().map(|r| r.trim().to_string()),
         has_cover: query.has_cover,
         forms: query.book_form.as_deref().map(forms_of).unwrap_or_default(),
-        ..BookQuery::default()
+        ..Query::default()
     })
 }
 
@@ -120,36 +91,20 @@ fn forms_of(value: &str) -> Vec<BookForm> {
 /// `GET /search` для книг. `random` — случайное окно выдачи (как у остальных разделов).
 pub async fn search(
     state: &AppState,
-    query: Option<BookQuery>,
+    query: Option<Query>,
     random: bool,
     limit: i64,
     offset: i64,
 ) -> AppResult<Page<EntitySummary>> {
-    let empty = Page {
-        items: Vec::new(),
-        total: 0,
-        limit,
-        offset: if random { 0 } else { offset },
-    };
     let Some(query) = query else {
-        return Ok(empty);
+        return Ok(Page {
+            items: Vec::new(),
+            total: 0,
+            limit,
+            offset: if random { 0 } else { offset },
+        });
     };
-    let index = open(state)?;
-    let (found, offset) = blocking(move || {
-        let (limit, mut offset) = (limit.max(0) as usize, offset.max(0) as usize);
-        if random {
-            let total = index.count(&query)?;
-            offset = crate::search::random_below((total - total.min(limit) + 1) as i64) as usize;
-        }
-        Ok::<(Found, usize), IndexError>((index.search(&query, limit, offset)?, offset))
-    })
-    .await?;
-    Ok(Page {
-        items: found.items,
-        total: found.total as i64,
-        limit,
-        offset: offset as i64,
-    })
+    crate::index::search::search(state, query, random, limit, offset).await
 }
 
 /// Запрос к индексу для админского списка книг (`GET /admin/entities?kind=book`): все виды
@@ -159,68 +114,46 @@ pub fn admin_query(
     sort: Option<EntitySort>,
     tag: Option<String>,
     year: Option<i32>,
-) -> BookQuery {
-    BookQuery {
+) -> Query {
+    Query {
         q: q.unwrap_or_default().trim().to_string(),
         sort: match sort {
-            None => BookSort::Relevance,
-            Some(EntitySort::Recommended) => BookSort::Recommended,
-            Some(EntitySort::Trending | EntitySort::Popular) => BookSort::Popular,
-            Some(EntitySort::TopRated | EntitySort::Rating) => BookSort::Rating,
-            Some(EntitySort::New) => BookSort::New,
-            Some(EntitySort::Soon) => BookSort::Soon,
-            Some(EntitySort::Title) => BookSort::Title,
+            None => Sort::Relevance,
+            Some(EntitySort::Recommended) => Sort::Recommended,
+            Some(EntitySort::Trending | EntitySort::Popular) => Sort::Popular,
+            Some(EntitySort::TopRated | EntitySort::Rating) => Sort::Rating,
+            Some(EntitySort::New) => Sort::New,
+            Some(EntitySort::Soon) => Sort::Soon,
+            Some(EntitySort::Title) => Sort::Title,
         },
-        tag,
+        kinds: vec![EntityKind::Book],
+        tags: tag.into_iter().collect(),
         year_from: year,
         year_to: year,
         forms: BookForm::ALL.to_vec(),
-        ..BookQuery::default()
+        ..Query::default()
     }
 }
 
 /// Сколько книг под запрос.
-pub async fn count(state: &AppState, query: BookQuery) -> AppResult<usize> {
-    let index = open(state)?;
-    blocking(move || index.count(&query)).await
+pub async fn count(state: &AppState, query: Query) -> AppResult<usize> {
+    crate::index::search::count(state, query).await
 }
 
-/// Соседи книги `slug` в выдаче `query`. Книги в ряду нет (или ряд длиннее
-/// [`NEIGHBORS_SCAN`]) — оба края `None`.
+/// Соседи книги `slug` в выдаче `query`. Книги в ряду нет (или ряд слишком длинный) — оба края
+/// `None`.
 pub async fn neighbors(
     state: &AppState,
-    query: Option<BookQuery>,
+    query: Option<Query>,
     slug: String,
 ) -> AppResult<Neighbors> {
-    let none = Neighbors {
-        prev: None,
-        next: None,
-    };
-    let Some(query) = query else {
-        return Ok(none);
-    };
-    let index = open(state)?;
-    let found = blocking(move || {
-        let row = index.slugs(&query, NEIGHBORS_SCAN)?;
-        let Some(at) = row.iter().position(|s| *s == slug) else {
-            return Ok(None);
-        };
-        let prev = at.checked_sub(1).map(|i| row[i].clone());
-        let next = row.get(at + 1).cloned();
-        let wanted: Vec<String> = prev.iter().chain(next.iter()).cloned().collect();
-        Ok(Some((prev, next, index.by_slugs(&wanted)?)))
-    })
-    .await?;
-    let Some((prev, next, cards)) = found else {
-        return Ok(none);
-    };
-    let pick = |slug: Option<String>| {
-        slug.and_then(|slug| cards.iter().find(|card| card.slug == slug).cloned())
-    };
-    Ok(Neighbors {
-        prev: pick(prev),
-        next: pick(next),
-    })
+    match query {
+        Some(query) => crate::index::search::neighbors(state, query, slug).await,
+        None => Ok(Neighbors {
+            prev: None,
+            next: None,
+        }),
+    }
 }
 
 /// Похожие книги: есть хотя бы один из тегов `tags`, кроме `exclude`; сверху — «Рекомендуемые».
@@ -230,27 +163,13 @@ pub async fn similar(
     exclude: &[String],
     limit: i64,
 ) -> AppResult<(Vec<EntitySummary>, i64)> {
-    let index = open(state)?;
-    let query = BookQuery {
-        sort: BookSort::Recommended,
-        any_tags: tags.to_vec(),
-        exclude_slugs: exclude.to_vec(),
-        ..BookQuery::default()
-    };
-    let found = blocking(move || index.search(&query, limit.max(0) as usize, 0)).await?;
-    Ok((found.items, found.total as i64))
+    crate::index::search::similar(state, EntityKind::Book, tags, exclude, limit).await
 }
 
 /// Теги и жанры книг со счётчиками, самые частые сверху: подсказки `GET /search/tags`.
 pub async fn tags(state: &AppState, limit: Option<i64>) -> AppResult<Vec<(String, i64)>> {
-    let index = open(state)?;
     let limit = limit.unwrap_or(10).clamp(1, MAX_TAG_HITS as i64) as usize;
-    let tags = blocking(move || index.tags()).await?;
-    Ok(tags
-        .iter()
-        .take(limit)
-        .map(|(slug, count)| (slug.clone(), *count as i64))
-        .collect())
+    crate::index::search::facet(state, "tags", "", Some(EntityKind::Book), limit).await
 }
 
 /// Издательства по части названия: подсказки `GET /search/publishers`.
@@ -259,14 +178,8 @@ pub async fn publishers(
     q: &str,
     limit: Option<i64>,
 ) -> AppResult<Vec<(String, i64)>> {
-    let index = open(state)?;
     let limit = limit.unwrap_or(10).clamp(1, 50) as usize;
-    let q = q.to_string();
-    let hits = blocking(move || index.publishers(&q, limit)).await?;
-    Ok(hits
-        .into_iter()
-        .map(|(name, count)| (name, count as i64))
-        .collect())
+    crate::index::search::facet(state, "publishers", q, Some(EntityKind::Book), limit).await
 }
 
 #[cfg(test)]
@@ -298,7 +211,7 @@ mod tests {
         assert_eq!(q.person.as_deref(), Some("mikhail-bulgakov"));
         assert_eq!(q.role.as_deref(), Some("author"));
         assert_eq!(q.has_cover, Some(true));
-        assert_eq!(q.sort, BookSort::Rating);
+        assert_eq!(q.sort, Sort::Rating);
     }
 
     #[test]

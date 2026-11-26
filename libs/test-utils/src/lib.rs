@@ -60,12 +60,11 @@ impl Drop for IndexDir {
 
 /// Включает поиск: `SEARCH_INDEX_DIR` во временном каталоге (свой у каждого теста, чтобы
 /// параллельные тесты не мешали друг другу). Индексы строятся вручную:
-/// `catalog::works::sync::rebuild` и `catalog::people_idx::sync::rebuild`.
+/// `catalog::index::sync::rebuild`.
 pub fn with_index(mut state: AppState) -> (AppState, IndexDir) {
     let dir = std::env::temp_dir().join(format!("nexus-test-{}", uuid::Uuid::new_v4()));
     let mut config = (*state.config).clone();
     config.search_index_dir = Some(dir.to_string_lossy().into_owned());
-    config.books_index_dir = Some(dir.join("books").to_string_lossy().into_owned());
     state.config = Arc::new(config);
     (state, IndexDir(dir))
 }

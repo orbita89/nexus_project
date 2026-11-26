@@ -44,6 +44,10 @@ pub struct Config {
     /// Корень индексов Tantivy (`<root>/{books,people,works,archive,collections}`),
     /// `SEARCH_INDEX_DIR`. Обязателен: без него поиск отвечает 503.
     pub search_index_dir: Option<String>,
+    /// Индекс только читается, `SEARCH_INDEX_READONLY=1` (прод): ни перестройки, ни пересборки
+    /// слоя Б, ни правок документов, ни фоновых циклов. Индекс собирается локально и
+    /// выкладывается готовыми файлами: слабому серверу не нужны ни пик памяти сборки, ни CPU.
+    pub search_index_readonly: bool,
     /// Каталог с файлами обложек книг (`nexus books cassandra` копирует их сюда), `BOOK_COVERS_DIR`.
     /// Раздаёт gateway по `/covers/books/...`. Не задан — обложки не копируются.
     pub book_covers_dir: Option<String>,
@@ -232,6 +236,10 @@ impl Config {
                         .map(|root| format!("{root}/books"))
                 }),
             search_index_dir: search_index_dir.clone(),
+            search_index_readonly: matches!(
+                env::var("SEARCH_INDEX_READONLY").as_deref(),
+                Ok("1" | "true" | "yes")
+            ),
             book_covers_dir: env::var("BOOK_COVERS_DIR")
                 .ok()
                 .filter(|dir| !dir.is_empty()),

@@ -133,7 +133,7 @@ async fn swagger_ui_and_openapi_spec_are_served() {
 
 /// `documents/api/*.json` — контракт API в репозитории (по файлу на вкладку Swagger UI):
 /// любое изменение API видно в PR.
-/// Обновить после изменения эндпоинтов: `UPDATE_OPENAPI=1 cargo test -p nexus openapi`.
+/// Обновить после изменения эндпоинтов: `make openapi` (или `UPDATE_OPENAPI=1 cargo test -p nexus openapi`).
 #[test]
 fn openapi_spec_files_are_up_to_date() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../documents/api");

@@ -29,6 +29,9 @@ uuid = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
+# Аллокатор, который возвращает ОС освобождённую память: со стандартным glibc после одной
+# пересборки слоя Б (живых данных ~80 МБ) процесс оставался с ~600 МБ из-за фрагментации кучи.
+mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 test-utils = { workspace = true }

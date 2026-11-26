@@ -11,7 +11,7 @@ COMPOSE = docker compose -f infra/docker-compose.yml
 # Контейнер с тулчейном (сервис tools) от пользователя хоста: Rust на машине не нужен.
 TOOLS = $(COMPOSE) run --rm --user $(shell id -u):$(shell id -g) tools
 
-.PHONY: up down logs run seed media fmt lint boundaries test test-fast test-one deny ci image http ci-docker test-docker shell bench-books books-llm ai
+.PHONY: up down logs run seed media fmt lint boundaries test test-fast test-one deny ci image http ci-docker test-docker shell bench-books books-llm ai openapi
 
 up:          ## Поднять dev-окружение
 	$(COMPOSE) up -d --build
@@ -58,6 +58,9 @@ CARGO_TEST = cargo test --no-fail-fast
 endif
 # Тяжёлые наборы (Redis, индексы Tantivy, минуты): только в полном make test.
 HEAVY_TESTS = catalog archive auth
+
+openapi:     ## Контракт API documents/api/*.json — из собранного dev-бинарника, без тестов (секунды)
+	docker exec -w /app nexus-app sh -c 'cargo build -q -p nexus && /target/debug/nexus openapi documents/api'
 
 test:        ## Все тесты (нужен Postgres) — один раз перед закрытием задачи
 	$(CARGO_TEST) --workspace

@@ -77,6 +77,14 @@ services:
       ARCHIVE_DIR: /var/lib/nexus/archive
       # Все индексы Tantivy: books, people, works, archive, collections. Обязателен: без него поиск отвечает 503.
       SEARCH_INDEX_DIR: ${SEARCH_INDEX_DIR-/var/lib/nexus/tantivy}
+      # Прод только читает индекс: собирается локально по дампу базы и выкладывается готовой
+      # папкой. Ни перестройки, ни пересборки слоя Б, ни фоновых циклов — ни пика памяти, ни CPU.
+      SEARCH_INDEX_READONLY: ${SEARCH_INDEX_READONLY-1}
+      # Аллокатор сразу отдаёт освобождённое ОС (после пика нагрузки куча не остаётся раздутой:
+      # замер — 112 МБ против 184 МБ с задержкой по умолчанию).
+      MIMALLOC_PURGE_DELAY: ${MIMALLOC_PURGE_DELAY-0}
+      # Потоков для поиска: лишние запросы ждут в очереди, а не множат память и CPU.
+      NEXUS_BLOCKING_THREADS: ${NEXUS_BLOCKING_THREADS-4}
       # Индекс книг (по умолчанию <SEARCH_INDEX_DIR>/books). Строит `nexus books index` (и сам
       # сервер, если каталог пуст).
       BOOKS_INDEX_DIR: ${BOOKS_INDEX_DIR-/var/lib/nexus/books-index}

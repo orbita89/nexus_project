@@ -173,8 +173,8 @@ fn stats(times: &[Duration]) -> (f64, f64) {
 
 pub async fn run(state: &AppState, rounds: usize) -> anyhow::Result<()> {
     let rounds = rounds.max(1);
-    let index = catalog::books::sync::open(state)
-        .ok_or_else(|| anyhow::anyhow!("BOOKS_INDEX_DIR is not set"))?
+    let index = catalog::index::sync::open(state)
+        .ok_or_else(|| anyhow::anyhow!("SEARCH_INDEX_DIR is not set"))?
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let app = nexus::build_app(state.clone());
     println!(

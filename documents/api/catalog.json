@@ -4011,6 +4011,242 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/ranking/kinds": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Настройки сортировки всех видов и людей.",
+        "operationId": "list_rank_kinds",
+        "responses": {
+          "200": {
+            "description": "Настройки по видам",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KindRanking"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/ranking/kinds/{kind}/preview": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Предпросмотр: топ вида по формуле с настройками из тела, с составляющими балла. Ничего не\nзаписывает. У `person` — пусто (известность людей считается из их работ).",
+        "operationId": "preview_rank_kind",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Вид",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–200, по умолчанию 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KindRanking"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Топ по формуле",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KindPreviewRow"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные настройки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого вида",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/ranking/kinds/{kind}/stream": {
+      "put": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Сохранить настройки вида и применить, потоком: `rank` (пересчёт балла вида в БД), `search`\n(баллы в слой Б без перестройки Tantivy, веса поиска), затем `done`. Статические страницы\nне пересобираются.",
+        "operationId": "save_rank_kind",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Вид",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KindRanking"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Сохранено; поток пересчёта",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobEvent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверные настройки",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого вида",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/ranking/preview": {
       "post": {
         "tags": [
@@ -4719,6 +4955,264 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/search/explain": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Объяснить запрос поиска: те же параметры, что у `GET /search`; ответ — шаги (сколько\nсущностей осталось и сколько занял шаг) и первые `limit` мест с разбором (уровень, доля\nтекста, популярность, вес вида, итог). Без кэша.",
+        "operationId": "explain_search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Поисковый запрос: название, оригинальное название, студии. Опечатки допустимы. Пустой —\nвсе, кто подходит под фильтры.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "дюан"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Не передан — по релевантности.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SearchSort"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Slug тега.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "description": "Ровно этот год выхода. Вместе с `year_from` / `year_to` — 400.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2001
+          },
+          {
+            "name": "year_from",
+            "in": "query",
+            "description": "Год выхода от (включительно).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2000
+          },
+          {
+            "name": "year_to",
+            "in": "query",
+            "description": "Год выхода до (включительно).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2010
+          },
+          {
+            "name": "studio",
+            "in": "query",
+            "description": "Студия — точное название (без учёта регистра); подсказки — `GET /search/studios`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "Warner Bros. Pictures"
+          },
+          {
+            "name": "studio_slug",
+            "in": "query",
+            "description": "Slug студии (`GET /studios/{slug}`): её фильмы, без запроса названия. Неизвестный slug —\nпустая выдача.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "warner-bros-pictures"
+          },
+          {
+            "name": "publisher",
+            "in": "query",
+            "description": "Издатель — точное название (без учёта регистра): издательство книги, издатель или\nразработчик игры. Подсказки — `GET /search/publishers`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "АСТ"
+          },
+          {
+            "name": "museum",
+            "in": "query",
+            "description": "Музей или собрание картины — точное название (без учёта регистра). Подсказки —\n`GET /search/museums`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "Лувр"
+          },
+          {
+            "name": "person",
+            "in": "query",
+            "description": "Slug человека: сущности с его участием (в любой роли).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "christopher-nolan"
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "description": "Роль человека из `person` в этой сущности: `actor`, `director`, `producer`, `writer`, ...\nБез `person` — 400.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "director"
+          },
+          {
+            "name": "award",
+            "in": "query",
+            "description": "Slug премии (`GET /awards/{slug}`): работы с её наградой или номинацией.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "oscar"
+          },
+          {
+            "name": "award_year",
+            "in": "query",
+            "description": "Год церемонии: вместе с `award` — «лауреаты и номинанты „Оскара“ 2024».",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 2024
+          },
+          {
+            "name": "awarded",
+            "in": "query",
+            "description": "`true` — только полученные награды (у работы есть хотя бы одна победа).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "has_cover",
+            "in": "query",
+            "description": "Только книги: `true` — с обложкой, `false` — без. Работает в книжном поиске (`kind=book`\nпри включённом индексе Tantivy), в остальных случаях игнорируется.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "book_form",
+            "in": "query",
+            "description": "Только книги: вид текста через запятую — `book`, `collection` (сборник), `article`\n(статья), `document` (журнал, газета, документ) или `all`. По умолчанию `book`: сборники,\nстатьи и документы в обычной выдаче не показываются. Неизвестное значение — 400. Работает\nв книжном поиске (как `has_cover`), в остальных случаях игнорируется.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "book,collection"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "С 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Разбор запроса",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplainView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный фильтр",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Поиск недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/search/indexes": {
       "get": {
         "tags": [
@@ -4768,6 +5262,65 @@
         ]
       }
     },
+    "/api/v1/catalog/admin/search/indexes/catalog/sidecar": {
+      "post": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Пересобрать слой Б единого индекса (фасеты, сортировки, ручные места, люди) из БД — в фоне,\nTantivy не трогается.",
+        "operationId": "reload_catalog_sidecar",
+        "responses": {
+          "202": {
+            "description": "Пересборка запущена"
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Уже идёт операция",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Индекс выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/catalog/admin/search/indexes/{id}/merge": {
       "post": {
         "tags": [
@@ -4779,7 +5332,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "`works`, `people`, `books` или `collections`",
+            "description": "`catalog` или `collections`",
             "required": true,
             "schema": {
               "type": "string"
@@ -4853,13 +5406,13 @@
         "tags": [
           "catalog-admin"
         ],
-        "summary": "Перестроить индекс из БД в фоне: `works`, `people`, `books` или `all` (работы, люди, книги).\nХод — в `operation` у `GET /admin/search/indexes`. Пока идёт перестройка, поиск читает старое\nпоколение.",
+        "summary": "Перестроить индекс из БД в фоне: `catalog` (или `all`) — всё, либо только вид (`book`,\n`movie`, `series`, `game`, `painting`) или `people`. Ход — в `operation` у\n`GET /admin/search/indexes`. Вид заменяется одним коммитом (поиск не видит дыры); если новых\nдокументов меньше `SEARCH_REINDEX_MIN_PERCENT`% прежних, коммита нет (`force` — применить).",
         "operationId": "rebuild_search_index",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "`works`, `people`, `books` или `all`",
+            "description": "`catalog`, `all`, `book`, `movie`, `series`, `game`, `painting` или `people`",
             "required": true,
             "schema": {
               "type": "string"
@@ -4911,6 +5464,62 @@
           },
           "409": {
             "description": "Уже идёт операция или перестройка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Индекс выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/search/layout": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Устройство поиска: файлы каталога индекса (слой А и слой Б, как читаются), поля Tantivy,\nготовые порядки с первыми записями, группы фильтров и где они хранятся.",
+        "operationId": "get_search_layout",
+        "responses": {
+          "200": {
+            "description": "Устройство поиска",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchLayout"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
             "content": {
               "application/json": {
                 "schema": {
@@ -5077,6 +5686,139 @@
           },
           "503": {
             "description": "Поиск недоступен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/search/sidecar": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Состав слоя Б и память по частям.",
+        "operationId": "get_catalog_sidecar",
+        "responses": {
+          "200": {
+            "description": "Слой Б: части и память",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SidecarView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Индекс выключен",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/catalog/admin/search/sidecar/item": {
+      "get": {
+        "tags": [
+          "catalog-admin"
+        ],
+        "summary": "Слой Б об одной сущности или человеке по slug.",
+        "operationId": "inspect_catalog_sidecar",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "query",
+            "description": "Slug сущности или человека.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Данные слоя Б",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SidecarItem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет токена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Нужна роль admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Нет такого slug или нет номера",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Индекс выключен",
             "content": {
               "application/json": {
                 "schema": {
@@ -10251,7 +10993,7 @@
           "db_ords": {
             "type": "integer",
             "format": "int64",
-            "description": "Выданных номеров книг (`catalog_book_ords`)."
+            "description": "Выданных номеров книг (`catalog_entity_ords`)."
           },
           "last_index_build": {
             "oneOf": [
@@ -11717,6 +12459,117 @@
           }
         }
       },
+      "ExplainItemView": {
+        "type": "object",
+        "description": "Место в выдаче.",
+        "required": [
+          "ord",
+          "title",
+          "kind",
+          "slug",
+          "position"
+        ],
+        "properties": {
+          "detail": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RankDetailView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "ord": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "slug": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "ExplainStepView": {
+        "type": "object",
+        "description": "Шаг ответа поиска.",
+        "required": [
+          "name",
+          "count",
+          "micros"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько сущностей осталось после шага.",
+            "minimum": 0
+          },
+          "micros": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ExplainView": {
+        "type": "object",
+        "description": "Как поиск ответил на запрос — по шагам.",
+        "required": [
+          "steps",
+          "facet_terms",
+          "approximate",
+          "relevance",
+          "total",
+          "items"
+        ],
+        "properties": {
+          "approximate": {
+            "type": "boolean"
+          },
+          "facet_terms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Термы фильтров слоя А (`studio:…`, `person:…`)."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExplainItemView"
+            }
+          },
+          "relevance": {
+            "type": "boolean"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExplainStepView"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "FacetGroupStatus": {
         "type": "object",
         "description": "Один вид фасетов слоя Б.",
@@ -11742,6 +12595,63 @@
             "format": "int64",
             "description": "Сколько разных значений.",
             "minimum": 0
+          }
+        }
+      },
+      "FilterGroupView": {
+        "type": "object",
+        "description": "Группа фильтров и где она хранится.",
+        "required": [
+          "group",
+          "storage",
+          "values",
+          "bytes",
+          "top"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Байт в памяти (у Tantivy — 0: на диске).",
+            "minimum": 0
+          },
+          "group": {
+            "type": "string",
+            "description": "`kind`, `tag`, `studio`, `person`…"
+          },
+          "storage": {
+            "type": "string",
+            "description": "`ram` — битовые карты слоя Б; `tantivy` — термы поля `facet` слоя А."
+          },
+          "top": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FilterValue"
+            },
+            "description": "Самые частые значения: значение и сколько у него сущностей (у Tantivy — приблизительно)."
+          },
+          "values": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Значений (у Tantivy — термов, сумма по сегментам).",
+            "minimum": 0
+          }
+        }
+      },
+      "FilterValue": {
+        "type": "object",
+        "required": [
+          "value",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "value": {
+            "type": "string"
           }
         }
       },
@@ -12082,6 +12992,30 @@
         },
         "additionalProperties": false
       },
+      "IndexFacetInfo": {
+        "type": "object",
+        "required": [
+          "kind",
+          "values",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "example": "tag"
+          },
+          "values": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "IndexFieldUsage": {
         "type": "object",
         "description": "Место одного поля Tantivy на диске, байты (сумма по сегментам).",
@@ -12136,6 +13070,103 @@
           }
         }
       },
+      "IndexFieldView": {
+        "type": "object",
+        "description": "Поле Tantivy и его место на диске.",
+        "required": [
+          "name",
+          "termdict",
+          "postings",
+          "positions",
+          "fast",
+          "fieldnorms"
+        ],
+        "properties": {
+          "fast": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fieldnorms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "positions": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "postings": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "termdict": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "IndexFile": {
+        "type": "object",
+        "description": "Файл каталога индекса.",
+        "required": [
+          "name",
+          "bytes",
+          "layer",
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "type": "string",
+            "description": "`mmap` — читается с диска страницами; `ram` — читается в кучу при открытии; `meta`."
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "layer": {
+            "type": "string",
+            "description": "`A` — Tantivy (текст и карточки), `B` — слой Б (фасеты, сортировки)."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "IndexKindInfo": {
+        "type": "object",
+        "description": "Документы одного вида в едином индексе.",
+        "required": [
+          "kind",
+          "docs"
+        ],
+        "properties": {
+          "db_docs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Сколько должно быть по БД."
+          },
+          "docs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "example": "movie"
+          }
+        }
+      },
       "IndexOperation": {
         "type": "object",
         "description": "Операция админки над индексом.",
@@ -12170,9 +13201,45 @@
             "description": "`rebuild`, `sidecar`, `merge`.",
             "example": "rebuild"
           },
+          "progress": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IndexProgress",
+                "description": "Ход идущей операции: текущий шаг и прогресс (`null` — шаг без счётчика или не начат)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "started_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "IndexProgress": {
+        "type": "object",
+        "description": "Ход операции над индексом.",
+        "required": [
+          "step",
+          "done",
+          "total"
+        ],
+        "properties": {
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "step": {
+            "type": "string",
+            "description": "Заголовок шага: «Индекс работ», «Люди»."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -12193,6 +13260,48 @@
             "type": "integer",
             "description": "Сколько из запрошенных в индексе нет: удалены из БД или скрыты (`active = false`).",
             "example": 0,
+            "minimum": 0
+          }
+        }
+      },
+      "IndexSidecarInfo": {
+        "type": "object",
+        "description": "Слой Б единого индекса.",
+        "required": [
+          "entities",
+          "people",
+          "entities_bytes",
+          "people_bytes",
+          "facets"
+        ],
+        "properties": {
+          "entities": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Видимые сущности и люди в RAM.",
+            "minimum": 0
+          },
+          "entities_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Оценка памяти: массивы, порядки, битмапы фасетов, люди.",
+            "minimum": 0
+          },
+          "facets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IndexFacetInfo"
+            },
+            "description": "Фасеты сущностей: префикс ключа → значения и байты."
+          },
+          "people": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "people_bytes": {
+            "type": "integer",
+            "format": "int64",
             "minimum": 0
           }
         }
@@ -12388,6 +13497,152 @@
           "stopped",
           "cancelled"
         ]
+      },
+      "KindPreviewRow": {
+        "type": "object",
+        "description": "Строка предпросмотра: сущность и составляющие балла.",
+        "required": [
+          "slug",
+          "title",
+          "q_part",
+          "p_part",
+          "r_part",
+          "s_part",
+          "c_part",
+          "score"
+        ],
+        "properties": {
+          "c_part": {
+            "type": "number",
+            "format": "double"
+          },
+          "p_part": {
+            "type": "number",
+            "format": "double"
+          },
+          "q_part": {
+            "type": "number",
+            "format": "double",
+            "description": "Вклад рейтинга, популярности, свежести, сайта, полноты; `score` — их сумма."
+          },
+          "quality": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Байесовский рейтинг (`null` — нет оценок)."
+          },
+          "r_part": {
+            "type": "number",
+            "format": "double"
+          },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "s_part": {
+            "type": "number",
+            "format": "double"
+          },
+          "score": {
+            "type": "number",
+            "format": "double"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "KindRanking": {
+        "type": "object",
+        "description": "Настройки сортировки вида.",
+        "required": [
+          "weight_quality",
+          "weight_popularity",
+          "weight_recency",
+          "weight_site",
+          "weight_complete",
+          "search_popularity",
+          "trust_votes",
+          "half_life_years",
+          "min_votes"
+        ],
+        "properties": {
+          "half_life_years": {
+            "type": "number",
+            "format": "double",
+            "description": "Через сколько лет свежесть падает вдвое, 0.1–100.",
+            "example": 4.0
+          },
+          "kind": {
+            "type": "string",
+            "description": "`movie`, `series`, `book`, `game`, `painting`, `person`; в запросе не нужен (вид — из\nадреса), присланный игнорируется."
+          },
+          "min_votes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Меньше голосов IMDb — рейтинг IMDb не учитывается.",
+            "example": 1000
+          },
+          "search_popularity": {
+            "type": "number",
+            "format": "double",
+            "description": "Доля популярности в релевантности поиска, 0–1 (0 — только текст).",
+            "example": 0.6
+          },
+          "trust_votes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "«Доверительные» голоса байесовского рейтинга.",
+            "example": 5000
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Когда сохранены; в запросе игнорируется."
+          },
+          "weight_complete": {
+            "type": "number",
+            "format": "double",
+            "description": "Вес полноты карточки (обложка, описание), 0–10.",
+            "example": 0.0
+          },
+          "weight_popularity": {
+            "type": "number",
+            "format": "double",
+            "description": "Вес популярности (TMDB или работы автора), 0–10.",
+            "example": 0.3
+          },
+          "weight_quality": {
+            "type": "number",
+            "format": "double",
+            "description": "Вес рейтинга (IMDb или оценки сайта), 0–10.",
+            "example": 0.5
+          },
+          "weight_recency": {
+            "type": "number",
+            "format": "double",
+            "description": "Вес свежести, 0–10.",
+            "example": 0.2
+          },
+          "weight_site": {
+            "type": "number",
+            "format": "double",
+            "description": "Вес активности на сайте (число оценок), 0–10.",
+            "example": 0.1
+          }
+        },
+        "additionalProperties": false
       },
       "LibgenFile": {
         "type": "object",
@@ -12754,6 +14009,77 @@
           }
         },
         "additionalProperties": false
+      },
+      "OrderHead": {
+        "type": "object",
+        "required": [
+          "ord",
+          "title"
+        ],
+        "properties": {
+          "ord": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "OrderPosition": {
+        "type": "object",
+        "description": "Позиция в готовом порядке.",
+        "required": [
+          "order",
+          "of"
+        ],
+        "properties": {
+          "of": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "order": {
+            "type": "string",
+            "description": "`recommended`, `new`, `title`, `popular`, `rating`, `trending`, `top_rated`, `awarded`,\nу людей — `fame`."
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "С нуля; `null` — не входит в порядок (например, нет даты для `new`).",
+            "minimum": 0
+          }
+        }
+      },
+      "OrderView": {
+        "type": "object",
+        "description": "Готовый порядок слоя Б и его начало.",
+        "required": [
+          "name",
+          "len",
+          "head"
+        ],
+        "properties": {
+          "head": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderHead"
+            }
+          },
+          "len": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "`recommended`, `new`, `title`, `popular`, `rating`, `trending`, `top_rated`, `awarded`."
+          }
+        }
       },
       "Page_AdminEntitySummary": {
         "type": "object",
@@ -14074,6 +15400,35 @@
           }
         }
       },
+      "ProcessMemory": {
+        "type": "object",
+        "description": "Память процесса (Linux `/proc/self`), байт.",
+        "required": [
+          "rss",
+          "anon",
+          "file"
+        ],
+        "properties": {
+          "anon": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Куча и прочая анонимная память (слой Б, кэши, буферы, освобождённое, но не отданное ОС).",
+            "minimum": 0
+          },
+          "file": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Отображённые файлы (индекс Tantivy с диска; ОС вытесняет их при нехватке памяти).",
+            "minimum": 0
+          },
+          "rss": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всё, что процесс держит в RAM.",
+            "minimum": 0
+          }
+        }
+      },
       "ProgressEvent": {
         "type": "object",
         "description": "Счётчик длинного шага: «Проиндексировано 500/100000».",
@@ -14194,6 +15549,60 @@
           }
         },
         "additionalProperties": false
+      },
+      "RankDetailView": {
+        "type": "object",
+        "description": "Разбор места по релевантности.",
+        "required": [
+          "tier",
+          "manual_rank",
+          "exact",
+          "in_title",
+          "bm25",
+          "text",
+          "popularity",
+          "weight",
+          "total"
+        ],
+        "properties": {
+          "bm25": {
+            "type": "number",
+            "format": "float"
+          },
+          "exact": {
+            "type": "boolean"
+          },
+          "in_title": {
+            "type": "boolean"
+          },
+          "manual_rank": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "popularity": {
+            "type": "number",
+            "format": "float"
+          },
+          "text": {
+            "type": "number",
+            "format": "float"
+          },
+          "tier": {
+            "type": "integer",
+            "format": "int32",
+            "description": "0 — точное название с ручным местом, 1 — сильное совпадение с ручным местом,\n2 — совпало в названии, 3 — только люди, серия, студия.",
+            "minimum": 0
+          },
+          "total": {
+            "type": "number",
+            "format": "float"
+          },
+          "weight": {
+            "type": "number",
+            "format": "float"
+          }
+        }
       },
       "RankPreviewRow": {
         "type": "object",
@@ -14562,10 +15971,14 @@
           "enabled",
           "segments",
           "deleted_docs",
+          "index_bytes",
+          "store_bytes",
+          "fields",
           "disk_bytes",
           "generations",
           "can_rebuild",
-          "can_merge"
+          "can_merge",
+          "kinds"
         ],
         "properties": {
           "can_merge": {
@@ -14617,6 +16030,13 @@
             "type": "boolean",
             "description": "Каталог индекса задан (`SEARCH_INDEX_DIR`, `BOOKS_INDEX_DIR`, `ARCHIVE_DIR`)."
           },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IndexFieldUsage"
+            },
+            "description": "Из чего состоит индекс: место по полям (словарь, документы, позиции, колонки, нормы)."
+          },
           "generations": {
             "type": "array",
             "items": {
@@ -14628,6 +16048,19 @@
             "type": "string",
             "description": "`works`, `people`, `books`, `collections`, `archive`.",
             "example": "works"
+          },
+          "index_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Всё, что занимает индекс по данным Tantivy.",
+            "minimum": 0
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IndexKindInfo"
+            },
+            "description": "Единый индекс: документы по видам (`book`, `movie`, …, `person`) и сколько должно быть по БД."
           },
           "operation": {
             "oneOf": [
@@ -14659,9 +16092,89 @@
             "format": "int64",
             "minimum": 0
           },
+          "sidecar": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IndexSidecarInfo",
+                "description": "Единый индекс: слой Б (RAM) — сущности, люди, оценка памяти."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "store_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Хранилище документов (поле `card`, сжато целиком — по полям не делится).",
+            "minimum": 0
+          },
           "title": {
             "type": "string",
             "example": "Работы"
+          }
+        }
+      },
+      "SearchLayout": {
+        "type": "object",
+        "description": "Как устроен поиск сейчас: файлы, поля, порядки, фильтры.",
+        "required": [
+          "dir",
+          "docs",
+          "segments",
+          "store_bytes",
+          "files",
+          "fields",
+          "orders",
+          "filters",
+          "readonly"
+        ],
+        "properties": {
+          "dir": {
+            "type": "string"
+          },
+          "docs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IndexFieldView"
+            }
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IndexFile"
+            }
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FilterGroupView"
+            }
+          },
+          "orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderView"
+            }
+          },
+          "readonly": {
+            "type": "boolean",
+            "description": "Индекс только читается (прод)."
+          },
+          "segments": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "store_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -15135,6 +16648,138 @@
         },
         "additionalProperties": false
       },
+      "SidecarItem": {
+        "type": "object",
+        "description": "Что слой Б знает об одной сущности или человеке.",
+        "required": [
+          "space",
+          "slug",
+          "title",
+          "kind",
+          "ord",
+          "visible",
+          "manual_rank",
+          "has_cover",
+          "has_description",
+          "has_author",
+          "popularity",
+          "rank",
+          "release_day",
+          "positions",
+          "facets"
+        ],
+        "properties": {
+          "card": {
+            "description": "Карточка, сохранённая в Tantivy (поле `card`): её отдают поиск и подсказки."
+          },
+          "db_rank_score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "facets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Значения фасетов, в которых он есть (`kind:movie`, `tag:…`, `year:2010`)."
+          },
+          "has_author": {
+            "type": "boolean"
+          },
+          "has_cover": {
+            "type": "boolean"
+          },
+          "has_description": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "manual_rank": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Ручное место (0 — нет).",
+            "minimum": 0
+          },
+          "ord": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Номер: индекс в массивах слоя Б и бит в битовых картах.",
+            "minimum": 0
+          },
+          "popularity": {
+            "type": "number",
+            "format": "double",
+            "description": "Популярность в поиске (`rank_score` × 10⁶; у людей — известность)."
+          },
+          "positions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderPosition"
+            }
+          },
+          "rank": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Балл «Рекомендуемые» из слоя Б (×1000) и он же в БД.",
+            "minimum": 0
+          },
+          "release_day": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Дата выхода в днях от начала эры (0 — нет).",
+            "minimum": 0
+          },
+          "slug": {
+            "type": "string"
+          },
+          "space": {
+            "type": "string",
+            "description": "`entity` или `person`."
+          },
+          "title": {
+            "type": "string"
+          },
+          "visible": {
+            "type": "boolean",
+            "description": "Виден в выдаче."
+          }
+        }
+      },
+      "SidecarPart": {
+        "type": "object",
+        "description": "Часть слоя Б в памяти.",
+        "required": [
+          "name",
+          "bytes",
+          "items",
+          "mapped"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "items": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Элементов: номеров в порядке, значений фасета, людей в роли.",
+            "minimum": 0
+          },
+          "mapped": {
+            "type": "boolean",
+            "description": "Лежит в отображённом файле: в куче процесса нет, в RAM — только прочитанные страницы."
+          },
+          "name": {
+            "type": "string",
+            "description": "`meta`, `base_rank`, `order:popular`, `facet:tag`, `people:fame`…"
+          }
+        }
+      },
       "SidecarStatus": {
         "type": "object",
         "description": "Слой Б — RAM (фасеты, сортировки, ручной порядок).",
@@ -15218,6 +16863,94 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "SidecarView": {
+        "type": "object",
+        "description": "Слой Б целиком.",
+        "required": [
+          "process",
+          "entities",
+          "entity_slots",
+          "people",
+          "people_slots",
+          "entities_bytes",
+          "people_bytes",
+          "heap_bytes",
+          "mapped_bytes",
+          "cache_pages",
+          "cache_ranked",
+          "cache_people",
+          "parts"
+        ],
+        "properties": {
+          "cache_pages": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Записей в кэше ответов: страницы поиска, ряды выдачи, страницы людей.",
+            "minimum": 0
+          },
+          "cache_people": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cache_ranked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "entities": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "entities_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "entity_slots": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Длина плоских массивов (наибольший номер + 1).",
+            "minimum": 0
+          },
+          "heap_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Из частей слоя Б: в куче процесса и в отображённых файлах.",
+            "minimum": 0
+          },
+          "mapped_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SidecarPart"
+            }
+          },
+          "people": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "people_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "people_slots": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "process": {
+            "$ref": "#/components/schemas/ProcessMemory"
           }
         }
       },
@@ -15755,7 +17488,7 @@
           },
           "schema_version": {
             "type": "string",
-            "example": "books-4"
+            "example": "catalog-1"
           },
           "segments": {
             "type": "integer",

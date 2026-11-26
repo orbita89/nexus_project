@@ -23,10 +23,9 @@
 use crate::entities::check_year;
 use crate::jobs::{self, DoneEvent, JobEvent, Reporter, Step, StepStatus};
 use crate::models::{
-    page_bounds, CountryHit, Entity, EntityKind, EntitySummary, FacetQuery, IndexEntities,
-    IndexResult, Neighbors, Page, PublisherHit, ReindexQuery, ReindexResult, ReleaseStatus,
-    SearchQuery, SearchSort, StudioHit, StudiosQuery, TagHit, ENTITY_STATS_JOIN, IN_CATALOG,
-    VISIBLE,
+    page_bounds, CountryHit, EntityKind, EntitySummary, FacetQuery, IndexEntities, IndexResult,
+    Neighbors, Page, PublisherHit, ReindexQuery, ReindexResult, SearchQuery, SearchSort, StudioHit,
+    StudiosQuery, TagHit, ENTITY_STATS_JOIN, IN_CATALOG, VISIBLE,
 };
 use crate::people_search;
 use crate::publish::Touched;
@@ -34,14 +33,11 @@ use crate::validate;
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
-use serde::Serialize;
-use serde_json::Value;
-use shared::directory::RatingStats;
+use chrono::{DateTime, Utc};
 use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path, Query, Repeated};
 use shared::{AdminUser, AppError, AppResult, AppState};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -51,6 +47,7 @@ use uuid::Uuid;
 pub const BATCH: usize = 500;
 
 /// Перестройка по расписанию: одна на все инстансы за интервал.
+#[allow(dead_code)]
 const SCHEDULE_LOCK: &str = "catalog:reindex-lock";
 /// Идёт перестройка (любая): одна на все инстансы. TTL — на случай падения процесса.
 const RUNNING_LOCK: &str = "catalog:reindex-running";
@@ -61,207 +58,6 @@ const RUNNING_LOCK_TTL: Duration = Duration::from_secs(120);
 const RUNNING_LOCK_RENEW: Duration = Duration::from_secs(30);
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
-
-/// Документ индекса — компактный (решение 2026-10-14): то, по чему ищут (`title`,
-/// `original_title`, `studios`), что показывает выдача (`EntitySummary`: `slug`, постер, дата,
-/// статус выхода, рейтинг IMDb), фильтры (`kind`, `tags`, `year`, `studios`, `release_ts`,
-/// `slug`) и сортировки. Карточки,
-/// описания, имён участников и названий тегов в индексе нет: карточка читается из БД, а полный
-/// состав (миллионы титров) делал перестройку в разы дольше.
-#[derive(Debug, Serialize)]
-pub(crate) struct SearchDoc {
-    id: Uuid,
-    kind: EntityKind,
-    slug: String,
-    title: String,
-    original_title: Option<String>,
-    release_date: Option<NaiveDate>,
-    cover_url: Option<String>,
-    /// Размеры файла обложки: выдача ставит карточке `aspect-ratio` до загрузки картинки.
-    cover_width: Option<i32>,
-    cover_height: Option<i32>,
-    /// Для фильтров `year = 2021`, `year 2000 TO 2010`.
-    year: Option<i32>,
-    /// `release_date` в unix-секундах (полночь UTC): сортировки `new` / `soon` и их фильтр
-    /// «вышел / не вышел» (для сортировок и фильтра «вышел / не вышел»).
-    release_ts: Option<i64>,
-    /// Все студии из `metadata.studios`: поиск («dreamworks»), фильтр `studio`, подсказки.
-    studios: Vec<String>,
-    /// Издатели: `metadata.publisher` книги, `publisher` и `developer` игры — у них студий нет,
-    /// а фильтр раздела тот же по смыслу. Фильтр `publisher`, подсказки `GET /search/publishers`.
-    publishers: Vec<String>,
-    /// Музей или собрание картины (`metadata.museum`): фильтр `museum`, подсказки
-    /// `GET /search/museums`.
-    museums: Vec<String>,
-    /// Страны производства (`metadata.countries`), коды ISO 3166-1 alpha-2: фильтр `country`,
-    /// подсказки `GET /search/countries`. Названия стран показывает фронтенд.
-    countries: Vec<String>,
-    /// Slug'и тегов: фильтр.
-    tags: Vec<String>,
-    /// Статистика (`entity_stats`): сортировки `recommended` (`rank_score`), `trending`
-    /// (`popularity`), `top_rated` (`quality`); рейтинг IMDb и статус выхода — для выдачи.
-    rank_score: Option<f64>,
-    popularity: Option<f64>,
-    quality: Option<f64>,
-    imdb_rating: Option<f64>,
-    imdb_votes: Option<i32>,
-    release_status: ReleaseStatus,
-    /// Оценки Nexus (`entity_ratings`, сводки от `social`): сортировки `popular` (число) и
-    /// `rating` (средняя; без оценок — `null`, в конце).
-    nexus_ratings_count: i64,
-    nexus_rating_avg: Option<f64>,
-    /// Slug'и страниц студий из `studios` (по названиям `metadata.studios`): фильтр
-    /// `studio_slug`. Студии без строки в `studios` здесь нет.
-    studio_slugs: Vec<String>,
-    /// Награды (`award_nominations`): фильтр «есть „Оскар“» (`award_slugs`), фасет «лауреаты
-    /// 2024» (`award_years`) и сортировка по числу наград (`award_wins`).
-    #[serde(flatten)]
-    awards: crate::awards::AwardFacets,
-}
-
-impl SearchDoc {
-    fn new(
-        entity: Entity,
-        tags: Vec<String>,
-        ratings: Option<RatingStats>,
-        studio_slugs: &HashMap<String, String>,
-        awards: crate::awards::AwardFacets,
-    ) -> Self {
-        let ratings = ratings.unwrap_or(RatingStats {
-            average: None,
-            count: 0,
-        });
-        let studios: Vec<String> = entity.metadata["studios"]
-            .as_array()
-            .map(|studios| {
-                studios
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let studio_slugs = studios
-            .iter()
-            .filter_map(|name| studio_slugs.get(name).cloned())
-            .collect();
-        // Издатель книги и издатель с разработчиком игры — по одному полю, без повторов.
-        let mut publishers: Vec<String> = Vec::new();
-        for key in ["publisher", "developer"] {
-            if let Some(value) = entity.metadata[key].as_str() {
-                let value = value.trim();
-                if !value.is_empty() && !publishers.iter().any(|p| p == value) {
-                    publishers.push(value.to_owned());
-                }
-            }
-        }
-        // В БД коды уже в верхнем регистре (`metadata::validate`), но индекс строится и по
-        // старым строкам — приводим здесь, иначе фильтр `country=US` их не найдёт.
-        let countries: Vec<String> = entity.metadata["countries"]
-            .as_array()
-            .map(|codes| {
-                codes
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(|code| code.trim().to_ascii_uppercase())
-                    .filter(|code| !code.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let museums = entity.metadata["museum"]
-            .as_str()
-            .map(str::trim)
-            .filter(|museum| !museum.is_empty())
-            .map(|museum| vec![museum.to_owned()])
-            .unwrap_or_default();
-        Self {
-            id: entity.id,
-            kind: entity.kind,
-            year: entity.release_date.map(|date| date.year()),
-            release_ts: entity.release_date.map(day_ts),
-            slug: entity.slug,
-            title: entity.title,
-            original_title: entity.original_title,
-            release_date: entity.release_date,
-            cover_url: entity.cover_url,
-            cover_width: entity.cover_width,
-            cover_height: entity.cover_height,
-            studios,
-            publishers,
-            museums,
-            countries,
-            tags,
-            rank_score: entity.rank_score,
-            popularity: entity.tmdb_popularity,
-            quality: entity.quality,
-            imdb_rating: entity.imdb_rating,
-            imdb_votes: entity.imdb_votes,
-            release_status: entity.release_status,
-            nexus_ratings_count: ratings.count,
-            nexus_rating_avg: ratings.average,
-            studio_slugs,
-            awards,
-        }
-    }
-}
-
-/// Дата → unix-секунды её полуночи (UTC).
-fn day_ts(date: NaiveDate) -> i64 {
-    date.and_time(NaiveTime::MIN).and_utc().timestamp()
-}
-
-/// Документы пачки сущностей: строки уже прочитаны, теги, оценки Nexus и slug'и студий — по
-/// запросу на пачку. Участников в документе нет: фильтр `person` — через [`person_filter`].
-pub(crate) async fn docs_of(
-    db: &sqlx::PgPool,
-    entities: Vec<Entity>,
-) -> Result<Vec<SearchDoc>, BoxError> {
-    let ids: Vec<Uuid> = entities.iter().map(|e| e.id).collect();
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT et.entity_id, t.slug FROM entity_tags et JOIN tags t ON t.id = et.tag_id
-         WHERE et.entity_id = ANY($1) ORDER BY t.slug",
-    )
-    .bind(&ids)
-    .fetch_all(db)
-    .await?;
-    let mut tags: HashMap<Uuid, Vec<String>> = HashMap::new();
-    for (id, slug) in rows {
-        tags.entry(id).or_default().push(slug);
-    }
-    let rows: Vec<(Uuid, Option<f64>, i64)> = sqlx::query_as(
-        "SELECT entity_id, average, count FROM entity_ratings WHERE entity_id = ANY($1)",
-    )
-    .bind(&ids)
-    .fetch_all(db)
-    .await?;
-    let mut ratings: HashMap<Uuid, RatingStats> = rows
-        .into_iter()
-        .map(|(id, average, count)| (id, RatingStats { average, count }))
-        .collect();
-    let names: Vec<String> = entities
-        .iter()
-        .flat_map(|entity| crate::studios::names_of(&entity.metadata))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let studio_slugs: HashMap<String, String> =
-        sqlx::query_as("SELECT name, slug FROM studios WHERE name = ANY($1)")
-            .bind(&names)
-            .fetch_all(db)
-            .await?
-            .into_iter()
-            .collect();
-    let mut awards = crate::awards::facets_of(db, &ids).await?;
-    Ok(entities
-        .into_iter()
-        .map(|entity| {
-            let tags = tags.remove(&entity.id).unwrap_or_default();
-            let ratings = ratings.remove(&entity.id);
-            let awards = awards.remove(&entity.id).unwrap_or_default();
-            SearchDoc::new(entity, tags, ratings, &studio_slugs, awards)
-        })
-        .collect())
-}
 
 /// Переотправляет затронутое в индекс (и в теневой, если идёт перестройка) и ждёт применения;
 /// удалённое из БД и невидимое удаляет из индекса. Вызывается из [`crate::publish::run`] после
@@ -275,10 +71,7 @@ async fn update_entities(state: &AppState, touched: &Touched) -> Result<(), BoxE
     if touched.entities.is_empty() {
         return Ok(());
     }
-    // Книги и работы — каждые в свой индекс Tantivy; ошибка одного не мешает другому.
-    let books = crate::books::sync::update(state, &touched.entities).await;
-    let works = crate::works::sync::update(state, &touched.entities).await;
-    books.and(works)
+    crate::index::sync::update(state, &touched.entities).await
 }
 
 // ---------------------------------------------------------------- перестройка
@@ -438,32 +231,20 @@ pub async fn reindex(
     result
 }
 
-/// Имена поколений индексов в корне (`works.v<ms>`, `people.v<ms>`).
-fn generation_names(root: &std::path::Path) -> HashSet<String> {
-    std::fs::read_dir(root)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.contains(".v"))
-        .collect()
-}
-
 /// Ошибка шага перестройки: слишком маленький индекс или сбой.
 fn step_error(
     index: &'static str,
-    error: crate::works::sync::BuildError,
-    current: u64,
+    error: crate::index::sync::BuildError,
     min: u64,
 ) -> ReindexError {
     match error {
-        crate::works::sync::BuildError::TooSmall { new } => ReindexError::TooSmall {
+        crate::index::sync::BuildError::TooSmall { new, before } => ReindexError::TooSmall {
             index,
             new,
-            current,
+            current: before,
             min,
         },
-        crate::works::sync::BuildError::Other(error) => ReindexError::Failed(error.to_string()),
+        crate::index::sync::BuildError::Other(error) => ReindexError::Failed(error.to_string()),
     }
 }
 
@@ -475,21 +256,22 @@ pub async fn reindex_locked(
     options: ReindexOptions,
     report: &Reporter,
 ) -> Result<ReindexResult, ReindexError> {
-    let Some(root) = state.config.search_index_dir.as_deref() else {
+    let Some(index) = crate::index::sync::open(state) else {
         return Err(ReindexError::Disabled);
     };
-    let root = std::path::Path::new(root);
+    let index = index.map_err(|e| ReindexError::Failed(e.to_string()))?;
     let min = state.config.search_reindex_min_percent;
-    let before = generation_names(root);
-    let previous_version = shared::tantivy::generations::current(root, "works")
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    let previous_count = crate::works::sync::doc_count(state);
-    let people_before = crate::people_idx::sync::doc_count(state);
+    // «Работы» — всё, кроме книг и людей: так считались документы прежнего индекса работ.
+    let works_docs = |index: &crate::index::CatalogIndex| -> u64 {
+        ["movie", "series", "game", "painting"]
+            .iter()
+            .map(|kind| index.kind_docs(kind))
+            .sum()
+    };
+    let previous_count = works_docs(&index);
 
-    // 1. Работы. Перед ними — студии для новых названий в `metadata.studios`.
+    // 1. Сущности и люди одним коммитом единого индекса. Перед ними — студии для новых названий
+    // в `metadata.studios`.
     let started = report.start(Step::Works);
     let studios_started = Instant::now();
     match crate::studios::sync(&state.db, None, &[]).await {
@@ -498,35 +280,37 @@ pub async fn reindex_locked(
         }
         Err(error) => tracing::warn!(%error, "studios sync failed"),
     }
-    let indexed = match crate::works::sync::rebuild_with(state, report, options.force).await {
-        Ok(count) => count,
-        Err(error) => {
-            report.finish(Step::Works, StepStatus::Failed, error.to_string(), started);
-            return Err(step_error("works", error, previous_count, min));
-        }
-    };
+    let people_started = report.start(Step::People);
+    if let Err(error) = crate::index::sync::rebuild(
+        state,
+        crate::index::sync::Target::All,
+        report,
+        options.force,
+    )
+    .await
+    {
+        report.finish(Step::Works, StepStatus::Failed, error.to_string(), started);
+        report.finish(
+            Step::People,
+            StepStatus::Failed,
+            error.to_string(),
+            people_started,
+        );
+        return Err(step_error("catalog", error, min));
+    }
+    let people_indexed = index.kind_docs(crate::index::PERSON_KIND);
+    let indexed = works_docs(&index);
     report.finish(
         Step::Works,
         StepStatus::Done,
         format!("Проиндексировано {indexed} работ"),
         started,
     );
-
-    // 2. Люди: известность и все публичные люди.
-    let started = report.start(Step::People);
-    let people_indexed =
-        match crate::people_idx::sync::rebuild_with(state, report, options.force).await {
-            Ok(count) => count,
-            Err(error) => {
-                report.finish(Step::People, StepStatus::Failed, error.to_string(), started);
-                return Err(step_error("people", error, people_before, min));
-            }
-        };
     report.finish(
         Step::People,
         StepStatus::Done,
         format!("Проиндексировано {people_indexed} человек"),
-        started,
+        people_started,
     );
 
     // 3. Статика.
@@ -561,62 +345,14 @@ pub async fn reindex_locked(
         }
     }
 
-    let after = generation_names(root);
-    let mut deleted: Vec<String> = before.difference(&after).cloned().collect();
-    deleted.sort();
     Ok(ReindexResult {
         indexed: indexed as usize,
         people_indexed: people_indexed as usize,
         previous_count,
-        previous_version,
-        deleted,
+        // Поколений каталогов у единого индекса нет: перестройка атомарна (один коммит).
+        previous_version: String::new(),
+        deleted: Vec::new(),
     })
-}
-
-/// Перестройка в фоне: сразу при старте приложения, затем каждые
-/// `SEARCH_REINDEX_INTERVAL_SECS` (если не 0). По расписанию перестраивает только один инстанс:
-/// блокировка в Redis. Статику фронтенда не трогает.
-pub fn spawn_reindex(state: AppState) {
-    if state.config.search_index_dir.is_none() {
-        return;
-    }
-    let interval = Duration::from_secs(state.config.search_reindex_interval_secs);
-    tokio::spawn(async move {
-        // Индексы уже построены (диск сохраняется между запусками; пустые строит `spawn_initial`):
-        // полная перестройка при каждом рестарте — десятки минут нагрузки впустую.
-        if crate::works::sync::doc_count(&state) == 0
-            || crate::people_idx::sync::doc_count(&state) == 0
-        {
-            run_reindex(&state, "startup").await;
-        }
-        if interval.is_zero() {
-            return;
-        }
-        // Блокировка чуть короче интервала: к следующему разу она точно истечёт.
-        let lock_ttl = interval
-            .saturating_sub(Duration::from_secs(60))
-            .max(Duration::from_secs(60));
-        loop {
-            tokio::time::sleep(interval).await;
-            match state.cache.try_lock(SCHEDULE_LOCK, lock_ttl).await {
-                Ok(true) => run_reindex(&state, "scheduled").await,
-                Ok(false) => tracing::debug!("scheduled reindex is running on another instance"),
-                // Без Redis не узнать, перестраивает ли кто-то ещё: лишняя перестройка безопасна.
-                Err(error) => {
-                    tracing::warn!(%error, "reindex lock unavailable, rebuilding anyway");
-                    run_reindex(&state, "scheduled").await;
-                }
-            }
-        }
-    });
-}
-
-async fn run_reindex(state: &AppState, reason: &str) {
-    match reindex(state, ReindexOptions::default(), &Reporter::silent()).await {
-        Ok(result) => tracing::info!(indexed = result.indexed, reason, "search index rebuilt"),
-        Err(ReindexError::Busy) => tracing::info!(reason, "reindex is already running"),
-        Err(error) => tracing::warn!(%error, reason, "search index rebuild failed"),
-    }
 }
 
 /// Как часто оценки Nexus доезжают до индекса ([`spawn_ratings_sync`]).
@@ -629,7 +365,7 @@ const RATINGS_SYNC_OVERLAP_SECS: i64 = 60;
 /// сводки. Оценки пишет `social` через `EntityRatings` (после каждой рецензии и при старте),
 /// модулю `social` о поиске знать не нужно. Повтор безопасен: документы строятся целиком из БД.
 pub fn spawn_ratings_sync(state: AppState) {
-    if state.config.search_index_dir.is_none() {
+    if state.config.search_index_dir.is_none() || state.config.search_index_readonly {
         return;
     }
     tokio::spawn(async move {
@@ -739,8 +475,135 @@ pub async fn search(
     };
     let random = matches!(query.sort, Some(SearchSort::Random));
     Ok(Json(
-        crate::works::search::search(&state, works, random, limit, offset).await?,
+        crate::index::search::search(&state, works, random, limit, offset).await?,
     ))
+}
+
+/// Шаг ответа поиска.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ExplainStepView {
+    pub name: String,
+    /// Сколько сущностей осталось после шага.
+    pub count: u64,
+    pub micros: u64,
+}
+
+/// Разбор места по релевантности.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct RankDetailView {
+    /// 0 — точное название с ручным местом, 1 — сильное совпадение с ручным местом,
+    /// 2 — совпало в названии, 3 — только люди, серия, студия.
+    pub tier: u8,
+    pub manual_rank: u16,
+    pub exact: bool,
+    pub in_title: bool,
+    pub bm25: f32,
+    pub text: f32,
+    pub popularity: f32,
+    pub weight: f32,
+    pub total: f32,
+}
+
+/// Место в выдаче.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ExplainItemView {
+    pub ord: u32,
+    pub title: String,
+    pub kind: String,
+    pub slug: String,
+    pub position: u32,
+    pub detail: Option<RankDetailView>,
+}
+
+/// Как поиск ответил на запрос — по шагам.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ExplainView {
+    pub steps: Vec<ExplainStepView>,
+    /// Термы фильтров слоя А (`studio:…`, `person:…`).
+    pub facet_terms: Vec<String>,
+    pub approximate: bool,
+    pub relevance: bool,
+    pub total: u64,
+    pub items: Vec<ExplainItemView>,
+}
+
+/// Объяснить запрос поиска: те же параметры, что у `GET /search`; ответ — шаги (сколько
+/// сущностей осталось и сколько занял шаг) и первые `limit` мест с разбором (уровень, доля
+/// текста, популярность, вес вида, итог). Без кэша.
+#[utoipa::path(
+    get, operation_id = "explain_search", path = "/admin/search/explain", tag = "catalog-admin",
+    security(("bearer" = [])),
+    params(SearchQuery),
+    responses(
+        (status = 200, description = "Разбор запроса", body = ExplainView),
+        (status = 400, description = "Неверный фильтр", body = ErrorBody),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 503, description = "Поиск недоступен", body = ErrorBody),
+    )
+)]
+pub async fn explain(
+    State(state): State<AppState>,
+    AdminUser(_admin): AdminUser,
+    repeated: Repeated,
+    Query(query): Query<SearchQuery>,
+) -> AppResult<Json<ExplainView>> {
+    let (limit, _) = page_bounds(query.limit, query.offset);
+    let Some(works) = works_query(&state, &repeated, &query).await? else {
+        return Ok(Json(ExplainView {
+            steps: vec![ExplainStepView {
+                name: "Нет такого человека или фильтр пуст".into(),
+                count: 0,
+                micros: 0,
+            }],
+            facet_terms: Vec::new(),
+            approximate: false,
+            relevance: false,
+            total: 0,
+            items: Vec::new(),
+        }));
+    };
+    let Some(Ok(index)) = crate::index::sync::open(&state) else {
+        return Err(AppError::Unavailable("search index is not enabled".into()));
+    };
+    let e = crate::index::search::blocking(move || index.explain(&works, limit as usize)).await?;
+    Ok(Json(ExplainView {
+        steps: e
+            .steps
+            .into_iter()
+            .map(|s| ExplainStepView {
+                name: s.name,
+                count: s.count,
+                micros: s.micros,
+            })
+            .collect(),
+        facet_terms: e.facet_terms,
+        approximate: e.approximate,
+        relevance: e.relevance,
+        total: e.total,
+        items: e
+            .items
+            .into_iter()
+            .map(|i| ExplainItemView {
+                ord: i.ord,
+                title: i.title,
+                kind: i.kind,
+                slug: i.slug,
+                position: i.position,
+                detail: i.detail.map(|d| RankDetailView {
+                    tier: d.tier,
+                    manual_rank: d.manual_rank,
+                    exact: d.exact,
+                    in_title: d.in_title,
+                    bm25: d.bm25,
+                    text: d.text,
+                    popularity: d.popularity,
+                    weight: d.weight,
+                    total: d.total,
+                }),
+            })
+            .collect(),
+    }))
 }
 
 /// Запрос к книжному индексу, если отвечать должен он: запрос только про книги (`kind=book`) и
@@ -751,7 +614,7 @@ fn books_query(
     state: &AppState,
     repeated: &Repeated,
     query: &SearchQuery,
-) -> AppResult<Option<Option<crate::books::index::BookQuery>>> {
+) -> AppResult<Option<Option<crate::index::Query>>> {
     let kinds = kinds_of(repeated)?;
     if !crate::books::search::routed(state, &kinds) {
         return Ok(None);
@@ -811,7 +674,7 @@ async fn blended(
     limit: i64,
     offset: i64,
 ) -> AppResult<Option<Page<EntitySummary>>> {
-    if !crate::books::sync::enabled(state) || matches!(query.sort, Some(SearchSort::Random)) {
+    if !crate::index::sync::enabled(state) || matches!(query.sort, Some(SearchSort::Random)) {
         return Ok(None);
     }
     let kinds = kinds_of(repeated)?;
@@ -832,7 +695,7 @@ async fn blended(
     // шапки; дальше страницы запрашиваются со смещением.
     let (first_items, others_total) = match &works {
         Some(works) => {
-            let page = crate::works::search::search(state, works.clone(), false, limit, 0).await?;
+            let page = crate::index::search::search(state, works.clone(), false, limit, 0).await?;
             (page.items, page.total)
         }
         None => (Vec::new(), 0),
@@ -851,7 +714,7 @@ async fn blended(
             items.truncate(others_limit);
             items.into_iter()
         }
-        Some(works) if others_limit > 0 => crate::works::search::search(
+        Some(works) if others_limit > 0 => crate::index::search::search(
             state,
             works,
             false,
@@ -955,7 +818,7 @@ pub async fn neighbors(
         }));
     };
     Ok(Json(
-        crate::works::search::neighbors(&state, works, slug).await?,
+        crate::index::search::neighbors(&state, works, slug).await?,
     ))
 }
 
@@ -972,7 +835,7 @@ pub(crate) async fn similar(
     if crate::books::search::routed(state, &[kind]) {
         return crate::books::search::similar(state, tags, exclude, limit).await;
     }
-    crate::works::search::similar(state, kind.as_str(), tags, exclude, limit).await
+    crate::index::search::similar(state, kind, tags, exclude, limit).await
 }
 
 /// Длина значения фильтра `studio` и запроса подсказок.
@@ -1092,23 +955,28 @@ fn countries_of(repeated: &Repeated) -> AppResult<Vec<String>> {
     Ok(countries)
 }
 
-/// Slug'и работ человека (`None` — работ нет): общая часть [`person_filter`] и Tantivy-ветки.
-async fn person_slugs(
+/// Номера работ человека в индексе (`None` — работ нет): общая часть фильтра `person`.
+async fn person_ords(
     db: &sqlx::PgPool,
     person: &str,
     role: Option<&str>,
-) -> sqlx::Result<Option<Vec<String>>> {
-    let slugs: Vec<String> = sqlx::query_scalar(&format!(
-        "SELECT DISTINCT e.slug FROM people p
+) -> sqlx::Result<Option<Vec<u32>>> {
+    let ords: Vec<i32> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT o.ord FROM people p
          JOIN entity_credits ec ON ec.person_id = p.id
          JOIN entities e ON e.id = ec.entity_id
+         JOIN catalog_entity_ords o ON o.entity_id = e.id
          WHERE p.slug = $1 AND ($2::text IS NULL OR ec.role = $2) AND {VISIBLE}"
     ))
     .bind(person)
     .bind(role.map(str::trim))
     .fetch_all(db)
     .await?;
-    Ok((!slugs.is_empty()).then_some(slugs))
+    let ords: Vec<u32> = ords
+        .into_iter()
+        .filter_map(|o| u32::try_from(o).ok())
+        .collect();
+    Ok((!ords.is_empty()).then_some(ords))
 }
 
 /// Виды запроса без книг: книги отвечают отдельным индексом.
@@ -1127,8 +995,8 @@ async fn works_query(
     state: &AppState,
     repeated: &Repeated,
     query: &SearchQuery,
-) -> AppResult<Option<crate::works::index::WorksQuery>> {
-    use crate::works::index::{WorksQuery, WorksSort, YearRange};
+) -> AppResult<Option<crate::index::Query>> {
+    use crate::index::{Query, Sort};
     let kinds = kinds_of(repeated)?;
     let others = others_of(&kinds);
     let countries = countries_of(repeated)?;
@@ -1137,46 +1005,57 @@ async fn works_query(
         return Ok(None);
     }
     let trimmed = |value: &Option<String>| value.as_deref().map(|v| v.trim().to_owned());
-    let only_slugs = match &query.person {
-        Some(person) => match person_slugs(&state.db, person, query.role.as_deref()).await? {
-            Some(slugs) => Some(slugs),
+    let only_ords = match &query.person {
+        Some(person) => match person_ords(&state.db, person, query.role.as_deref()).await? {
+            Some(ords) => Some(ords),
             None => return Ok(None),
         },
         None => None,
     };
-    let (from, to) = match query.year {
+    let (year_from, year_to) = match query.year {
         Some(year) => (Some(year), Some(year)),
         None => (query.year_from, query.year_to),
     };
-    let sort = query.sort.map(|sort| match sort {
-        SearchSort::Recommended => WorksSort::Recommended,
-        SearchSort::Trending => WorksSort::Trending,
-        SearchSort::TopRated => WorksSort::TopRated,
-        SearchSort::New => WorksSort::New,
-        SearchSort::Soon => WorksSort::Soon,
-        SearchSort::Title => WorksSort::Title,
-        SearchSort::Popular => WorksSort::Popular,
-        SearchSort::Rating => WorksSort::Rating,
-        SearchSort::Awarded => WorksSort::Awarded,
-        SearchSort::Random => WorksSort::Relevance,
-    });
-    Ok(Some(WorksQuery {
+    let sort = match query.sort {
+        Some(SearchSort::Recommended) => Sort::Recommended,
+        Some(SearchSort::Trending) => Sort::Trending,
+        Some(SearchSort::TopRated) => Sort::TopRated,
+        Some(SearchSort::New) => Sort::New,
+        Some(SearchSort::Soon) => Sort::Soon,
+        Some(SearchSort::Title) => Sort::Title,
+        Some(SearchSort::Popular) => Sort::Popular,
+        Some(SearchSort::Rating) => Sort::Rating,
+        Some(SearchSort::Awarded) => Sort::Awarded,
+        Some(SearchSort::Random) | None => Sort::Relevance,
+    };
+    // Без `kind` — все разделы, кроме книг: книги отвечают отдельным запросом ([`blended`]).
+    let kinds = if others.is_empty() {
+        vec![
+            EntityKind::Movie,
+            EntityKind::Series,
+            EntityKind::Game,
+            EntityKind::Painting,
+        ]
+    } else {
+        others
+    };
+    Ok(Some(Query {
         q: query.q.as_deref().unwrap_or_default().trim().to_owned(),
-        kinds: others.iter().map(|kind| kind.as_str().to_owned()).collect(),
-        countries,
+        sort,
+        kinds,
         tags: query.tag.iter().cloned().collect(),
-        years: YearRange { from, to },
+        countries,
+        year_from,
+        year_to,
         studio: trimmed(&query.studio),
+        studio_slug: query.studio_slug.clone(),
         publisher: trimmed(&query.publisher),
         museum: trimmed(&query.museum),
-        studio_slug: query.studio_slug.clone(),
         award: query.award.clone(),
         award_year: query.award_year,
         awarded: query.awarded,
-        only_slugs,
-        exclude_slugs: Vec::new(),
-        now_ts: day_ts(Utc::now().date_naive()),
-        sort,
+        only_ords,
+        ..Query::default()
     }))
 }
 
@@ -1240,7 +1119,14 @@ async fn facet_hits(
     kind: Option<EntityKind>,
     limit: Option<i64>,
 ) -> AppResult<Vec<(String, i64)>> {
-    crate::works::search::facet(state, facet, q, kind.map(EntityKind::as_str), limit).await
+    crate::index::search::facet(
+        state,
+        facet,
+        q,
+        kind,
+        limit.unwrap_or(10).clamp(1, 50) as usize,
+    )
+    .await
 }
 
 /// Подсказки издателей для фильтра `publisher` (facet search по полю `publishers`): издательство
@@ -1572,6 +1458,7 @@ pub async fn reindex_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
 
     #[test]
     fn blend_alternates_two_others_and_a_book_then_drains() {

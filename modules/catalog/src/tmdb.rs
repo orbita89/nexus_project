@@ -164,7 +164,7 @@ async fn refresh_stats(state: &AppState, report: &Reporter) -> Result<StatsResul
         let ranked = ranking::recompute(&state.db)
             .await
             .map_err(|e| e.to_string())?;
-        Ok((ranked, format!("Балл «Рекомендуемые» у {ranked} фильмов")))
+        Ok((ranked, format!("Балл «Рекомендуемые» у {ranked}")))
     })
     .await?;
     Ok(StatsResult {

@@ -14,7 +14,7 @@
 //!   ([`RANKS_POLL`]).
 //!
 //! Документ строится целиком из БД (книга, авторы, участники, теги, оценки, место), поэтому
-//! повтор любого шага безопасен. Номер книги `ord` выдаёт `catalog_book_ords` один раз.
+//! повтор любого шага безопасен. Номер книги `ord` выдаёт `catalog_entity_ords` один раз.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -91,16 +91,16 @@ async fn ords_of(
     ids: &[Uuid],
 ) -> Result<HashMap<Uuid, (u32, Option<i64>)>, sqlx::Error> {
     sqlx::query(
-        "INSERT INTO catalog_book_ords (entity_id)
+        "INSERT INTO catalog_entity_ords (entity_id)
          SELECT id FROM unnest($1::uuid[]) AS id
-         WHERE NOT EXISTS (SELECT 1 FROM catalog_book_ords o WHERE o.entity_id = id)
+         WHERE NOT EXISTS (SELECT 1 FROM catalog_entity_ords o WHERE o.entity_id = id)
          ON CONFLICT (entity_id) DO NOTHING",
     )
     .bind(ids)
     .execute(db)
     .await?;
     let rows: Vec<(Uuid, i32, Option<i64>)> = sqlx::query_as(
-        "SELECT entity_id, ord, text_hash FROM catalog_book_ords WHERE entity_id = ANY($1)",
+        "SELECT entity_id, ord, text_hash FROM catalog_entity_ords WHERE entity_id = ANY($1)",
     )
     .bind(ids)
     .fetch_all(db)
@@ -216,7 +216,7 @@ async fn save_hashes(db: &sqlx::PgPool, hashes: &[(Uuid, Option<i64>)]) -> Resul
         let ids: Vec<Uuid> = chunk.iter().map(|h| h.0).collect();
         let values: Vec<Option<i64>> = chunk.iter().map(|h| h.1).collect();
         sqlx::query(
-            "UPDATE catalog_book_ords o SET text_hash = v.hash
+            "UPDATE catalog_entity_ords o SET text_hash = v.hash
              FROM unnest($1::uuid[], $2::bigint[]) AS v(id, hash)
              WHERE o.entity_id = v.id AND o.text_hash IS DISTINCT FROM v.hash",
         )
@@ -297,7 +297,7 @@ pub async fn rebuild(state: &AppState) -> Result<u64, BoxError> {
     }
     let total = tokio::task::spawn_blocking(move || writer.commit()).await??;
     // Книги, которых в новом индексе нет, — без отпечатка: появятся — будут записаны заново.
-    sqlx::query("UPDATE catalog_book_ords SET text_hash = NULL WHERE text_hash IS NOT NULL")
+    sqlx::query("UPDATE catalog_entity_ords SET text_hash = NULL WHERE text_hash IS NOT NULL")
         .execute(&state.db)
         .await?;
     save_hashes(&state.db, &hashes).await?;
@@ -337,7 +337,7 @@ pub async fn db_counts(db: &sqlx::PgPool) -> Result<(i64, i64), sqlx::Error> {
     sqlx::query_as(&format!(
         "SELECT (SELECT count(*) FROM entities e
                  WHERE e.kind = 'book' AND {VISIBLE} AND e.parent_id IS NULL),
-                (SELECT count(*) FROM catalog_book_ords)"
+                (SELECT count(*) FROM catalog_entity_ords)"
     ))
     .fetch_one(db)
     .await
@@ -367,7 +367,7 @@ pub async fn reload_sidecar(state: &AppState) -> Result<u64, BoxError> {
 async fn load_ranks(db: &sqlx::PgPool) -> Result<HashMap<u32, u16>, sqlx::Error> {
     let rows: Vec<(i32, i32)> = sqlx::query_as(
         "SELECT o.ord, r.rank FROM catalog_manual_ranks r
-         JOIN catalog_book_ords o ON o.entity_id = r.entity_id",
+         JOIN catalog_entity_ords o ON o.entity_id = r.entity_id",
     )
     .fetch_all(db)
     .await?;

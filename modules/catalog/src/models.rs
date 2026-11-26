@@ -65,7 +65,7 @@ impl TryFrom<String> for ReleaseStatus {
 }
 
 /// Тип сущности (Postgres enum `entity_kind`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "entity_kind", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum EntityKind {

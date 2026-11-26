@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::index::{forget, PeopleIndex, PersonEntry};
 use crate::jobs::{Reporter, Step};
 use crate::people_search::{
-    refresh_fame, PersonDoc, BATCH, DOC_COLUMNS, INDEXED_PERSON, WORKS_LATERAL,
+    refresh_fame, PersonDoc, BATCH, DOC_COLUMNS, INDEXED_PERSON, WORKS_LATERAL, WORKS_TEMP_JOIN,
 };
 use crate::search::BoxError;
 use crate::works::sync::BuildError;
@@ -99,6 +99,9 @@ async fn build(
     let dir = generations::fresh(root, NAME);
     let index = PeopleIndex::open(&dir)?;
     let writer = index.writer_for_build()?;
+    // Работы всех людей — одним проходом во временную таблицу выделенного соединения.
+    let mut conn = state.db.acquire().await?;
+    crate::people_search::create_works_temp(&mut conn).await?;
     let mut after: Option<Uuid> = None;
     let mut done: u64 = 0;
     loop {
@@ -107,12 +110,12 @@ async fn build(
              FROM (SELECT * FROM people p WHERE {INDEXED_PERSON}
                      AND ($1::uuid IS NULL OR p.id > $1) ORDER BY p.id LIMIT $2) p
              LEFT JOIN person_stats ps ON ps.person_id = p.id
-             {WORKS_LATERAL}
+             {WORKS_TEMP_JOIN}
              ORDER BY p.id"
         ))
         .bind(after)
         .bind(BATCH as i64)
-        .fetch_all(&state.db)
+        .fetch_all(&mut *conn)
         .await?;
         let Some(last) = docs.last() else { break };
         after = Some(last.id);
@@ -121,6 +124,8 @@ async fn build(
         done += entries.len() as u64;
         report.progress(Step::People, done, total.max(done));
     }
+    crate::people_search::drop_works_temp(&mut conn).await?;
+    drop(conn);
     index.finish(writer)?;
     // Защита от пустой/обрезанной выдачи: новое поколение не меньше процента от старого.
     let percent = state.config.search_reindex_min_percent;

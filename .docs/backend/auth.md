@@ -273,7 +273,7 @@ DELETE /me/oauth/{provider}  →  204; не привязан — 404
 
 Полный список с описанием полей и примерами — в Swagger: http://localhost/docs.
 Контракт API в репозитории: `documents/api/openapi.json`. Его проверяет тест, и любое изменение
-API видно в PR. Обновить: `UPDATE_OPENAPI=1 cargo test -p nexus openapi`.
+API видно в PR. Обновить: `make openapi` (без тестов) или `UPDATE_OPENAPI=1 cargo test -p nexus openapi`.
 
 | Метод | Путь (`/api/v1/auth/...`) | Доступ | Что делает |
 |---|---|---|---|

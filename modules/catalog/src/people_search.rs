@@ -1,4 +1,4 @@
-//! Поиск людей на Tantivy ([`crate::people_idx`]) и известность (`person_stats.fame`).
+//! Поиск людей на Tantivy ([`crate::index`]) и известность (`person_stats.fame`).
 //!
 //! Индекс строится вместе с работами (перестройка [`crate::search`]), правки админки попадают в
 //! него через [`update_index`]. Документ компактный ([`PersonDoc`]): имя, имя латиницей, фото,
@@ -51,6 +51,51 @@ pub(crate) const WORKS_LATERAL: &str = "LEFT JOIN LATERAL (
               JOIN entities e ON e.id = c.entity_id AND e.active AND e.kind <> 'season'
               LEFT JOIN entity_stats s ON s.entity_id = e.id) x
     ) w ON true";
+
+/// [`WORKS_LATERAL`] сразу для всех людей — во временную таблицу `person_works_tmp` сессии.
+/// Полная перестройка: один последовательный проход (~1,5 мин на 4 млн титров) вместо
+/// LATERAL на каждого человека (точечные чтения титров и работ, ~20 мин на 1,2 млн людей).
+pub(crate) const WORKS_ALL_TEMP: &str = "CREATE TEMP TABLE person_works_tmp AS
+    WITH c AS (SELECT DISTINCT person_id, entity_id FROM entity_credits),
+    x AS (SELECT c.person_id, e.slug, e.title, e.kind::text AS kind, e.cover_url,
+                 extract(year FROM e.release_date)::int AS year,
+                 row_number() OVER (PARTITION BY c.person_id
+                                    ORDER BY coalesce(s.tmdb_votes, 0) DESC,
+                                             e.release_date DESC NULLS LAST, e.id) AS rn
+          FROM c JOIN entities e ON e.id = c.entity_id AND e.active AND e.kind <> 'season'
+          LEFT JOIN entity_stats s ON s.entity_id = e.id)
+    SELECT person_id, count(*) AS works_count,
+           coalesce(jsonb_agg(jsonb_build_object('slug', slug, 'title', title, 'kind', kind,
+                    'year', year, 'poster_url', cover_url) ORDER BY rn)
+                    FILTER (WHERE rn <= 3), '[]'::jsonb) AS top_works
+    FROM x GROUP BY person_id";
+
+/// Создаёт `person_works_tmp` ([`WORKS_ALL_TEMP`]) на соединении `conn`; запросы пачек на нём же
+/// соединяют её вместо [`WORKS_LATERAL`]: `LEFT JOIN person_works_tmp w ON w.person_id = p.id`.
+pub(crate) async fn create_works_temp(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    drop_works_temp(conn).await?;
+    sqlx::query("SET work_mem = '256MB'")
+        .execute(&mut *conn)
+        .await?;
+    let created = sqlx::query(WORKS_ALL_TEMP).execute(&mut *conn).await;
+    sqlx::query("RESET work_mem").execute(&mut *conn).await?;
+    created?;
+    sqlx::query("ALTER TABLE person_works_tmp ADD PRIMARY KEY (person_id)")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Убирает `person_works_tmp`: она живёт до конца сессии, а соединение вернётся в пул.
+pub(crate) async fn drop_works_temp(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("DROP TABLE IF EXISTS person_works_tmp")
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// JOIN к `person_works_tmp` вместо [`WORKS_LATERAL`].
+pub(crate) const WORKS_TEMP_JOIN: &str = "LEFT JOIN person_works_tmp w ON w.person_id = p.id";
 
 /// Колонки документа; `p` — люди, `ps` — `person_stats`, `w` — [`WORKS_LATERAL`].
 pub(crate) const DOC_COLUMNS: &str =
@@ -133,13 +178,13 @@ async fn search_tantivy(
     limit: i64,
     offset: i64,
 ) -> AppResult<Json<PeoplePage>> {
-    use crate::people_idx::index::PeopleSort;
-    let Some(Ok(index)) = crate::people_idx::sync::open(state) else {
+    use crate::index::PeopleSort;
+    let Some(Ok(index)) = crate::index::sync::open(state) else {
         return Err(unavailable());
     };
     let (q, role) = (q.to_owned(), role.map(str::to_owned));
     let (hits, total, counts) = shared::tantivy::blocking(move || {
-        let counts = index.role_counts(&q)?;
+        let counts = index.people_role_counts(&q)?;
         let (lim, off) = (limit as usize, offset as usize);
         if role.is_none() && q.is_empty() {
             let total: i64 = counts.values().sum();
@@ -151,7 +196,7 @@ async fn search_tantivy(
             };
             let mut by_role: HashMap<&str, std::vec::IntoIter<Value>> = HashMap::new();
             for (r, (start, count)) in &windows {
-                let (hits, _) = index.search(
+                let (hits, _) = index.search_people(
                     "",
                     Some(r),
                     PeopleSort::Fame,
@@ -167,12 +212,12 @@ async fn search_tantivy(
             Ok((hits, total, counts))
         } else {
             let (hits, total) =
-                index.search(&q, role.as_deref(), PeopleSort::Relevance, lim, off)?;
+                index.search_people(&q, role.as_deref(), PeopleSort::Relevance, lim, off)?;
             Ok((hits, total as i64, counts))
         }
     })
     .await
-    .map_err(|error: tantivy::TantivyError| {
+    .map_err(|error: crate::index::IndexError| {
         tracing::warn!(%error, "people tantivy search failed");
         unavailable()
     })?;
@@ -224,7 +269,7 @@ pub(crate) async fn update_index(state: &AppState, people: &[Uuid]) -> Result<()
         return Ok(());
     }
     refresh_fame(&state.db, Some(people)).await?;
-    crate::people_idx::sync::update(state, people).await
+    crate::index::sync::update_people(state, people).await
 }
 
 /// Порядок ролей в чередовании: по убыванию числа людей, затем по имени; актёры — дважды

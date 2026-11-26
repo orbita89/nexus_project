@@ -31,6 +31,8 @@ flate2 = { workspace = true }
 tantivy = { workspace = true }
 # Слой Б книжного поиска: фасеты (RoaringBitmap) и подмена состояния (ArcSwap).
 roaring = { workspace = true }
+# Колонки слоя Б из отображённого файла в `&[T]` без своего unsafe.
+bytemuck = { version = "1", features = ["derive"] }
 regex = { workspace = true }
 arc-swap = { workspace = true }
 # Читалка книг: EPUB из архивов .arx (catalog::books::reader).

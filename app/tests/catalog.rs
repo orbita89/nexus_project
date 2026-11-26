@@ -51,9 +51,6 @@ impl Ctx {
         )
         .await
         .expect("reindex fixtures");
-        catalog::books::sync::rebuild(&ctx.state)
-            .await
-            .expect("books index");
         ctx
     }
 
@@ -2099,18 +2096,6 @@ async fn search_hits_have_no_card(pool: PgPool) {
 // ---------------------------------------------------------------- перестройка с версиями
 
 impl Ctx {
-    /// Поколения индекса работ (`works.v<ms>`), по возрастанию.
-    fn versions(&self) -> Vec<String> {
-        let root = self.state.config.search_index_dir.clone().unwrap();
-        let mut versions: Vec<String> = std::fs::read_dir(root)
-            .unwrap()
-            .filter_map(|e| e.unwrap().file_name().into_string().ok())
-            .filter(|name| name.starts_with("works.v"))
-            .collect();
-        versions.sort();
-        versions
-    }
-
     async fn reindex(&self, query: &str) -> (StatusCode, Value) {
         self.admin_send(Method::POST, &format!("/admin/search/reindex{query}"), None)
             .await
@@ -2125,36 +2110,19 @@ impl Ctx {
     }
 }
 
-/// Хранятся только текущее поколение индекса и одно предыдущее; старые удаляются.
+/// Перестройка — один атомарный коммит единого индекса: поколений каталогов нет, поиск всё время
+/// видит все документы.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn reindex_keeps_current_and_one_previous_version(pool: PgPool) {
+async fn reindex_is_one_atomic_commit(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
-    // Пустое поколение `works.v0` (открыто до первой перестройки) и первое построенное.
-    let first = ctx.versions();
-    assert_eq!(first.len(), 2, "{first:?}");
-
-    let (status, body) = ctx.reindex("").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["indexed"], 4, "работы без книг");
-    assert_eq!(body["previous_count"], 4);
-    // Устаревшие поколения обоих индексов: `works.v*` и `people.v*`.
-    let deleted = body["deleted"].as_array().unwrap();
-    assert_eq!(deleted.len(), 2, "{body}");
-    assert!(deleted.contains(&json!(first[0])), "{body}");
-    let second = ctx.versions();
-    assert_eq!(second.len(), 2);
-    assert_eq!(second[0], body["previous_version"].as_str().unwrap());
-    assert_ne!(second, first);
-
-    let (status, body) = ctx.reindex("").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let deleted = body["deleted"].as_array().unwrap();
-    assert_eq!(deleted.len(), 2, "{body}");
-    assert!(deleted.contains(&json!(second[0])), "{body}");
-    assert_eq!(ctx.versions().len(), 2);
-
-    // Поиск всё это время работает и видит всё.
-    assert_eq!(ctx.get_ok("/search?kind=movie").await["total"], 2);
+    for _ in 0..2 {
+        let (status, body) = ctx.reindex("").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["indexed"], 4, "работы без книг");
+        assert_eq!(body["previous_count"], 4);
+        assert_eq!(body["deleted"], json!([]), "{body}");
+        assert_eq!(ctx.get_ok("/search?kind=movie").await["total"], 2);
+    }
 }
 
 /// Новый индекс меньше 80% текущего — поиск не переключается, новое поколение удаляется; ровно
@@ -2162,14 +2130,12 @@ async fn reindex_keeps_current_and_one_previous_version(pool: PgPool) {
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
 async fn reindex_refuses_to_switch_to_much_smaller_index(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
-    let versions = ctx.versions();
 
     // 1 из 4 работ — 25%.
     ctx.delete_entities_except(&["witcher-3"]).await;
     let (status, body) = ctx.reindex("").await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(body["error"].as_str().unwrap().contains("80%"), "{body}");
-    assert_eq!(ctx.versions(), versions, "new generation is removed");
     assert_eq!(ctx.get_ok("/search?kind=movie").await["total"], 2);
 
     let (status, body) = ctx.reindex("?force=true").await;

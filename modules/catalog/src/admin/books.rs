@@ -2,7 +2,7 @@
 //!
 //! Ручное место — глобальное: книга с местом 1 первой стоит в «Рекомендуемых» и в любом списке
 //! по фасетам, куда она входит (внутри фасета — относительный порядок общего списка). В поиске
-//! по тексту место поднимает только сильные совпадения (`books::sidecar`).
+//! по тексту место поднимает только сильные совпадения (`index::sidecar`).
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -19,9 +19,9 @@ use shared::{AdminUser, AppError, AppResult, AppState};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::books::index::BookIndex;
 use crate::books::ranks::{self, MAX_RANK};
-use crate::books::sync;
+use crate::index::sync;
+use crate::index::CatalogIndex;
 
 /// Книга с ручным местом.
 #[derive(Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
@@ -208,7 +208,7 @@ pub struct IndexFieldUsage {
 /// Слой А — Tantivy (текст и карточки).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TextIndexStatus {
-    #[schema(example = "books-4")]
+    #[schema(example = "catalog-1")]
     pub schema_version: String,
     pub docs: u64,
     /// Удалённые документы, ещё лежащие в сегментах (уйдут при слиянии `merge`).
@@ -283,6 +283,17 @@ pub struct IndexOperation {
     /// `null` — ещё идёт.
     pub ok: Option<bool>,
     pub error: Option<String>,
+    /// Ход идущей операции: текущий шаг и прогресс (`null` — шаг без счётчика или не начат).
+    pub progress: Option<IndexProgress>,
+}
+
+/// Ход операции над индексом.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct IndexProgress {
+    /// Заголовок шага: «Индекс работ», «Люди».
+    pub step: String,
+    pub done: u64,
+    pub total: u64,
 }
 
 /// Книжный индекс целиком: `GET /admin/books/index`.
@@ -290,7 +301,7 @@ pub struct IndexOperation {
 pub struct BooksIndexStatus {
     /// Видимых книг в БД — столько должно быть в индексе.
     pub db_books: i64,
-    /// Выданных номеров книг (`catalog_book_ords`).
+    /// Выданных номеров книг (`catalog_entity_ords`).
     pub db_ords: i64,
     pub text: TextIndexStatus,
     pub sidecar: SidecarStatus,
@@ -325,6 +336,7 @@ fn begin(dir: &Path, op: &str) -> AppResult<()> {
             finished_at: None,
             ok: None,
             error: None,
+            progress: None,
         },
     );
     Ok(())
@@ -340,7 +352,7 @@ fn finish(dir: &Path, result: Result<(), String>) {
 
 /// Запустить операцию в фоне.
 fn spawn_operation<F>(
-    index: &BookIndex,
+    index: &CatalogIndex,
     op: &'static str,
     admin: Uuid,
     work: F,
@@ -361,7 +373,7 @@ where
     Ok(StatusCode::ACCEPTED)
 }
 
-fn enabled_index(state: &AppState) -> AppResult<Arc<BookIndex>> {
+fn enabled_index(state: &AppState) -> AppResult<Arc<CatalogIndex>> {
     match sync::open(state) {
         None => Err(AppError::Unavailable("books search is not enabled".into())),
         Some(Err(error)) => Err(AppError::Internal(format!("books index: {error}"))),
@@ -373,7 +385,7 @@ fn build_status(info: Option<sync::BuildInfo>) -> Option<BuildStatus> {
     info.map(|b| BuildStatus {
         at: b.at,
         took_ms: b.took_ms,
-        books: b.books,
+        books: b.docs,
     })
 }
 
@@ -394,10 +406,11 @@ pub async fn index_status(
 ) -> AppResult<axum::Json<BooksIndexStatus>> {
     let index = enabled_index(&state)?;
     let current = operation(index.dir());
-    let (db_books, db_ords) = sync::db_counts(&state.db).await?;
+    let (_, db_ords, _) = sync::db_counts(&state.db).await?;
+    let db_books = sync::db_kind_count(&state.db, crate::models::EntityKind::Book).await?;
     let (text, side) = tokio::task::spawn_blocking(move || {
         let text = index.stats();
-        (text, index.sidecar().stats())
+        (text, index.entities().stats())
     })
     .await
     .map_err(|e| AppError::Internal(format!("books index task failed: {e}")))?;
@@ -436,7 +449,11 @@ pub async fn index_status(
         },
         sidecar: SidecarStatus {
             generation: side.generation,
-            books: side.books,
+            books: side
+                .kinds
+                .iter()
+                .find(|(k, _)| k == "book")
+                .map_or(0, |(_, n)| *n),
             slots: side.slots,
             with_cover: side.with_cover,
             manual_ranks: side.manual_ranks,
@@ -484,10 +501,15 @@ pub async fn rebuild_index(
 ) -> AppResult<StatusCode> {
     let index = enabled_index(&state)?;
     spawn_operation(&index, "rebuild", admin.id, async move {
-        sync::rebuild(&state)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        sync::rebuild(
+            &state,
+            sync::Target::Kinds(vec![crate::models::EntityKind::Book]),
+            &crate::jobs::Reporter::silent(),
+            false,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     })
 }
 

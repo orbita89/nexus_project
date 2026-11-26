@@ -163,6 +163,12 @@ impl Reporter {
         Self::default()
     }
 
+    /// Репортёр и приёмник его событий: фоновая операция (без SSE) показывает ход сама.
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<JobEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self { tx: Some(tx) }, rx)
+    }
+
     fn send(&self, event: JobEvent) {
         // Ошибка отправки — клиент закрыл соединение; операция всё равно доводится до конца.
         if let Some(tx) = &self.tx {

@@ -12,14 +12,15 @@ pub mod books;
 pub mod directory;
 pub mod entities;
 pub mod fragments;
+pub mod index;
 pub mod jobs;
 pub mod media;
 pub mod metadata;
 pub mod models;
 pub mod people;
-pub mod people_idx;
 pub mod people_search;
 pub mod publish;
+pub mod rank_kinds;
 pub mod ranking;
 pub mod scripts;
 pub mod search;
@@ -29,7 +30,6 @@ pub mod tags;
 pub mod tmdb;
 pub mod tutor;
 mod validate;
-pub mod works;
 
 use shared::AppState;
 use utoipa_axum::router::OpenApiRouter;
@@ -86,6 +86,9 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(ranking::get))
         .routes(routes!(ranking::preview))
         .routes(routes!(ranking::save_stream))
+        .routes(routes!(rank_kinds::list))
+        .routes(routes!(rank_kinds::preview))
+        .routes(routes!(rank_kinds::save_stream))
         .routes(routes!(archive::promote))
         .routes(routes!(archive::demote))
         .routes(routes!(banners::list))
@@ -118,6 +121,11 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(admin::indexes::list))
         .routes(routes!(admin::indexes::rebuild))
         .routes(routes!(admin::indexes::merge))
+        .routes(routes!(admin::indexes::reload_sidecar))
+        .routes(routes!(admin::sidecar::view))
+        .routes(routes!(admin::sidecar::item))
+        .routes(routes!(admin::sidecar::layout))
+        .routes(routes!(search::explain))
         .routes(routes!(admin::static_pages::regenerate))
         .routes(routes!(admin::static_pages::regenerate_pages))
         .routes(routes!(admin::static_pages::status))

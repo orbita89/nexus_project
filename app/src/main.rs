@@ -12,6 +12,8 @@
 //! `nexus ai list|add|set|test|rm` — провайдеры ИИ (`catalog::ai`), ключи шифруются в БД.
 //! `nexus search reindex` — перестроить индексы Tantivy (как `POST /admin/search/reindex`);
 //! `nexus search bench [ROUNDS]` — замер поиска: книги и фильмы (Tantivy).
+//! `nexus openapi [DIR]` — записать контракт API (`documents/api/*.json`) без БД и без тестов:
+//! в dev — `make openapi` (бинарник уже собран `cargo watch`, это доли секунды).
 
 mod ai_cli;
 mod bench;
@@ -24,8 +26,40 @@ use shared::{db, telemetry, AppState, Config};
 const DEFAULT_LOG_FILTER: &str =
     "info,nexus=debug,shared=debug,auth=debug,catalog=debug,social=debug,realtime=debug";
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// mimalloc вместо glibc malloc: память после пересборок слоя Б возвращается ОС.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Потоков для блокирующей работы (поиск Tantivy, чтение карточек). По умолчанию в tokio — до
+/// 512: под нагрузкой каждый поток держит свой кусок кучи аллокатора, и процесс раздувается.
+/// `NEXUS_BLOCKING_THREADS`, по умолчанию 8; лишние запросы ждут в очереди, а не множат память.
+/// Число рабочих потоков — `TOKIO_WORKER_THREADS` (по умолчанию — по числу ядер).
+fn main() -> anyhow::Result<()> {
+    let blocking = std::env::var("NEXUS_BLOCKING_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(8);
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(blocking)
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
+    // Контракт API — до конфига и БД: команде не нужен ни Postgres, ни .env.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("openapi") {
+        let dir = std::path::PathBuf::from(args.get(1).map_or("documents/api", String::as_str));
+        std::fs::create_dir_all(&dir)?;
+        for doc in nexus::openapi_docs() {
+            let path = dir.join(doc.file);
+            std::fs::write(&path, doc.spec.to_pretty_json()? + "\n")?;
+            println!("{}", path.display());
+        }
+        return Ok(());
+    }
     telemetry::init(DEFAULT_LOG_FILTER);
     let config = Config::from_env();
     if config.uses_dev_jwt_secret() {
@@ -65,9 +99,15 @@ async fn main() -> anyhow::Result<()> {
             BooksCommand::Cassandra(options) => run_cassandra(&state, &options).await?,
             BooksCommand::Index => {
                 let started = std::time::Instant::now();
-                let books = catalog::books::sync::rebuild(&state)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                // Псевдоним `nexus search rebuild book`.
+                let books = catalog::index::sync::rebuild(
+                    &state,
+                    catalog::index::sync::Target::Kinds(vec![catalog::models::EntityKind::Book]),
+                    &catalog::jobs::Reporter::silent(),
+                    false,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
                 println!("books indexed: {books} in {:.1?}", started.elapsed());
             }
             BooksCommand::Search(query) => run_books_search(&state, query)?,
@@ -76,17 +116,15 @@ async fn main() -> anyhow::Result<()> {
             }
             BooksCommand::Sidecar => {
                 let started = std::time::Instant::now();
-                let books = catalog::books::sync::reload_sidecar(&state)
+                let books = catalog::index::sync::reload_sidecar(&state)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 println!("books sidecar: {books} books in {:.1?}", started.elapsed());
             }
             BooksCommand::Load(options) => {
-                let dir = state
-                    .config
-                    .books_index_dir
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("BOOKS_INDEX_DIR is not set"))?;
+                let dir = catalog::index::sync::dir(&state)
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .ok_or_else(|| anyhow::anyhow!("SEARCH_INDEX_DIR is not set"))?;
                 tokio::task::spawn_blocking(move || books_load::run(&dir, &options)).await??;
             }
         }
@@ -109,63 +147,140 @@ async fn main() -> anyhow::Result<()> {
             }
             Some("rebuild") => {
                 let what = args.get(2).map(String::as_str).unwrap_or("all");
-                if !["works", "people", "all"].contains(&what) {
-                    anyhow::bail!("usage: nexus search rebuild [works|people|all]");
-                }
-                let reporter = catalog::jobs::Reporter::silent();
+                let Some(target) = catalog::index::sync::Target::parse(what) else {
+                    anyhow::bail!("usage: nexus search rebuild [book|film|series|game|painting|people|all]");
+                };
+                let force = args.iter().any(|a| a == "--force");
                 let started = std::time::Instant::now();
-                // Последовательно: память на слабом железе.
-                if what != "people" {
-                    let n = catalog::works::sync::rebuild(&state, &reporter)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    println!("works indexed: {n} in {:.1?}", started.elapsed());
-                }
-                if what != "works" {
-                    let n = catalog::people_idx::sync::rebuild(&state, &reporter)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    println!("people indexed: {n} in {:.1?}", started.elapsed());
-                }
+                let n = catalog::index::sync::rebuild(
+                    &state,
+                    target,
+                    &catalog::jobs::Reporter::silent(),
+                    force,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("catalog indexed ({what}): {n} documents in {:.1?}", started.elapsed());
             }
             Some("query") => {
                 let (Some(index), Some(q)) = (args.get(2), args.get(3)) else {
                     anyhow::bail!("usage: nexus search query <works|people> <q>");
                 };
-                let hits = match index.as_str() {
+                let index_handle = catalog::index::sync::open(&state)
+                    .ok_or_else(|| anyhow::anyhow!("SEARCH_INDEX_DIR is not set"))?
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let hits: Vec<String> = match index.as_str() {
                     "works" => {
-                        let index = catalog::works::search::index(&state)?;
-                        let query = catalog::works::index::WorksQuery {
+                        let query = catalog::index::Query {
                             q: q.clone(),
                             ..Default::default()
                         };
-                        index.search(&query, 10, 0)?
+                        index_handle
+                            .search(&query, 10, 0)?
+                            .items
+                            .iter()
+                            .map(|i| format!("{} [{}] {}", i.title, i.kind.as_str(), i.slug))
+                            .collect()
                     }
-                    "people" => match catalog::people_idx::sync::open(&state) {
-                        Some(index) => {
-                            index?
-                                .search(
-                                    q,
-                                    None,
-                                    catalog::people_idx::index::PeopleSort::Relevance,
-                                    10,
-                                    0,
-                                )?
-                                .0
-                        }
-                        None => anyhow::bail!("SEARCH_INDEX_DIR is not set"),
-                    },
+                    "people" => index_handle
+                        .search_people(q, None, catalog::index::PeopleSort::Relevance, 10, 0)?
+                        .0
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
                     _ => anyhow::bail!("usage: nexus search query <works|people> <q>"),
                 };
                 for hit in hits {
-                    println!("{}", hit);
+                    println!("{hit}");
+                }
+            }
+            Some("bench") => {
+                // Разбор запросов по шагам (как «Проверить запрос» в админке): где тратится время.
+                let index = catalog::index::sync::open(&state)
+                    .ok_or_else(|| anyhow::anyhow!("SEARCH_INDEX_DIR is not set"))?
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                if args.iter().any(|a| a == "--merge") {
+                    let started = std::time::Instant::now();
+                    let n = index.merge()?;
+                    println!("merged {n} segments into one in {:.1?}", started.elapsed());
+                }
+                let words: Vec<String> = if args.len() > 2 && !args[2].starts_with("--") {
+                    args[2..].to_vec()
+                } else {
+                    ["мастер", "маст", "матр", "дом", "любовь", "война", "star", "harry", "звёздные войны", "мастер и маргарита", "брэд питт", "властелин колец", "ночь"]
+                        .iter().map(ToString::to_string).collect()
+                };
+                for round in 0..2 {
+                    for w in &words {
+                        let query = catalog::index::Query { q: w.clone(), ..Default::default() };
+                        let started = std::time::Instant::now();
+                        let e = index.explain(&query, 24)?;
+                        let total = started.elapsed().as_micros();
+                        if round == 1 {
+                            let steps: Vec<String> = e.steps.iter().map(|s| format!("{}={}µs/{}", s.name.split(' ').next().unwrap_or(""), s.micros, s.count)).collect();
+                            println!("{w:>22} {total:>7}µs  {}", steps.join("  "));
+                        }
+                    }
+                }
+            }
+            Some("memory") => {
+                // Сколько памяти занимает открытый индекс и слой Б: RSS процесса по шагам.
+                let rss = || {
+                    std::fs::read_to_string("/proc/self/status")
+                        .ok()
+                        .and_then(|s| {
+                            s.lines()
+                                .find(|l| l.starts_with("VmRSS"))
+                                .map(|l| l.split_whitespace().nth(1).unwrap_or("0").to_string())
+                        })
+                        .and_then(|kb| kb.parse::<u64>().ok())
+                        .unwrap_or(0)
+                        / 1024
+                };
+                let anon = || {
+                    std::fs::read_to_string("/proc/self/status")
+                        .ok()
+                        .and_then(|s| {
+                            s.lines()
+                                .find(|l| l.starts_with("RssAnon"))
+                                .and_then(|l| l.split_whitespace().nth(1))
+                                .and_then(|kb| kb.parse::<u64>().ok())
+                        })
+                        .unwrap_or(0)
+                        / 1024
+                };
+                println!("start: {} MB", rss());
+                let index = catalog::index::sync::open(&state)
+                    .ok_or_else(|| anyhow::anyhow!("SEARCH_INDEX_DIR is not set"))?
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("index opened (snapshot sidecar loaded): {} MB", rss());
+                index.warm()?;
+                println!("warmed: {} MB (anon {} MB)", rss(), anon());
+                let e = index.entities().stats();
+                let p = index.people().stats();
+                println!(
+                    "entities {} | meta {} MB | orders {} MB | facets {} MB",
+                    e.entities,
+                    e.meta_bytes >> 20,
+                    e.orders_bytes >> 20,
+                    e.facets_bytes >> 20
+                );
+                for (group, f) in &e.facets {
+                    println!("  facet {group}: {} values, {} KB", f.values, f.bytes >> 10);
+                }
+                println!("people {} | {} MB", p.people, p.bytes >> 20);
+                if args.iter().any(|a| a == "--reload") {
+                    catalog::index::sync::reload_sidecar(&state)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    println!("after reload_sidecar: {} MB (anon {} MB)", rss(), anon());
                 }
             }
             Some("bench") => {
                 let rounds = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(5);
                 bench::run(&state, rounds).await?;
             }
-            _ => anyhow::bail!("usage: nexus search reindex\n       nexus search rebuild [works|people|all]\n       nexus search query <works|people> <q>\n       nexus search bench [ROUNDS]"),
+            _ => anyhow::bail!("usage: nexus search reindex\n       nexus search rebuild [book|film|series|game|painting|people|all] [--force]\n       nexus search query <works|people> <q>\n       nexus search bench [ROUNDS]"),
         }
         state.cache.wait_pending().await;
         return Ok(());
@@ -182,8 +297,8 @@ async fn main() -> anyhow::Result<()> {
     // Индексы работ и людей автоматически не перестраиваются (ни при старте, ни по расписанию):
     // только вручную — страница «Индексы» админки, `nexus search rebuild`.
     catalog::search::spawn_ratings_sync(state.clone());
-    // Книжный индекс Tantivy: пуст (первый запуск, новая схема) — строится в фоне из БД.
-    catalog::books::sync::spawn_initial(state.clone());
+    // Единый индекс каталога: пуст — поиск отдаёт пусто и пишет предупреждение (строится вручную).
+    catalog::index::sync::spawn_initial(state.clone());
     social::ratings::spawn_sync_all(state.clone());
     // Индекс коллекций: строится при старте, дальше его правят сами записи.
     social::collection_search::spawn_fill(state.clone());
@@ -435,13 +550,14 @@ async fn run_books_ranks(
 /// `nexus books search QUERY`: первые 10 книг по запросу, всего найдено и время — холодный
 /// запрос и повтор из кэша.
 fn run_books_search(state: &AppState, query: String) -> anyhow::Result<()> {
-    use catalog::books::index::BookQuery;
-    let index = catalog::books::sync::open(state)
-        .ok_or_else(|| anyhow::anyhow!("BOOKS_INDEX_DIR is not set"))?
+    use catalog::index::Query;
+    let index = catalog::index::sync::open(state)
+        .ok_or_else(|| anyhow::anyhow!("SEARCH_INDEX_DIR is not set"))?
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let query = BookQuery {
+    let query = Query {
         q: query,
-        ..BookQuery::default()
+        kinds: vec![catalog::models::EntityKind::Book],
+        ..Query::default()
     };
     let started = std::time::Instant::now();
     let found = index

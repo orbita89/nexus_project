@@ -140,7 +140,7 @@ impl From<TantivyError> for IndexError {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BookDoc {
     pub id: Uuid,
-    /// Плотный номер книги (`catalog_book_ords.ord`): ключ слоя Б.
+    /// Плотный номер книги (`catalog_entity_ords.ord`): ключ слоя Б.
     pub ord: u32,
     /// Ручное место в общем списке книг (`catalog_manual_ranks`), `0` — нет.
     pub manual_rank: u16,
@@ -457,7 +457,7 @@ impl BookDoc {
     }
 
     /// Отпечаток того, что книга кладёт в Tantivy (карточка, серия, номер). Совпал с прошлым
-    /// (`catalog_book_ords.text_hash`) — переписывать документ незачем: новые оценки, теги и
+    /// (`catalog_entity_ords.text_hash`) — переписывать документ незачем: новые оценки, теги и
     /// ручные места идут только в слой Б. FNV-1a: стабилен между версиями Rust (хранится в БД).
     pub fn text_hash(&self) -> i64 {
         let text =

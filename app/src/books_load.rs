@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use catalog::books::index::{BookIndex, BookQuery, BookSort};
+use catalog::index::{CatalogIndex as BookIndex, Query as BookQuery, Sort as BookSort};
 
 pub struct Options {
     pub seconds: u64,
@@ -69,6 +69,7 @@ fn text(q: &str) -> (BookQuery, usize) {
     (
         BookQuery {
             q: q.into(),
+            kinds: vec![catalog::models::EntityKind::Book],
             ..BookQuery::default()
         },
         0,
@@ -79,6 +80,7 @@ fn listing(sort: BookSort, offset: usize) -> (BookQuery, usize) {
     (
         BookQuery {
             sort,
+            kinds: vec![catalog::models::EntityKind::Book],
             ..BookQuery::default()
         },
         offset,
@@ -146,6 +148,7 @@ fn scenarios() -> Vec<Scenario> {
                         sort: BookSort::Recommended,
                         year_from: Some(2000),
                         year_to: Some(2010),
+                        kinds: vec![catalog::models::EntityKind::Book],
                         ..BookQuery::default()
                     },
                     0,
@@ -153,7 +156,8 @@ fn scenarios() -> Vec<Scenario> {
                 (
                     BookQuery {
                         sort: BookSort::Recommended,
-                        tag: Some("fantasy".into()),
+                        tags: vec!["fantasy".into()],
+                        kinds: vec![catalog::models::EntityKind::Book],
                         ..BookQuery::default()
                     },
                     0,
@@ -163,6 +167,7 @@ fn scenarios() -> Vec<Scenario> {
                         q: "война".into(),
                         has_cover: Some(true),
                         language: Some("ru".into()),
+                        kinds: vec![catalog::models::EntityKind::Book],
                         ..BookQuery::default()
                     },
                     0,

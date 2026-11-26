@@ -1,5 +1,5 @@
-//! Админка поисковых индексов Tantivy: один список на все индексы (`books`, `works`, `people`,
-//! `collections`, `archive`) — размер, документы, сегменты, поколения, ожидаемое число из БД — и
+//! Админка поисковых индексов Tantivy: один список на все индексы (`catalog` — единый индекс
+//! книг, фильмов, сериалов, игр, картин и людей, `collections`, `archive`) — размер, документы, сегменты, поколения, ожидаемое число из БД — и
 //! операции над ними (перестройка, слияние сегментов). Подробности книжного индекса — в
 //! [`super::books`] (`GET /admin/books/index`).
 
@@ -21,11 +21,10 @@ use utoipa::{IntoParams, ToSchema};
 
 use super::books::{IndexFieldUsage, IndexOperation};
 use crate::jobs::Reporter;
-use crate::models::VISIBLE;
 use crate::search::ReindexLock;
 
 /// Идентификаторы индексов.
-const IDS: [&str; 5] = ["works", "people", "books", "collections", "archive"];
+const IDS: [&str; 3] = ["catalog", "collections", "archive"];
 
 /// Поколение каталога индекса (`<name>.v<ms>`).
 #[derive(Debug, Serialize, ToSchema)]
@@ -73,8 +72,43 @@ pub struct SearchIndexInfo {
     pub can_merge: bool,
     /// Перестройка не здесь, а по этому адресу (коллекции живут в `social`).
     pub rebuild_path: Option<String>,
+    /// Единый индекс: документы по видам (`book`, `movie`, …, `person`) и сколько должно быть по БД.
+    pub kinds: Vec<IndexKindInfo>,
+    /// Единый индекс: слой Б (RAM) — сущности, люди, оценка памяти.
+    pub sidecar: Option<IndexSidecarInfo>,
     /// Текущая или последняя операция в этом процессе.
     pub operation: Option<IndexOperation>,
+}
+
+/// Документы одного вида в едином индексе.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IndexKindInfo {
+    #[schema(example = "movie")]
+    pub kind: String,
+    pub docs: u64,
+    /// Сколько должно быть по БД.
+    pub db_docs: Option<i64>,
+}
+
+/// Слой Б единого индекса.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IndexSidecarInfo {
+    /// Видимые сущности и люди в RAM.
+    pub entities: u64,
+    pub people: u64,
+    /// Оценка памяти: массивы, порядки, битмапы фасетов, люди.
+    pub entities_bytes: u64,
+    pub people_bytes: u64,
+    /// Фасеты сущностей: префикс ключа → значения и байты.
+    pub facets: Vec<IndexFacetInfo>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IndexFacetInfo {
+    #[schema(example = "tag")]
+    pub kind: String,
+    pub values: u64,
+    pub bytes: u64,
 }
 
 static OPERATIONS: Mutex<Option<HashMap<String, IndexOperation>>> = Mutex::new(None);
@@ -99,6 +133,7 @@ fn begin(id: &str, op: &str) -> AppResult<()> {
             finished_at: None,
             ok: None,
             error: None,
+            progress: None,
         },
     );
     Ok(())
@@ -115,6 +150,30 @@ fn finish(id: &str, result: Result<(), String>) {
         op.ok = Some(result.is_ok());
         op.error = result.err();
     }
+}
+
+/// Ход операции: шаг и счётчик из событий [`Reporter`].
+fn track(id: String, mut events: tokio::sync::mpsc::UnboundedReceiver<crate::jobs::JobEvent>) {
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            let progress = match event {
+                crate::jobs::JobEvent::Progress(p) => super::books::IndexProgress {
+                    step: p.step.title().to_owned(),
+                    done: p.done,
+                    total: p.total,
+                },
+                _ => continue,
+            };
+            if let Some(op) = OPERATIONS
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|ops| ops.get_mut(&id))
+            {
+                op.progress = Some(progress);
+            }
+        }
+    });
 }
 
 fn dir_bytes(dir: &Path) -> u64 {
@@ -136,15 +195,15 @@ struct Location {
 fn location(state: &AppState, id: &str) -> Option<Location> {
     let c = &state.config;
     match id {
-        "books" => Some(Location {
-            current: PathBuf::from(c.books_index_dir.as_deref()?),
+        "catalog" => Some(Location {
+            current: crate::index::sync::dir(state)?,
             root: None,
         }),
         "archive" => Some(Location {
             current: PathBuf::from(c.archive_dir.as_deref()?),
             root: None,
         }),
-        "works" | "people" | "collections" => {
+        "collections" => {
             let root = PathBuf::from(c.search_index_dir.as_deref()?);
             let name = IDS.iter().find(|n| **n == id)?;
             Some(Location {
@@ -247,37 +306,125 @@ fn generation_list(location: &Location) -> Vec<GenerationInfo> {
     list
 }
 
+/// Сколько документов должно быть по БД: подсчёты тяжёлые (десятки секунд на большом каталоге),
+/// а админка опрашивает список раз в 3 с, пока идёт операция. Без кэша опросы накладывались,
+/// занимали весь пул и перестройка падала с `pool timed out`. Считаем не чаще раза в
+/// [`DB_COUNTS_TTL`] и одним запросом на всех (мьютекс: остальные ждут готовый результат).
+#[derive(Clone, Default)]
+struct DbCounts {
+    entities: Option<i64>,
+    people: Option<i64>,
+    kinds: HashMap<&'static str, Option<i64>>,
+}
+
+const DB_COUNTS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+static DB_COUNTS: std::sync::OnceLock<tokio::sync::Mutex<Option<(std::time::Instant, DbCounts)>>> =
+    std::sync::OnceLock::new();
+
+async fn db_counts(state: &AppState) -> DbCounts {
+    let mut cached = DB_COUNTS
+        .get_or_init(|| tokio::sync::Mutex::new(None))
+        .lock()
+        .await;
+    if let Some((at, counts)) = cached.as_ref() {
+        if at.elapsed() < DB_COUNTS_TTL {
+            return counts.clone();
+        }
+    }
+    let totals = crate::index::sync::db_counts(&state.db).await.ok();
+    let mut counts = DbCounts {
+        entities: totals.map(|(entities, _, _)| entities),
+        people: totals.map(|(_, _, people)| people),
+        kinds: HashMap::new(),
+    };
+    for kind in crate::models::EntityKind::ALL {
+        if kind == crate::models::EntityKind::Season {
+            continue;
+        }
+        let n = crate::index::sync::db_kind_count(&state.db, kind)
+            .await
+            .ok();
+        counts.kinds.insert(kind.as_str(), n);
+    }
+    *cached = Some((std::time::Instant::now(), counts.clone()));
+    counts
+}
+
 async fn db_docs(state: &AppState, id: &str) -> Option<i64> {
     match id {
-        "works" => sqlx::query_scalar(&format!(
-            "SELECT count(*) FROM entities e WHERE {VISIBLE}
-             AND e.kind IN ('movie', 'series', 'game', 'painting')"
-        ))
-        .fetch_one(&state.db)
-        .await
-        .ok(),
-        "people" => crate::people_search::count(&state.db)
-            .await
-            .ok()
-            .map(|n| n as i64),
-        "books" => crate::books::sync::db_counts(&state.db)
-            .await
-            .ok()
-            .map(|(books, _)| books),
+        "catalog" => {
+            let counts = db_counts(state).await;
+            Some(counts.entities? + counts.people?)
+        }
         _ => None,
     }
 }
 
+/// Единый индекс: документы по видам, сколько должно быть по БД, слой Б.
+async fn catalog_details(state: &AppState) -> (Vec<IndexKindInfo>, Option<IndexSidecarInfo>) {
+    let Some(Ok(index)) = crate::index::sync::open(state) else {
+        return (Vec::new(), None);
+    };
+    let counted = {
+        let index = index.clone();
+        tokio::task::spawn_blocking(move || index.stats().ok())
+            .await
+            .ok()
+            .flatten()
+    };
+    let counts = db_counts(state).await;
+    let mut kinds = Vec::new();
+    for kind in crate::models::EntityKind::ALL {
+        if kind == crate::models::EntityKind::Season {
+            continue;
+        }
+        let docs = counted
+            .as_ref()
+            .and_then(|s| s.kinds.iter().find(|(k, _)| k == kind.as_str()))
+            .map_or(0, |(_, n)| *n);
+        let db_docs = counts.kinds.get(kind.as_str()).copied().flatten();
+        kinds.push(IndexKindInfo {
+            kind: kind.as_str().to_owned(),
+            docs,
+            db_docs,
+        });
+    }
+    kinds.push(IndexKindInfo {
+        kind: crate::index::PERSON_KIND.to_owned(),
+        docs: counted
+            .as_ref()
+            .and_then(|s| s.kinds.iter().find(|(k, _)| k == crate::index::PERSON_KIND))
+            .map_or(0, |(_, n)| *n),
+        db_docs: counts.people,
+    });
+    let entities = index.entities().stats();
+    let people = index.people().stats();
+    let sidecar = IndexSidecarInfo {
+        entities: entities.entities,
+        people: people.people,
+        entities_bytes: entities.meta_bytes + entities.orders_bytes + entities.facets_bytes,
+        people_bytes: people.bytes,
+        facets: entities
+            .facets
+            .into_iter()
+            .map(|(kind, g)| IndexFacetInfo {
+                kind,
+                values: g.values,
+                bytes: g.bytes,
+            })
+            .collect(),
+    };
+    (kinds, Some(sidecar))
+}
+
 fn meta(id: &str) -> (&'static str, &'static str) {
     match id {
-        "works" => (
-            "Работы",
-            "Фильмы, сериалы, игры, картины: поиск, фильтры, сортировки, фасеты",
-        ),
-        "people" => ("Люди", "Поиск людей: имя, основная роль, известность"),
-        "books" => (
-            "Книги",
-            "Книги: поиск и слой Б (фасеты, сортировки, ручной порядок)",
+        "catalog" => (
+            "Каталог",
+            "Единый индекс: книги, фильмы, сериалы, игры, картины и люди. Слой А — текст, карточки \
+             и фильтры с большим числом значений в Tantivy; слой Б — сортировки (файл, mmap) и \
+             мелкие фильтры (память)",
         ),
         "collections" => (
             "Коллекции",
@@ -318,6 +465,11 @@ async fn info(state: &AppState, id: &str) -> SearchIndexInfo {
         }
         None => (None, 0, None, Vec::new(), None),
     };
+    let (kinds, sidecar) = if id == "catalog" && location.is_some() {
+        catalog_details(state).await
+    } else {
+        (Vec::new(), None)
+    };
     SearchIndexInfo {
         id: id.to_owned(),
         title: title.to_owned(),
@@ -334,10 +486,12 @@ async fn info(state: &AppState, id: &str) -> SearchIndexInfo {
         disk_bytes: disk,
         schema_version: schema,
         generations,
-        can_rebuild: matches!(id, "works" | "people" | "books") && location.is_some(),
-        can_merge: matches!(id, "works" | "people" | "books" | "collections") && location.is_some(),
+        can_rebuild: id == "catalog" && location.is_some(),
+        can_merge: matches!(id, "catalog" | "collections") && location.is_some(),
         rebuild_path: (id == "collections")
             .then(|| "/social/admin/collections/index/rebuild".to_owned()),
+        kinds,
+        sidecar,
         operation: operation(id),
     }
 }
@@ -356,14 +510,12 @@ pub async fn list(
     State(state): State<AppState>,
     _admin: AdminUser,
 ) -> AppResult<Json<Vec<SearchIndexInfo>>> {
-    let (works, people, books, collections, archive) = tokio::join!(
-        info(&state, "works"),
-        info(&state, "people"),
-        info(&state, "books"),
+    let (catalog, collections, archive) = tokio::join!(
+        info(&state, "catalog"),
         info(&state, "collections"),
         info(&state, "archive"),
     );
-    Ok(Json(vec![works, people, books, collections, archive]))
+    Ok(Json(vec![catalog, collections, archive]))
 }
 
 /// Параметры перестройки.
@@ -375,14 +527,15 @@ pub struct RebuildQuery {
     pub force: bool,
 }
 
-/// Перестроить индекс из БД в фоне: `works`, `people`, `books` или `all` (работы, люди, книги).
-/// Ход — в `operation` у `GET /admin/search/indexes`. Пока идёт перестройка, поиск читает старое
-/// поколение.
+/// Перестроить индекс из БД в фоне: `catalog` (или `all`) — всё, либо только вид (`book`,
+/// `movie`, `series`, `game`, `painting`) или `people`. Ход — в `operation` у
+/// `GET /admin/search/indexes`. Вид заменяется одним коммитом (поиск не видит дыры); если новых
+/// документов меньше `SEARCH_REINDEX_MIN_PERCENT`% прежних, коммита нет (`force` — применить).
 #[utoipa::path(
     post, operation_id = "rebuild_search_index", path = "/admin/search/indexes/{id}/rebuild", tag = "catalog-admin",
     security(("bearer" = [])),
     params(
-        ("id" = String, Path, description = "`works`, `people`, `books` или `all`"),
+        ("id" = String, Path, description = "`catalog`, `all`, `book`, `movie`, `series`, `game`, `painting` или `people`"),
         RebuildQuery,
     ),
     responses(
@@ -400,72 +553,82 @@ pub async fn rebuild(
     UrlPath(id): UrlPath<String>,
     Query(query): Query<RebuildQuery>,
 ) -> AppResult<StatusCode> {
-    let key = match id.as_str() {
-        "works" | "people" | "books" | "all" => id.clone(),
-        _ => {
-            return Err(AppError::BadRequest(
-                "id: works, people, books or all".into(),
-            ))
-        }
-    };
-    if key != "all" && location(&state, &key).is_none() {
+    let target = match id.as_str() {
+        "catalog" => Some(crate::index::sync::Target::All),
+        other => crate::index::sync::Target::parse(other),
+    }
+    .ok_or_else(|| {
+        AppError::BadRequest(
+            "id: catalog, all, book, movie, series, game, painting or people".into(),
+        )
+    })?;
+    if location(&state, "catalog").is_none() {
         return Err(AppError::Unavailable("index is not enabled".into()));
     }
+    let key = "catalog".to_owned();
     let force = query.force;
     begin(&key, "rebuild")?;
     // Блокировка перестройки — до фона: «уже идёт» — обычный 409.
-    let lock = if key == "books" {
-        None
-    } else {
-        match ReindexLock::acquire(&state).await {
-            Ok(lock) => Some(lock),
-            Err(error) => {
-                finish(&key, Err(error.to_string()));
-                return Err(error.into());
-            }
+    let lock = match ReindexLock::acquire(&state).await {
+        Ok(lock) => lock,
+        Err(error) => {
+            finish(&key, Err(error.to_string()));
+            return Err(error.into());
         }
     };
-    tracing::info!(admin_id = %admin.id, index = %key, force, "search index rebuild started");
+    tracing::info!(admin_id = %admin.id, index = %id, force, "search index rebuild started");
     tokio::spawn(async move {
-        let reporter = Reporter::silent();
-        let result: Result<(), String> = async {
-            match key.as_str() {
-                "works" => crate::works::sync::rebuild_with(&state, &reporter, force)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string()),
-                "people" => crate::people_idx::sync::rebuild_with(&state, &reporter, force)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string()),
-                "books" => crate::books::sync::rebuild(&state)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string()),
-                _ => {
-                    crate::works::sync::rebuild_with(&state, &reporter, force)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    crate::people_idx::sync::rebuild_with(&state, &reporter, force)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    if crate::books::sync::enabled(&state) {
-                        crate::books::sync::rebuild(&state)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                    }
-                    Ok(())
-                }
+        let started = std::time::Instant::now();
+        let (reporter, events) = Reporter::channel();
+        track(key.clone(), events);
+        let result = crate::index::sync::rebuild(&state, target, &reporter, force)
+            .await
+            .map_err(|e| e.to_string());
+        let elapsed_secs = started.elapsed().as_secs_f64();
+        match &result {
+            Ok(docs) => tracing::info!(index = %key, docs, elapsed_secs, "search index rebuilt"),
+            Err(error) => {
+                tracing::warn!(index = %key, %error, elapsed_secs, "search index rebuild failed");
             }
         }
-        .await;
-        if let Err(error) = &result {
-            tracing::warn!(index = %key, %error, "search index rebuild failed");
-        }
-        if let Some(lock) = lock {
-            lock.release(&state).await;
-        }
+        let result = result.map(|_| ());
+        lock.release(&state).await;
         finish(&key, result);
+    });
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Пересобрать слой Б единого индекса (фасеты, сортировки, ручные места, люди) из БД — в фоне,
+/// Tantivy не трогается.
+#[utoipa::path(
+    post, operation_id = "reload_catalog_sidecar", path = "/admin/search/indexes/catalog/sidecar", tag = "catalog-admin",
+    security(("bearer" = [])),
+    responses(
+        (status = 202, description = "Пересборка запущена"),
+        (status = 401, description = "Нет токена", body = ErrorBody),
+        (status = 403, description = "Нужна роль admin", body = ErrorBody),
+        (status = 409, description = "Уже идёт операция", body = ErrorBody),
+        (status = 503, description = "Индекс выключен", body = ErrorBody),
+    )
+)]
+pub async fn reload_sidecar(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+) -> AppResult<StatusCode> {
+    if location(&state, "catalog").is_none() {
+        return Err(AppError::Unavailable("index is not enabled".into()));
+    }
+    begin("catalog", "sidecar")?;
+    tracing::info!(admin_id = %admin.id, "catalog sidecar reload started");
+    tokio::spawn(async move {
+        let result = crate::index::sync::reload_sidecar(&state)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        if let Err(error) = &result {
+            tracing::warn!(%error, "catalog sidecar reload failed");
+        }
+        finish("catalog", result);
     });
     Ok(StatusCode::ACCEPTED)
 }
@@ -475,7 +638,7 @@ pub async fn rebuild(
 #[utoipa::path(
     post, operation_id = "merge_search_index", path = "/admin/search/indexes/{id}/merge", tag = "catalog-admin",
     security(("bearer" = [])),
-    params(("id" = String, Path, description = "`works`, `people`, `books` или `collections`")),
+    params(("id" = String, Path, description = "`catalog` или `collections`")),
     responses(
         (status = 202, description = "Слияние запущено"),
         (status = 400, description = "Неизвестный индекс", body = ErrorBody),
@@ -490,19 +653,26 @@ pub async fn merge(
     AdminUser(admin): AdminUser,
     UrlPath(id): UrlPath<String>,
 ) -> AppResult<StatusCode> {
-    if !matches!(id.as_str(), "works" | "people" | "books" | "collections") {
-        return Err(AppError::BadRequest(
-            "id: works, people, books or collections".into(),
-        ));
+    if !matches!(id.as_str(), "catalog" | "collections") {
+        return Err(AppError::BadRequest("id: catalog or collections".into()));
     }
     let Some(location) = location(&state, &id) else {
         return Err(AppError::Unavailable("index is not enabled".into()));
     };
+    let catalog = if id == "catalog" {
+        match crate::index::sync::open(&state) {
+            Some(Ok(index)) => Some(index),
+            _ => return Err(AppError::Unavailable("index is not enabled".into())),
+        }
+    } else {
+        None
+    };
     begin(&id, "merge")?;
     tracing::info!(admin_id = %admin.id, index = %id, "search index merge started");
     tokio::spawn(async move {
-        let result = tokio::task::spawn_blocking(move || {
-            shared::tantivy::merge_all(&location.current).map_err(|e| e.to_string())
+        let result = tokio::task::spawn_blocking(move || match catalog {
+            Some(index) => index.merge().map(|_| ()).map_err(|e| e.to_string()),
+            None => shared::tantivy::merge_all(&location.current).map_err(|e| e.to_string()),
         })
         .await
         .map_err(|e| e.to_string())

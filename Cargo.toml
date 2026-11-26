@@ -92,7 +92,7 @@ flate2 = "1"
 # Читалка книг: извлечение EPUB из архивов .arx (Jubako, zstd).
 libarx = { version = "0.4.2", default-features = false, features = ["zstd"] }
 relative-path = "2"
-tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "stemmer"] }
+tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "stemmer"] }
 # Слой Б книжного поиска (catalog::books::sidecar): фасеты на битовых масках и атомарная подмена
 # состояния в RAM без блокировок читателей.
 roaring = "0.10"

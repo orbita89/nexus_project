@@ -757,6 +757,73 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 таблица, а не `metadata`: обновление ~1 млн строк `metadata` перестраивает GIN-индексы (25 мин), а
 пересчёт балла после правки формулы должен идти минуты.
 
+### `catalog_rank_kinds` ✅ — сортировка по видам (2026-11-25)
+
+Строка на вид: `movie`, `series`, `book`, `game`, `painting`, `person`. `weight_quality`,
+`weight_popularity`, `weight_recency`, `weight_site`, `weight_complete` (0–10), `search_popularity`
+(0–1), `trust_votes`, `half_life_years`, `min_votes`, `updated_at`, `updated_by`. Миграция
+`20261218100000_catalog_rank_kinds.sql` (фильмы — из `catalog_ranking`). Балл всех видов
+(`rank_kinds::recompute_kind`) = wq·q + wp·p + wr·r + ws·s + wc·c: q — байесовский рейтинг IMDb
+(голосов ≥ `min_votes`) или оценок сайта (`entity_ratings`), p — `ln(1+x)` к 99-му перцентилю вида
+(TMDB popularity; у книг — работы самого плодовитого автора), r — свежесть (не вышедшие — 0), s — число
+оценок сайта, c — обложка 0,6 + описание 0,4. Пишется в `entity_stats.quality`/`rank_score` (строки
+книг, игр, картин создаются), один проход на вид, `work_mem` 64 МБ без параллельных воркеров
+(`/dev/shm` контейнера — 64 МБ). `ranking::recompute` («Обновить рейтинги», старый
+`PUT /admin/ranking/stream`) считает все виды; старый эндпоинт пишет и строку `movie`.
+`search_popularity` — доля популярности в релевантности поиска: `(1 − w)·текст + w·популярность`
+(`index::weights`, RAM, загрузка при старте и после сохранения). У `person` — только она.
+
+**Память слоя Б (2026-11-26).** Цель — минимум RAM и CPU на слабом проде.
+- Схема `catalog-4`: `title_key` — 8-байтный хеш FNV-1a нормализованного названия (`schema::title_key_term`,
+  поле bytes), а не строка: словарь был ~53 МБ. Ключ сортировки названия пропускает знаки в начале, названия
+  без букв и цифр — в конце порядка `title`.
+- Схема `catalog-3`. Поле `facet` слоя А (`STRING`, `sidecar::text_facets`): `person:<slug>`, `role:<роль>:<slug>`,
+  `studio:<ключ>`, `studio_slug:<slug>`, `publisher:<ключ>`, `museum:<ключ>`, `award:<slug>`, `award:<slug>:<год>`.
+  Фильтры `person`/`role`/`studio`/`studio_slug`/`publisher`/`museum`/`award` — `BooleanQuery` из
+  `TermQuery` в `CatalogIndex::find` (`sidecar::text_facet_terms`); битовыми картами в RAM это было ~530 тыс.
+  значений и ~100 МБ. В памяти остались фасеты с малым числом значений: вид, вид текста, тег, страна, язык,
+  год, `awardyear`, `awarded`, «есть обложка».
+- Файл колонок `sidecar-entities.cols` (`index::columns`): `SortMeta`, `release_day`, `base_rank` и 8 порядков
+  (`recommended`, `new`, `title`, `popular`, `rating`, `trending`, `top_rated`, `awarded`) — номера и готовые
+  позиции. `sidecar-people.cols`: известность, порядки по известности и по имени. Читаются через mmap
+  Tantivy (`OwnedBytes` + `bytemuck`, без своего `unsafe`): в куче их нет. `sidecar-entities.bin` (формат
+  `NXCATE03`) — фасеты и таблицы подсказок; `sidecar-people.bin` (`NXCATP02`) — видимые и роли.
+- Подсказки фильтров (`HintTable`): общий строковый пул и строки «ключ, название, счётчики всего и по видам»;
+  у студий, издателей и музеев счётчики набирает `SidecarBuilder`, у тегов и стран — из битовых карт.
+- После сборки слой Б пишется файлами и сразу перечитывается отображённым (`set_entities`, `set_people`):
+  собранная копия в куче освобождается.
+- Кэши: ответов 128, рядов 128 (ряды длиннее 4096 не кэшируются), людей 64, блоков хранилища карточек — 4
+  на сегмент (`doc_store_cache_num_blocks`, по умолчанию Tantivy 100 × 64 КБ).
+- Аллокатор процесса — mimalloc (`app/src/main.rs`); на проде `MIMALLOC_PURGE_DELAY=0`. Потоков для
+  блокирующей работы — `NEXUS_BLOCKING_THREADS` (по умолчанию 8, на проде 4; в tokio по умолчанию 512).
+- Замер release в режиме прода (2026-11-26, 750 тыс. сущностей, 1,2 млн людей): после старта RSS 161 МБ,
+  куча 73 МБ (остальное — страницы файлов индекса, вытесняемые ОС); `pnpm search:load` 8 потоков —
+  118 запр/с, p50 45 мс, p99 356 мс, 0 ошибок; куча после нагрузки и паузы — 112 МБ.
+- `SEARCH_INDEX_READONLY=1` (прод): ни перестройки, ни пересборки слоя Б, ни правок документов, ни
+  `sidecar_loop`, ни синхронизации оценок; эндпоинты перестройки отвечают ошибкой `index is read-only`.
+  Индекс собирается локально (по дампу прод-базы) и выкладывается готовой папкой.
+- Замеры: `nexus search memory [--reload]`, `GET /admin/search/sidecar` (части с меткой «в куче / в файле»),
+  нагрузка — `pnpm search:load` во фронте (`BASE`, `CONCURRENCY`, `SECONDS`).
+- Прогрев (`CatalogIndex::warm`) открывает и первую страницу людей каждой роли.
+
+**Скорость текстового поиска (2026-11-26).** Замер — `nexus search bench [--merge] [запросы…]` (release,
+шаги как в «Проверить запрос»). Опечатки (`FuzzyTermQuery` по `title` и `people`) — только в резервном запросе
+(строгий пуст): нечёткий поиск обходит словарь поля в каждом сегменте и стоил ~×10 к основному шагу. Проверки
+«точное название» и «совпало в названии» (`CatalogIndex::title_sets`) — сборщиком `OrdSet` без оценок BM25 и
+только среди найденных; запрос «в названии» строится из того же разбора (`TextQueries` — тройка), словарь для
+автодополнения просматривается один раз. В `blend` вид и популярность совпадения считаются один раз.
+Итог (1 сегмент после `--merge`, 2 млн документов): обычный запрос 1,5–6 мс, с опечаткой 9–17 мс. Перед
+выкладкой на прод индекс сливается в один сегмент.
+
+**Релевантность поиска (2026-11-25, уточнено 2026-11-26).** Работы (`EntitySidecar::rank_hits`): уровни — точное название
+с ручным местом, сильное совпадение с ручным местом, совпало в названии (точное название без места — здесь же,
+с долей текста 1: «мастер» — популярный «Мастер и Маргарита» выше малоизвестного фильма «Мастер») (`QueryBuilder::title_only`, второй сбор
+совпадений), остальные (только люди/серия). Внутри уровня `(1 − w)·√(оценка / лучшая в группе) +
+w·(балл / лучший балл вида среди найденных)`, w — `search_popularity` вида. Люди
+(`PeopleSidecar::rank_hits`): `(1 − w)·√(оценка/лучшая) + w·ln(1+fame)/ln(1+max fame)`.
+Популярность в слое Б — `rank_score × 10⁶` (`SortMeta::popularity`), `base_rank` — балл и дата у
+всех видов (у книг прежняя формула заменена баллом вида).
+
 ### `catalog_ranking` ✅ — настройки сортировки
 
 Одна строка (`id = true`): `weight_quality` (0.5), `weight_popularity` (0.3), `weight_recency` (0.2),
@@ -867,14 +934,24 @@ TRIGGER` держал бы `entities` эксклюзивно — сайт сто
 **Индекс:** `banners_active_idx` `(priority DESC, position) WHERE is_active` — публичный список
 (`banners_page_active_idx` удалён вместе с `page`).
 
-### `catalog_book_ords` ✅ — номер книги для слоя Б (2026-11-18)
+### `catalog_entity_ords` ✅ — номер сущности для слоя Б (бывшая `catalog_entity_ords`, 2026-11-25)
 
-Миграция `20261209100000_catalog_book_ranks.sql`. `entity_id uuid PK → entities ON DELETE
-CASCADE`, `ord integer GENERATED ALWAYS AS IDENTITY (MINVALUE 0 START WITH 0) UNIQUE` — плотный
-номер книги (индекс в массивах и бит в RoaringBitmap слоя Б, колонка `ord` в Tantivy; выдаётся
-один раз, перестройка индекса его не меняет), `text_hash bigint` — отпечаток текста, записанного в
-Tantivy (`NULL` — книги в индексе нет), `created_at`, `updated_at` (триггер `set_updated_at()`).
-Пишет только `books::sync`.
+Миграция `20261217100000_catalog_unified_ords.sql`: `ALTER TABLE catalog_book_ords RENAME TO
+catalog_entity_ords` (+ триггер `catalog_entity_ords_set_updated_at`, индексы `*_pkey`, `*_ord_key`, FK
+переименованы; номера книг сохранены; последовательность identity осталась `catalog_book_ords_ord_seq`).
+`entity_id uuid PK → entities ON DELETE CASCADE`, `ord integer GENERATED ALWAYS AS IDENTITY (MINVALUE 0
+START WITH 0) UNIQUE` — плотный номер сущности любого вида (индекс в массивах и бит в RoaringBitmap
+слоя Б, колонка `ord` в Tantivy; выдаётся один раз, перестройка индекса его не меняет), `text_hash bigint` —
+отпечаток текста, записанного в Tantivy (`NULL` — сущности в индексе нет), `created_at`, `updated_at`
+(триггер `set_updated_at()`). Пишет только `index::sync`.
+
+### `catalog_person_ords` ✅ — номер человека для слоя Б (2026-11-25)
+
+Та же миграция. `person_id uuid PK → people ON DELETE CASCADE`, `ord integer GENERATED ALWAYS AS IDENTITY
+(MINVALUE 0 START WITH 0) UNIQUE`, `text_hash bigint`, `created_at`, `updated_at` (триггер
+`catalog_person_ords_set_updated_at`). Второе пространство номеров: в Tantivy у человека колонка `ord`
+несёт бит `PERSON_FLAG = 1 << 32`, так что документ однозначно определяется одним числом и удаляется
+одним термом. Пишет только `index::sync`.
 
 ### `catalog_manual_ranks` ✅ — ручной порядок (2026-11-18)
 
@@ -1288,14 +1365,57 @@ data: {"type":"done","ok":true,"entity":{ ...карточка как в GET /ent
 | `nexus media` (отдельный процесс) | изменённые сущности и их участники |
 | `make seed` (SQL в обход API) | перестройка |
 
-## Поиск на Tantivy (Meilisearch удалён, 2026-11-24)
+## Единый индекс каталога `catalog` (2026-11-25; заменил `books/`, `works.v*`, `people.v*`)
 
-Meilisearch полностью удалён: сервис из compose и CI, `MEILI_*`, `shared::search`, `state.search`. Весь поиск — Tantivy; корень индексов `SEARCH_INDEX_DIR` **обязателен** (без него поиск, перестройка и промоушен отвечают 503 / шаг `skipped`). Раскладка: `books/` (или `BOOKS_INDEX_DIR`), `people.v<ms>`, `works.v<ms>`, `archive/` (`ARCHIVE_DIR` по умолчанию), `collections.v<ms>` (social). Указатель текущего поколения — `<name>.current`; смена поколения атомарна (`shared::tantivy::generations::switch`: `*.current.tmp` + `rename`, хранятся два поколения).
-- `shared::tantivy` — анализаторы `ru_stem`/`ru_raw`, `normalize_key`, стоп-слова, `open_versioned` (файл версии схемы `nexus-schema`), `blocking`, `generations`, `strict_query` → при 0 хитов `fuzzy_query`, `prefix_query`.
-- `works/` — индекс `works` (`works-1`): movie/series/game/painting, `VISIBLE`. Термы-фильтры (STRING): `kind`, `tags`, `studios`, `publishers`, `museums`, `countries`, `studio_slugs`, `award_slugs`, `award_years`, `awarded`, `slug`; FAST: `year`, `release_ts`, `rank_score`, `popularity`, `quality`, `nexus_rating_avg`, `nexus_ratings_count`, `award_wins`, `title_sort`. STORED `card` = `EntitySummary`: выдача не ходит в PG. Сортировки как `SearchSort` (`random` — случайное окно). Фильтр `person` — `slug IN` по `entity_credits` из PG. Фасеты `/search/studios|publishers|museums|countries|tags` — словарь термов с `doc_freq` (внутри `kind` — пересчёт `Count`). Общая выдача без `kind` чередует книги и работы «2 работы — книга».
-- `people_idx/` — индекс `people` (`people-1`): `full_name`, `original_name`, `known_for`, `fame`; контракт `PeoplePage` (счётчики ролей, чередование ролей без запроса).
-- Правки: `publish::run` → `search::update_entities` → `books::sync::update` + `works::sync::update`; `people_search::update_index` → `people_idx::sync::update`. Перестройка (`POST /admin/search/reindex[/stream]`, `nexus search rebuild [works|people|all]`; **только вручную**: ни при старте, ни по расписанию индексы работ и людей не перестраиваются, книги и коллекции строятся при старте только если индекс пуст): шаги SSE `works`, `people`, `isr`; новое поколение должно быть не меньше `SEARCH_REINDEX_MIN_PERCENT`% текущего, иначе поколение не переключается (409 / шаг `failed`), `force` пропускает; правки во время перестройки повторяются после переключения; блокировки Redis `catalog:reindex-lock` / `catalog:reindex-running`. Ответ `ReindexResult`: `indexed` = работ, `people_indexed`, `previous_count` = работ до, `previous_version` = прежнее поколение `works.v<ms>`, `deleted` = удалённые поколения. Книги — отдельно (`nexus books index`). Поиск: `nexus search query <works|people> <q>`.
-- Архив: promote/demote идут через `publish::run`, поэтому добавляют/убирают документ в `works`.
+Один индекс Tantivy `<SEARCH_INDEX_DIR>/catalog` (`BOOKS_INDEX_DIR` больше не используется) для книг, фильмов,
+сериалов, игр, картин и людей; модуль `catalog::index`. Коллекции (`collections.v*`, social) и холодный архив
+(`archive/`) не тронуты. Корень `SEARCH_INDEX_DIR` обязателен (без него поиск — 503). Поколений каталогов
+(`*.v<ms>`, `.current`) у `catalog` нет: перестройка — один атомарный `commit`.
+- **Слой А — Tantivy**, схема `catalog-1` (файл `nexus-schema`; смена версии пересоздаёт индекс пустым).
+  Поля: `kind` (STRING: `book`/`movie`/`series`/`game`/`painting`/`person`), `ord` (u64 `INDEXED | FAST`; у людей
+  с `PERSON_FLAG`), `title` (RU_STEM, `WithFreqsAndPositions`: название + оригинальное + синонимы; у людей имя и
+  оригинальное имя), `title_key` (STRING: `normalize_key` названия целиком), `people` (RU_RAW, `WithFreqs`, без
+  fieldnorms: авторы книги, режиссёры и первые `TOP_CREDITS = 6` по `position` у остальных), `extra` (RU_RAW,
+  `Basic`, без fieldnorms: серия книги, студии, «известен по…» у людей), `card` (STORED: `EntitySummary` / `PersonHit`
+  в JSON). Больше полей нет (нет `id`, `slug`, `title_raw`, `title_sort`, `studios`, `tags`, `award_*`, f64 FAST).
+  Doc store: Zstd уровня 3, блок 64 КиБ (`tantivy` feature `zstd-compression`). Удаление/обновление документа —
+  `delete_term` по `ord`. Карточка читается `TermQuery` по `ord`, slug в индексе нет: slug → номер через
+  `catalog_entity_ords JOIN entities` (`index::search::ords_of_slugs`).
+- **Слой Б — RAM** (`ArcSwap`, снимок на диск `sidecar-entities.bin` `NXCATE01` и `sidecar-people.bin` `NXCATP01`):
+  `EntitySidecar` — `SortMeta` (8 байт), `Facets` (`RoaringBitmap`): `kind:<вид>`, `tag:<slug>`, `country:<код>`,
+  `studio:<ключ>`, `studio_slug:<slug>`, `publisher:<ключ>`, `museum:<ключ>`, `award:<slug>`, `award:<slug>:<год>`,
+  `awardyear:<год>`, `awarded`, `person:<slug>` и `role:<роль>:<slug>` (только у книг), `lang:<код>`, `form:<вид текста>`
+  (только у книг), годы — `BTreeMap<i32, RoaringBitmap>`; подписи студий/издателей/музеев и списки подсказок.
+  Порядки (все по всем видимым сущностям, позиции `pos` строятся лениво для узких фильтров): `recommended` (ручное место →
+  `base_rank`), `new`/`soon`, `title`, `popular`, `rating`, `trending`, `top_rated`, `awarded`. `PeopleSidecar` — видимые,
+  `known_for:<роль>`, порядки `fame`, `name`, известность `f32` по номерам. Числовые значения живут только здесь.
+- **Запрос** `index::Query` (текст, `kinds`, `tags`, `countries`, годы, `studio`, `studio_slug`, `publisher`, `museum`,
+  `award`, `award_year`, `awarded`, `person`+`role` (книги), `only_ords` (работы человека из БД для остальных видов),
+  `exclude_ords`, `has_cover`, `language`, `forms`) и `Sort` (10 сортировок `SearchSort`). Логика текста — `index/query.rs`
+  (бывшая книжная): слова через И, поля слова через ИЛИ, стеммер, префикс последнего слова по словарю (≤ 64 термов; для
+  `title` берутся и сырой префикс, и его стем), опечатки (расстояние 1) только если строгий запрос пуст, точное название
+  и фраза выше. Без текста Tantivy не вызывается; с текстом `OrdHits` (`index/collect.rs`) отсеивает по фильтру слоя Б.
+  Запрос короче 3 символов не ищется только для `kinds == [book]` (у остальных видов — с первой буквы).
+  Релевантность: `rank_hits` (точное название > сильные совпадения с ручным местом > оценка × (1 + ln(1+известность)/15)).
+  Общий кэш ответов: ключ — поколение (отпечаток индекса + слой Б) и запрос; ряды выдачи по 1000 и более.
+- **Синхронизация** `index/sync.rs`: `rebuild(state, Target, report, force)` (`Target`: `All` | `Kinds([..])` | `People`;
+  `delete_term(kind)` или `delete_all` + запись + один `commit`; гард `SEARCH_REINDEX_MIN_PERCENT` — **до** коммита, иначе
+  `rollback` и `BuildError::TooSmall{new,before}`; `Kinds` затем пересобирает слой Б одним проходом `reload_sidecar`,
+  `All`/`People` собирают слой Б тем же проходом; правки во время перестройки — в журнал и повтор после), `reload_sidecar`
+  (слой Б без записи в Tantivy), `update(entity_ids)` / `update_people(person_ids)` (документ переписывается только при смене
+  `TextDoc::text_hash`; скрытые и удалённые удаляются сразу; слой Б догоняет фоновая задача не чаще `SIDECAR_MIN_INTERVAL`
+  = 5 мин и раз в сутки), `apply_ranks` (ручные места, опрос `RANKS_POLL`), `spawn_initial` (**автоматической перестройки нет**:
+  пустой индекс при старте → `warn`, поиск отдаёт пусто; снимка слоя Б нет → собирается из БД). Правки:
+  `publish::run` → `search::update_entities` → `index::sync::update`; `people_search::update_index` → `index::sync::update_people`.
+- **Перестройка**: кнопка в админке (`POST /admin/search/indexes/{id}/rebuild`), `POST /admin/search/reindex[/stream]` (шаги SSE
+  `works`, `people`, `isr`; `ReindexResult`: `indexed` = документы movie/series/game/painting, `people_indexed`,
+  `previous_count`, `previous_version` = `""`, `deleted` = `[]`), `nexus search rebuild [book|film|series|game|painting|people|all]
+  [--force]`, `nexus books index` (= `rebuild book`), `nexus books sidecar`, `nexus search query <works|people> <q>`,
+  `nexus search bench`, `nexus books load`. Блокировки Redis `catalog:reindex-lock` / `catalog:reindex-running`.
+- Контракты HTTP не менялись: `GET /search` (общая выдача без `kind` по-прежнему чередует «2 работы — книга» двумя запросами к
+  одному индексу), `/entities/{slug}/neighbors`, `similar`, `/search/studios|publishers|museums|countries|tags` (подсказки из
+  слоя Б, внутри `kind` — пересчёт по верхушке 2000), `/search/people`.
+- Архив: promote/demote идут через `publish::run`, поэтому добавляют/убирают документ в `catalog`.
 - Тесты: `test_utils::with_index` (временный `SEARCH_INDEX_DIR`), `app/tests/{works_tantivy,people_tantivy}.rs`.
 
 > Разделы «Поиск», «Что лежит в индексе», «Поиск людей», «Перестройка поиска» и часть остальных ниже написаны для Meilisearch и **устарели**: теневые индексы `entities_v<ms>`, swap, ротация, `MEILI_*`, настройки ранжирования Meilisearch. Актуально описание выше; контракт эндпоинтов и параметров поиска не менялся.
@@ -1762,7 +1882,7 @@ Meilisearch-пути игнорируется. В слое Б — фасеты `
 `award`, `award_year`, `awarded=true` дают пустую выдачу; `GET /search/tags?kind=book` отдаёт до
 300 тегов (жанров FB2 больше двухсот), `q` там игнорируется, как и раньше.
 
-**Как ищет** (логика перенесена из настольной библиотеки Cassandra, `books/index.rs`):
+**Как ищет** (логика перенесена из настольной библиотеки Cassandra, `index/query.rs`):
 
 - слова запроса — через И, поля одного слова (название, автор, серия) — через ИЛИ; до 16 слов,
   до 200 символов;
@@ -1782,7 +1902,7 @@ Meilisearch-пути игнорируется. В слое Б — фасеты `
   (`person_credit_counts.active_credits`, максимум по авторам книги) — из книг с одинаковым
   названием первой встаёт книга известного автора.
 
-**Два слоя** (2026-11-18, `books/index.rs` + `books/sidecar.rs`): Tantivy (слой А) держит только
+**Два слоя** (2026-11-18, `index/query.rs` + `index/sidecar.rs`): Tantivy (слой А) держит только
 редко меняющееся — текст для поиска, карточку и номер книги; фасеты, сортировки и ручной порядок —
 в слое Б в RAM (`ArcSwap<Sidecar>`), он собирается из PostgreSQL и подменяется атомарно, не трогая
 индекс. **Запрос в PostgreSQL не ходит:** без текста Tantivy не вызывается вовсе (битовые маски
@@ -1793,7 +1913,7 @@ Meilisearch-пути игнорируется. В слое Б — фасеты `
 `card` — хранимая строка выдачи в JSON (`id`, `slug`, `title`, `original_title`, `release_date`,
 `cover_url`, размеры обложки, `authors`; выдача без похода в PostgreSQL), текст `title` /
 `title_raw` / `title_key`, `author` / `author_raw` / `author_key`, `series`, и `ord` (u64-колонка,
-номер книги из `catalog_book_ords`). Аннотации в индексе нет — карточка книги читается из БД
+номер книги из `catalog_entity_ords`). Аннотации в индексе нет — карточка книги читается из БД
 (`GET /entities/{slug}`) и раздаётся фронтендом как статическая страница. Фильтровых и
 сортировочных полей в индексе больше нет (`tags`, `credits`, `publisher*`, `language`,
 `has_cover`, `year`, `release_day*`, `popularity`, `sort_*` удалены в `books-4`).
@@ -1812,7 +1932,7 @@ Meilisearch-пути игнорируется. В слое Б — фасеты `
 - подсказки (теги и издательства со счётчиками) — готовые списки;
 - поколение (`generation`) — часть ключа кэша выдачи: подмена слоя Б сбрасывает кэш сама.
 
-Снимок слоя Б пишется на диск (`<BOOKS_INDEX_DIR>/sidecar.bin`, формат `NXSIDE02` — с 2026-11-22 фасеты `form:*`; снимок `NXSIDE01` не читается и пересобирается из БД, атомарно через
+Снимок слоя Б пишется на диск (`<SEARCH_INDEX_DIR>/catalog/sidecar-entities.bin`, формат `NXSIDE02` — с 2026-11-22 фасеты `form:*`; снимок `NXSIDE01` не читается и пересобирается из БД, атомарно через
 `.tmp` + rename) при каждой подмене и читается при открытии индекса: сервер после рестарта и бенч
 `nexus books load` работают без похода в БД.
 
@@ -1841,14 +1961,14 @@ Meilisearch-пути игнорируется. В слое Б — фасеты `
 `offset` до 100 000.
 
 **Подсказки** — из слоя Б: теги и издательства со счётчиками видимых книг. Издательства — по
-части названия без учёта регистра и `ё`, сначала начинающиеся с неё. `BookIndex::facet_counts`
+части названия без учёта регистра и `ё`, сначала начинающиеся с неё. `CatalogIndex::facet_counts`
 (счётчики значений фасета среди книг под запрос) — есть в индексе, в HTTP пока не выведен.
 
 **Кэш:** до 512 ответов поиска (страницы до 100 карточек) и 256 рядов выдачи (номера книг) в
 памяти процесса; ключ — запрос, `limit`, `offset` и поколение = отпечаток сегментов индекса ×
 поколение слоя Б; сбрасывается сам при коммите в индекс и при подмене слоя Б.
 
-**Синхронизация** (`books/sync.rs`):
+**Синхронизация** (`index/sync.rs`):
 
 - Номер книги — `catalog_book_ords.ord` (identity с 0): выдаётся при первом чтении книги
   (`INSERT … WHERE NOT EXISTS` — номера не тратятся на уже известные книги), не меняется.
@@ -2081,9 +2201,14 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 
 | Метод | Путь | Что делает |
 |---|---|---|
-| GET | `/admin/search/indexes` | admin | Все индексы Tantivy (`works`, `people`, `books`, `collections`, `archive`): `docs`, `db_docs` (ожидаемое по БД), `segments`, `deleted_docs`, `disk_bytes`, `schema_version`, `generations[]` (`name`, `current`, `bytes`), `can_rebuild`, `can_merge`, `rebuild_path`, `operation` (ход последней операции в процессе) → `Vec<SearchIndexInfo>` |
-| POST | `/admin/search/indexes/{id}/rebuild?force=` | admin | Перестройка в фоне: `id` = `works` \| `people` \| `books` \| `all` (работы, люди, книги). 202; 400 — другой `id`; 409 — уже идёт операция/перестройка (блокировка `catalog:reindex-running`); 503 — индекс выключен. Ход — `operation` в списке |
-| POST | `/admin/search/indexes/{id}/merge` | admin | Слияние сегментов (`shared::tantivy::merge_all`), `id` = `works` \| `people` \| `books` \| `collections`. 202 / 400 / 409 / 503 |
+| GET | `/admin/search/indexes` | admin | Индексы Tantivy (`catalog`, `collections`, `archive`): `docs`, `db_docs` (ожидаемое по БД), `segments`, `deleted_docs`, `disk_bytes`, `schema_version`, `generations[]`, `can_rebuild`, `can_merge`, `rebuild_path`, `operation` (`op`, `started_at`, `finished_at`, `ok`, `error`, `progress` — `step`/`done`/`total` идущей перестройки); числа по БД кэшируются на 60 с (опрос админки не забивает пул); у `catalog` ещё `kinds[]` (`kind`, `docs`, `db_docs`) и `sidecar` (`entities`, `people`, `entities_bytes`, `people_bytes`, `facets[]`) → `Vec<SearchIndexInfo>` |
+| POST | `/admin/search/indexes/{id}/rebuild?force=` | admin | Перестройка в фоне: `id` = `catalog` \| `all` \| `book` \| `movie` \| `series` \| `game` \| `painting` \| `people` (`film` = `movie`). 202; 400 — другой `id`; 409 — уже идёт операция/перестройка или новый индекс меньше `SEARCH_REINDEX_MIN_PERCENT`%; 503 — индекс выключен |
+| POST | `/admin/search/indexes/catalog/sidecar` | admin | Пересобрать слой Б (фасеты, сортировки, места, люди) из БД в фоне, Tantivy не трогается. 202 / 409 / 503 (`operation_id` `reload_catalog_sidecar`) |
+| GET | `/admin/search/sidecar` | admin | Слой Б по частям: байт и элементов у каждой части (`meta`, `base_rank`, `order:*`, `facet:*`, `people:*`), память процесса (`rss`, `anon`, `file` из `/proc/self/status`), записи кэша ответов (`get_catalog_sidecar`) |
+| GET | `/admin/search/sidecar/item?slug=` | admin | Что слой Б знает о сущности или человеке: номер, видимость, ручное место, флаги, популярность, балл (и `entity_stats.rank_score`), дата, место в каждом готовом порядке, значения фасетов, сохранённая карточка Tantivy (`card`). 404 — нет slug или номера (`inspect_catalog_sidecar`) |
+| GET | `/admin/search/layout` | admin | Устройство поиска: файлы каталога индекса (слой `A`/`B`, доступ `mmap`/`ram`/`meta`), поля Tantivy по частям, 8 готовых порядков с первыми пятью, группы фильтров и где они хранятся (`ram` — битовые карты, `tantivy` — термы поля `facet`; `known_for` — роли людей) с 12 самыми частыми значениями (`top`; у Tantivy — приблизительно, по сегментам), признак `readonly` (`get_search_layout`) |
+| GET | `/admin/search/explain` | admin | Разбор запроса: параметры как у `GET /search`; шаги (сколько осталось, мкс), термы фильтров слоя А и первые `limit` мест с разбором релевантности (уровень, BM25, доля текста, популярность, вес вида, итог). Без кэша; те же функции, что у поиска (`CatalogIndex::explain`, `EntitySidecar::ranked`) (`explain_search`) |
+| POST | `/admin/search/indexes/{id}/merge` | admin | Слияние сегментов, `id` = `catalog` (`CatalogIndex::merge`) \| `collections` (`shared::tantivy::merge_all`). 202 / 400 / 409 / 503 |
 | GET | `/admin/entities` | Все сущности, включая скрытые: фильтры и `sort` как у `/entities` плюс `q` (подстрока в названии или оригинальном, без учёта регистра, по БД) и `active=true\|false` → `Page<AdminEntitySummary>` (`EntitySummary` + `active`). Без `sort` — новые сверху (`e.id DESC`, uuidv7). `total` — не больше 10 000 (`ADMIN_TOTAL_CAP`, подсчёт `count(*)` по подзапросу с `LIMIT`). **Книги** (`kind=book`, `active` не `false`, без `studio`, задан `BOOKS_INDEX_DIR`) — из Tantivy (`books::search::admin_query`, все виды текста): без `sort` — наш порядок (ручные места `catalog_manual_ranks`, затем балл; с `q` — релевантность с местами), `sort` → `BookSort` как в `/search`, `total` точный; флаги `active`/`active_manual`/`visible` — один запрос по id страницы. Только скрытые книги (`active=false`, в индексе их нет) — из PostgreSQL. Было: сортировка по `entity_stats` + полный `count(*)` по 1,1 млн строк — 5–50 с (2026-11-23) |
 | POST | `/admin/entities` | Создать сущность (можно сразу с `tags`: slug'и; `active`, по умолчанию `true`) → 201, карточка. `series_slug` — сериал сезона (`kind = season`): обязателен для сезона, запрещён остальным типам и указывает только на сериал — иначе 400. Пишется в `parent_id` |
 | PATCH | `/admin/entities/{id}` | Изменить: переданные поля заменяются, `null` очищает необязательное, `metadata` заменяется целиком, `active` включает или скрывает (и ставит `active_manual`). `kind` не меняется. `series_slug` переносит сезон к другому сериалу (не передан — родитель прежний) |
@@ -2122,8 +2247,8 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | POST | `/admin/books/sidecar` | Пересобрать слой Б книжного поиска (фасеты, сортировки, места) из БД в фоне → 202; 409 — идёт другая операция над индексом; 503 — книжный поиск выключен (`BOOKS_INDEX_DIR` не задан) |
 | GET | `/admin/books/index` | Состояние книжного индекса (2026-11-22) → `BooksIndexStatus`: `db_books` (видимых книг в БД) / `db_ords`; `text` — слой А: `schema_version`, `docs`, `deleted_docs`, `segments`, `index_bytes`, `store_bytes` (поле `card`, по полям не делится), `deletes_bytes`, `disk_bytes` (все файлы каталога), `sidecar_file_bytes`, `fields[]` — место поля по частям (`termdict`, `postings`, `positions`, `fast`, `fieldnorms`, `total`; по убыванию), `cache_entries` / `cache_ranked`; `sidecar` — слой Б: `generation`, `books`, `slots`, `with_cover`, `manual_ranks`, `forms` (книг по виду), `facets[]` (`kind` = префикс ключа `tag`/`person`/`role`/`pub`/`lang`/`form`/`year`, `values`, `bytes`), оценка памяти `meta_bytes` / `orders_bytes` / `facets_bytes` / `total_bytes`; `last_index_build` / `last_sidecar_build` (`at`, `took_ms`, `books`; в этом процессе, после рестарта `null`); `operation` — текущая/последняя операция админки (`op`, `started_at`, `finished_at`, `ok`, `error`). 503 — поиск выключен |
 | POST | `/admin/books/index/rebuild` | Полная перестройка Tantivy + слоя Б из БД в фоне (`sync::rebuild`) → 202; ход — `operation` в `GET /admin/books/index`; 409 — идёт другая операция; 503 |
-| POST | `/admin/books/index/merge` | Слить сегменты Tantivy в один + `garbage_collect_files` в фоне (`BookIndex::merge`): уходят `deleted_docs`, поиск по одному сегменту; данные не меняются → 202; 409; 503 |
-| POST | `/admin/books/index/cache` | Сбросить кэш выдачи книг и прогреть списки раздела (`BookIndex::clear_cache`) сразу → 204; 503 |
+| POST | `/admin/books/index/merge` | Слить сегменты Tantivy в один + `garbage_collect_files` в фоне (`CatalogIndex::merge`): уходят `deleted_docs`, поиск по одному сегменту; данные не меняются → 202; 409; 503 |
+| POST | `/admin/books/index/cache` | Сбросить кэш выдачи книг и прогреть списки раздела (`CatalogIndex::clear_cache`) сразу → 204; 503 |
 | GET | `/books/{slug}/epub` | Гость/пользователь. EPUB книги для читалки из архива `.arx` (`books::reader::epub`): `metadata.public_read` — всем, иначе `vip`/`admin`; 200 `application/epub+zip`, 401 гость, 403 роль, 404 нет книги/файла, 503 архивы не настроены; `HEAD` — только проверка доступа без извлечения (200/401/403/404) |
 | GET | `/admin/ai/providers` | Провайдеры ИИ (без ключей: `keys_hint`, `keys_count`), по умолчанию — первым |
 | POST | `/admin/ai/providers` | Завести `{slug, kind, base_url?, model, api_keys[], workers?, per_request?, effort? (low), is_default?}` → 201; 400 — нет kind/model/ключей, лимиты вне диапазона; 409 — slug занят; 503 — нет `AI_SECRET_KEY` |
@@ -2140,6 +2265,9 @@ JSON-тела (400, экстрактор `shared::extract::JsonBody`).
 | GET | `/admin/ranking` | Настройки балла и окна «Скоро премьера» |
 | POST | `/admin/ranking/preview` | Топ по формуле с настройками из тела (`?limit=` 1–200, 50), без записи → `[RankPreviewRow]`; неверные настройки — 400 |
 | PUT | `/admin/ranking/stream` | Сохранить настройки и применить потоком: `rank`, перестройка поиска. 400 / 409 |
+| GET | `/admin/ranking/kinds` | Настройки сортировки всех видов и людей → `Vec<KindRanking>` |
+| POST | `/admin/ranking/kinds/{kind}/preview?limit=` | Топ вида по формуле с настройками из тела, составляющие `q/p/r/s/c_part` → `Vec<KindPreviewRow>`; `person` — пусто. 400 / 404 |
+| PUT | `/admin/ranking/kinds/{kind}/stream` | Сохранить и применить потоком: `rank` (балл вида в БД), `search` (`index::sync::apply_scores` — пары номер/балл в слой Б, `EntitySidecar::with_scores`: популярность и «Рекомендуемые» без Tantivy; веса поиска). ISR не трогается. 400 / 404 |
 
 **Проверки:** `slug` — `a-z`, `0-9`, одиночные дефисы, до 100 символов; занятый slug — 409.
 Названия и имена обязательны, до 300 символов, пробелы по краям обрезаются. `cover_url` и
@@ -2496,8 +2624,7 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `lib.rs` | Роутер |
 | `admin/indexes.rs` | Админка всех индексов Tantivy: список (размер, документы, сегменты, поколения, число по БД), перестройка и слияние; ход операций в процессе |
 | `engine.rs` | Маршрутизатор Meilisearch ↔ Tantivy по `SEARCH_TANTIVY` |
-| `works/{index,sync,search}.rs` | Индекс работ на Tantivy: схема/запросы, перестройка и правки, ответы API |
-| `people_idx/{index,sync}.rs` | Индекс людей на Tantivy |
+| `index/{mod,schema,query,collect,types,sidecar,people_sidecar,sync,search}.rs` | Единый индекс каталога: `CatalogIndex` (слой А, кэш, `search`/`search_people`/`by_ords`/`hints`, `rebuild`/`update`), схема `catalog-1`, текстовые клаузы, `OrdHits`, типы (`Query`, `Sort`, `EntityDoc`, `TextDoc`, `Card`), слой Б сущностей и людей (+ снимки), синхронизация с PostgreSQL, ответы API |
 | `models.rs` | `EntityKind`, DTO; `Page<T>` реэкспортируется из `shared::pagination` |
 | `directory.rs` | `PgEntityDirectory`: справочник сущностей для других модулей (`shared::directory::EntityDirectory`) |
 | `metadata.rs` | Схемы `metadata` по типам и их проверка (у книг — `LibgenSource`, `LibgenFile`) |
@@ -2521,11 +2648,8 @@ c.person_id = people.id)` и `DROP SCHEMA wikidata_import CASCADE`.
 | `books/dump.rs` | Потоковый разбор дампа MySQL: `Statements`, `create_table`, `insert` |
 | `books/cassandra.rs` | `nexus books cassandra`: строки `metadata/*.jsonl` → `Book`, slug'и, люди (авторы, переводчики), жанры-теги, копия обложек и размеры AVIF, запись пачками |
 | `books/genres.rs` | Жанры FB2: код → русское название (`GENRES`), `name`, `names` |
-| `books/index.rs` | Книжный поиск, слой А (Tantivy): схема `books-4` (текст, `card`, `ord`), анализаторы `ru_stem` / `ru_raw` (`YoFilter`), `BookDoc` (`text_hash`), `BookQuery`, строгий и резервный запросы, автодополнение, сборщик `OrdHits` (номер + оценка, фильтр слоя Б внутри), `TextMap` (номер → адрес), `find` (без текста — только слой Б), кэш (поколение индекса × слоя Б), `set_sidecar` / `set_ranks`, `facet_counts`, подсказки, `update`, `Rebuild` |
-| `books/sidecar.rs` | Книжный поиск, слой Б (RAM): `SortMeta` (8 байт), `Facets` (RoaringBitmap), готовые порядки, `Sidecar` (`filter`, `page`, `rank_hits` — ручные места и сильные совпадения, `with_ranks`, `facet_counts`), `SidecarBuilder`, снимок `sidecar.bin` (`save` / `load`) |
 | `books/reader.rs` | Читалка: `epub` (`GET /books/{slug}/epub`), доступ (`check_access`: `public_read` или `vip`/`admin`), извлечение одной записи `.arx` (`libarx`), кэш EPUB на диске с вытеснением по mtime (`Store::prune`), проверка путей (`safe_names`) |
 | `books/ranks.rs` | Ручной порядок книг: `parse_list`, `author_matches`, `match_list`, `replace_all`, `import` (`nexus books ranks FILE`) |
-| `books/sync.rs` | Книжный поиск ← PostgreSQL: номера `catalog_book_ords`, `rebuild` (индекс + слой Б), `reload_sidecar`, `apply_ranks`, `update` (только изменившийся текст), `spawn_initial` + `sidecar_loop` (раз в сутки, после правок, опрос мест), `open`, `enabled` |
 | `admin/books.rs` | `GET` / `PUT /admin/books/ranks`, `POST /admin/books/sidecar`; состояние и управление индексом: `GET /admin/books/index`, `POST /admin/books/index/{rebuild,merge,cache}`; операция одна за раз на каталог индекса (`OPERATIONS`, в памяти процесса) |
 | `ai.rs` | провайдеры ИИ (`catalog_ai_providers`): list/create/update/delete, `test` (Anthropic Messages / OpenAI Chat Completions через reqwest), ключи шифрует pgcrypto; CLI `nexus ai list\|add\|set\|test\|rm` (`app/src/ai_cli.rs`), `make ai`, `make books-llm` (`books_llm.py run`) |
 | `admin/ai.rs` | `/admin/ai/providers` (CRUD + `/test`) |

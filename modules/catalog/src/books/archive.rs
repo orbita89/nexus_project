@@ -226,7 +226,7 @@ pub async fn demote(state: &AppState, books: &[(Uuid, String)]) -> Result<Demote
         }
     }
     // Из книжного индекса: удалённых книг в БД нет — досылка уберёт их документы.
-    super::sync::update(state, &ids).await?;
+    crate::index::sync::update(state, &ids).await?;
     Ok(out)
 }
 
@@ -293,7 +293,7 @@ pub async fn restore(state: &AppState, slug: &str) -> Result<Uuid, BoxError> {
         archive.reload()
     })
     .await??;
-    super::sync::update(state, &[id]).await?;
+    crate::index::sync::update(state, &[id]).await?;
     Ok(id)
 }
 

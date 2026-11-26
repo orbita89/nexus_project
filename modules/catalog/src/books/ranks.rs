@@ -13,9 +13,9 @@ use std::path::Path;
 use shared::AppState;
 use uuid::Uuid;
 
-use super::index::normalize_key;
 use super::BoxError;
 use crate::models::VISIBLE;
+use shared::tantivy::normalize_key;
 
 /// Самое дальнее место: `SortMeta::manual_rank` — `u16`.
 pub const MAX_RANK: usize = 65_535;
@@ -358,7 +358,7 @@ pub async fn import(state: &AppState, path: &Path) -> Result<(usize, Matched), B
     let by_title = books_by_title(&state.db).await?;
     let matched = match_list(&lines, &by_title);
     replace_all(&state.db, &matched.ranks).await?;
-    super::sync::apply_ranks(state).await?;
+    crate::index::sync::apply_ranks(state).await?;
     Ok((lines.len(), matched))
 }
 

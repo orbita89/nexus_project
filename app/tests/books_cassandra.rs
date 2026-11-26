@@ -32,7 +32,7 @@ impl Library {
     fn config(&self) -> Config {
         let mut config = Config::from_env();
         config.book_covers_dir = Some(self.0.join("out-covers").to_string_lossy().into_owned());
-        config.books_index_dir = Some(self.0.join("index").to_string_lossy().into_owned());
+        config.search_index_dir = Some(self.0.join("index").to_string_lossy().into_owned());
         config.public_url = "http://nexus.test".into();
         config
     }
@@ -196,7 +196,17 @@ async fn book_search_is_answered_by_the_books_index(pool: PgPool) {
     cassandra::import(&state, &Options::new(library.0.clone()))
         .await
         .unwrap();
-    assert_eq!(catalog::books::sync::rebuild(&state).await.unwrap(), 3);
+    assert_eq!(
+        catalog::index::sync::rebuild(
+            &state,
+            catalog::index::sync::Target::Kinds(vec![catalog::models::EntityKind::Book]),
+            &catalog::jobs::Reporter::silent(),
+            false,
+        )
+        .await
+        .unwrap(),
+        3
+    );
     let slugs = |body: &serde_json::Value| -> Vec<String> {
         body["items"]
             .as_array()
@@ -285,7 +295,14 @@ async fn manual_ranks_order_book_listings_without_reindexing(pool: PgPool) {
     cassandra::import(&state, &Options::new(library.0.clone()))
         .await
         .unwrap();
-    catalog::books::sync::rebuild(&state).await.unwrap();
+    catalog::index::sync::rebuild(
+        &state,
+        catalog::index::sync::Target::Kinds(vec![catalog::models::EntityKind::Book]),
+        &catalog::jobs::Reporter::silent(),
+        false,
+    )
+    .await
+    .unwrap();
     let admin = token(&state, "admin@example.com", "admin").await;
     let user = token(&state, "user@example.com", "user").await;
     let send = |method: Method, uri: &'static str, body: Option<serde_json::Value>, token: &str| {

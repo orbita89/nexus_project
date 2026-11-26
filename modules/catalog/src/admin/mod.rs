@@ -15,6 +15,7 @@ pub mod people;
 pub mod prompts;
 pub mod relations;
 pub mod scripts;
+pub mod sidecar;
 pub mod static_pages;
 pub mod tags;
 

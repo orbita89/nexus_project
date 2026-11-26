@@ -598,9 +598,14 @@ async fn run_python(
 async fn books_reindex(state: &AppState, id: u64) -> Result<(), String> {
     push_line(id, "== перестройка книжного поиска (Tantivy)".into());
     let started = std::time::Instant::now();
-    let books = crate::books::sync::rebuild(state)
-        .await
-        .map_err(|e| e.to_string())?;
+    let books = crate::index::sync::rebuild(
+        state,
+        crate::index::sync::Target::Kinds(vec![crate::models::EntityKind::Book]),
+        &crate::jobs::Reporter::silent(),
+        false,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     push_line(
         id,
         format!("книг в индексе: {books} за {:.0?}", started.elapsed()),
