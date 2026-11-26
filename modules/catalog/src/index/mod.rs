@@ -215,6 +215,8 @@ struct Cache {
     ranked: HashMap<Query, Arc<Ranked>>,
     ranked_order: VecDeque<Query>,
     people: HashMap<PeopleKey, (Vec<String>, usize)>,
+    /// Счётчики ролей людей по тексту запроса (фасет «известен по»).
+    role_counts: HashMap<String, BTreeMap<String, i64>>,
 }
 
 impl Cache {
@@ -1132,6 +1134,14 @@ impl CatalogIndex {
         let searcher = self.reader.searcher();
         let present = self.present(&searcher)?;
         let sidecar = self.entities.load_full();
+        // Через кэш рядов: общая выдача (`blended`) спрашивает число книг на каждый запрос, а
+        // страница того же запроса потом берётся из того же ряда.
+        if self.cached.load(Ordering::Relaxed) {
+            let generation = self.generation(&present);
+            return Ok(self
+                .ranked(&searcher, &present, &sidecar, generation, q, 1, 0)?
+                .total);
+        }
         Ok(self.find(&searcher, &present, &sidecar, q, 0)?.total)
     }
 
@@ -1277,8 +1287,25 @@ impl CatalogIndex {
         let searcher = self.reader.searcher();
         let present = self.present(&searcher)?;
         let sidecar = self.people.load_full();
+        let generation = self.generation(&present);
+        let cached = self.cached.load(Ordering::Relaxed);
+        if cached {
+            if let Some(counts) = self.cache.lock().unwrap().at(generation).role_counts.get(q) {
+                return Ok(counts.clone());
+            }
+        }
+        // Без кэша это полный поиск людей (а без текста — роли 1,2 млн людей) на каждый запрос.
         let (found, _) = self.people_matches(&searcher, &present, &sidecar, q, None)?;
-        Ok(sidecar.role_counts(&found))
+        let counts = sidecar.role_counts(&found);
+        if cached {
+            let mut cache = self.cache.lock().unwrap();
+            let cache = cache.at(generation);
+            if cache.role_counts.len() >= PEOPLE_CACHE_ENTRIES {
+                cache.role_counts.clear();
+            }
+            cache.role_counts.insert(q.to_owned(), counts.clone());
+        }
+        Ok(counts)
     }
 }
 

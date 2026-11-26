@@ -676,19 +676,25 @@ impl EntitySidecar {
             Sort::Trending => orders.trending.take(filter, len, |_| true, all),
             Sort::TopRated => orders.top_rated.take(filter, len, |_| true, all),
             Sort::Awarded => orders.awarded.take(filter, len, |_| true, all),
-            Sort::New => orders
-                .new
-                .take(filter, len, |ord| (1..=today).contains(&day(ord)), None),
+            // Итог «вышло / не вышло» — проходом по фильтру (он обычно много меньше всех 2 млн),
+            // порядок — только до набора страницы.
+            Sort::New => {
+                let released = |ord: u32| (1..=today).contains(&day(ord));
+                let total = filter.iter().filter(|&ord| released(ord)).count() as u64;
+                orders.new.take(filter, len, released, Some(total))
+            }
             Sort::Soon => {
                 // Ближайшие сверху: тот же порядок по дате, пройденный с конца.
-                let mut picked: Vec<u32> = Vec::new();
-                let mut total = 0usize;
-                for &ord in orders.new.ords.iter().rev() {
-                    if day(ord) > today && filter.contains(ord) {
-                        if picked.len() < len {
+                let total = filter.iter().filter(|&ord| day(ord) > today).count();
+                let mut picked: Vec<u32> = Vec::with_capacity(len.min(total));
+                if total > 0 {
+                    for &ord in orders.new.ords.iter().rev() {
+                        if day(ord) > today && filter.contains(ord) {
                             picked.push(ord);
+                            if picked.len() >= len.min(total) {
+                                break;
+                            }
                         }
-                        total += 1;
                     }
                 }
                 (picked, total)

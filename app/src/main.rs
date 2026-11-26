@@ -210,9 +210,28 @@ async fn run() -> anyhow::Result<()> {
                     ["мастер", "маст", "матр", "дом", "любовь", "война", "star", "harry", "звёздные войны", "мастер и маргарита", "брэд питт", "властелин колец", "ночь"]
                         .iter().map(ToString::to_string).collect()
                 };
+                // «запрос|вид» — с фильтром по виду; `search` — замер всего пути сервера (ряд в
+                // 1000, карточки) без кэша ответов.
+                index.set_cached(false);
+                for w in &words {
+                    let (text, kind) = w.split_once('|').unwrap_or((w.as_str(), ""));
+                    let query = catalog::index::Query {
+                        q: text.to_string(),
+                        kinds: catalog::models::EntityKind::parse(kind).into_iter().collect(),
+                        ..Default::default()
+                    };
+                    let started = std::time::Instant::now();
+                    let found = index.search(&query, 24, 0)?;
+                    println!("{w:>22} search {:>7}µs total {}", started.elapsed().as_micros(), found.total);
+                }
                 for round in 0..2 {
                     for w in &words {
-                        let query = catalog::index::Query { q: w.clone(), ..Default::default() };
+                        let (text, kind) = w.split_once('|').unwrap_or((w.as_str(), ""));
+                        let query = catalog::index::Query {
+                            q: text.to_string(),
+                            kinds: catalog::models::EntityKind::parse(kind).into_iter().collect(),
+                            ..Default::default()
+                        };
                         let started = std::time::Instant::now();
                         let e = index.explain(&query, 24)?;
                         let total = started.elapsed().as_micros();
