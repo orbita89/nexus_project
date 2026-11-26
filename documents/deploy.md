@@ -133,6 +133,9 @@ docker compose -f infra/docker-compose.prod.yml --env-file /tmp/nexus-local.env 
    `catalog.new → catalog`, `docker compose restart app`, проверка поиска; не ответил — автоматический откат.
 5. `scripts/search-publish.sh rollback user@host` — вернуть предыдущий индекс вручную.
 
+Между выкладками: скрытое или удалённое на проде пропадает из поиска сразу (список скрытых, лог
+`catalog index: hidden since build`), новое и изменённое появится со следующей выкладкой.
+
 На сервере нужны `docker`, `zstd`, `curl`; приложение и индекс одной версии схемы выкладываются вместе
 (сначала образ, затем индекс — до подмены поиск вернёт 503).
 

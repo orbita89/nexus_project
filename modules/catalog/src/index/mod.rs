@@ -324,6 +324,10 @@ pub struct CatalogIndex {
     people: ArcSwap<PeopleSidecar>,
     /// Справочники студий и тегов для подсказок фильтров ([`refs`]).
     refs: ArcSwap<refs::Refs>,
+    /// Скрытые и удалённые после сборки индекса (прод его не перестраивает): вычитаются из
+    /// выдачи до следующей выкладки ([`sync::refresh_hidden`]).
+    hidden: ArcSwap<RoaringBitmap>,
+    hidden_generation: std::sync::atomic::AtomicU64,
     present: Mutex<Option<Arc<Present>>>,
 }
 
@@ -378,6 +382,8 @@ impl CatalogIndex {
             entities: ArcSwap::from_pointee(EntitySidecar::load(dir).unwrap_or_default()),
             people: ArcSwap::from_pointee(PeopleSidecar::load(dir).unwrap_or_default()),
             refs: ArcSwap::from_pointee(refs::Refs::load(dir).unwrap_or_default()),
+            hidden: ArcSwap::from_pointee(RoaringBitmap::new()),
+            hidden_generation: std::sync::atomic::AtomicU64::new(0),
             present: Mutex::new(None),
         });
         open.insert(dir.to_path_buf(), index.clone());
@@ -459,6 +465,29 @@ impl CatalogIndex {
         present.fingerprint
             ^ self.entities.load().generation().rotate_left(32)
             ^ self.people.load().generation().rotate_left(16)
+            ^ self
+                .hidden_generation
+                .load(Ordering::Relaxed)
+                .rotate_left(48)
+    }
+
+    /// Номера сущностей, которые есть в индексе.
+    pub fn indexed_entities(&self) -> Result<RoaringBitmap, IndexError> {
+        let searcher = self.reader.searcher();
+        Ok(self.present(&searcher)?.entities.clone())
+    }
+
+    /// Заменить список скрытых после сборки (кэш выдачи сбрасывается — новое поколение).
+    pub fn set_hidden(&self, hidden: RoaringBitmap) {
+        if **self.hidden.load() == hidden {
+            return;
+        }
+        self.hidden.store(Arc::new(hidden));
+        self.hidden_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn hidden_len(&self) -> u64 {
+        self.hidden.load().len()
     }
 
     /// Номера, которые читает `searcher`.
@@ -810,6 +839,7 @@ impl CatalogIndex {
         }
         let mut filter = sidecar.filter(q);
         filter &= &present.entities;
+        filter -= &**self.hidden.load();
         // Студия, издатель, музей, награда, человек — из инвертированного индекса (поле
         // `facet`), не из RAM: короткие списки номеров, пересечение внутри Tantivy.
         let Some(terms) = sidecar::text_facet_terms(q) else {
@@ -947,6 +977,7 @@ impl CatalogIndex {
         };
         let mut filter = sidecar.filter(q);
         filter &= &present.entities;
+        filter -= &**self.hidden.load();
         step(&mut out, "Фильтры слоя Б (битовые карты в RAM)", filter.len());
         let Some(terms) = sidecar::text_facet_terms(q) else {
             step(&mut out, "Фильтр с пустым названием — ничего", 0);

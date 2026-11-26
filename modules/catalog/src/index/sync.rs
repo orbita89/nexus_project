@@ -149,6 +149,49 @@ fn people_dirty() -> &'static Notify {
     DIRTY.get_or_init(Notify::new)
 }
 
+fn hidden_dirty() -> &'static Notify {
+    static DIRTY: OnceLock<Notify> = OnceLock::new();
+    DIRTY.get_or_init(Notify::new)
+}
+
+/// Свежесть индекса на проде (только чтение): скрытые и удалённые после сборки — это номера,
+/// которые есть в индексе, но не видимы в БД. Один запрос номеров видимых (~700 тыс. чисел,
+/// десятки мс), в памяти — битовая карта. Новая выкладка индекса — список считается заново.
+pub async fn refresh_hidden(state: &AppState) -> Result<u64, BoxError> {
+    let index = open(state).ok_or("SEARCH_INDEX_DIR is not set")??;
+    let visible: Vec<i32> = sqlx::query_scalar(&format!(
+        "SELECT o.ord FROM catalog_entity_ords o JOIN entities e ON e.id = o.entity_id
+         WHERE {INDEXED} AND {VISIBLE}"
+    ))
+    .fetch_all(&state.db)
+    .await?;
+    let mut hidden = tokio::task::spawn_blocking({
+        let index = index.clone();
+        move || index.indexed_entities()
+    })
+    .await??;
+    let visible: roaring::RoaringBitmap = visible
+        .into_iter()
+        .filter_map(|o| u32::try_from(o).ok())
+        .collect();
+    hidden -= &visible;
+    let n = hidden.len();
+    index.set_hidden(hidden);
+    Ok(n)
+}
+
+/// Прод: список скрытых при старте и после каждой правки (пачка правок — один пересчёт).
+async fn hidden_loop(state: AppState) {
+    loop {
+        match refresh_hidden(&state).await {
+            Ok(n) => tracing::info!(hidden = n, "catalog index: hidden since build"),
+            Err(error) => tracing::warn!(%error, "catalog index: hidden list not refreshed"),
+        }
+        hidden_dirty().notified().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
 /// Правки, пришедшие во время перестройки (писатель занят): повторяются после неё.
 #[derive(Default)]
 struct Journal {
@@ -969,7 +1012,12 @@ fn deferred(result: Result<bool, IndexError>) -> Result<bool, BoxError> {
 /// Дослать затронутые сущности: с изменившимся текстом — в Tantivy, скрытые и удалённые — из
 /// него; слой Б пересобирается в фоне ([`spawn_initial`]).
 pub async fn update(state: &AppState, ids: &[Uuid]) -> Result<(), BoxError> {
-    if ids.is_empty() || readonly(state) {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    if readonly(state) {
+        // Прод индекс не правит: скрытое и удалённое вычитается из выдачи ([`refresh_hidden`]).
+        hidden_dirty().notify_one();
         return Ok(());
     }
     if let Some(journal) = JOURNAL.lock().unwrap().as_mut() {
@@ -1167,8 +1215,11 @@ pub fn spawn_initial(state: AppState) {
                 return;
             }
         }
-        // Прод: файлы готовые, слой Б не пересобирается и в БД за ним не ходит.
-        if !readonly(&state) {
+        // Прод: файлы готовые, слой Б не пересобирается; из БД — только список скрытых после
+        // сборки (одним запросом при старте и после правок).
+        if readonly(&state) {
+            hidden_loop(state).await;
+        } else {
             sidecar_loop(state).await;
         }
     });
