@@ -20,7 +20,7 @@ pub struct AppState {
     pub db: PgPool,
     pub jwt: Arc<Jwt>,
     pub mailer: Mailer,
-    /// Кэш L1 (память) + L2 (Redis); каталог берёт из него блокировки перестройки. В тестах выключен.
+    /// Кэш в памяти процесса (L1 moka + блокировки); каталог берёт из него блокировки перестройки. В тестах выключен.
     pub cache: Cache,
     /// Ревалидация статики фронтенда. Выключена, если не заданы `ISR_URL` и `ISR_SECRET`.
     pub isr: Isr,
@@ -48,12 +48,15 @@ pub struct AppState {
     pub user_ratings: Arc<dyn UserRatings>,
     /// Шина событий: модули публикуют, `realtime` рассылает клиентам.
     pub events: EventBus,
+    /// Остановка сервера (SIGINT/SIGTERM): WebSocket-соединения закрываются, `main` дописывает
+    /// очередь чата (`state.chat.flush()`).
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl AppState {
     pub fn new(config: Config, db: PgPool, mailer: Mailer, directories: Directories) -> Self {
         let jwt = Jwt::new(config.jwt_secret.as_bytes());
-        let cache = Cache::redis(CacheSettings::from_config(&config), &config.redis_url);
+        let cache = Cache::local(CacheSettings::from_config(&config));
         let isr = Isr::from_config(&config);
         Self {
             config: Arc::new(config),
@@ -74,6 +77,7 @@ impl AppState {
             person_likes: directories.person_likes,
             user_ratings: directories.user_ratings,
             events: EventBus::default(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
         }
     }
 }

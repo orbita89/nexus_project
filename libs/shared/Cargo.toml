@@ -26,7 +26,6 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 moka = { workspace = true }
-deadpool-redis = { workspace = true }
 tokio-util = { workspace = true }
 mockall = { workspace = true, optional = true }
 tantivy = { workspace = true }

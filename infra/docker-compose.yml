@@ -5,6 +5,12 @@
 services:
   postgres:
     image: postgres:18-alpine
+    # Настройки под слабый сервер (1 ГБ RAM): infra/postgres/postgresql.conf.
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf",
+              # Тесты (#[sqlx::test]) открывают много соединений параллельно.
+              "-c", "max_connections=100"]
+    shm_size: 64m
+    stop_grace_period: 30s
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nexus_user}
@@ -16,26 +22,13 @@ services:
       # С 18-й версии образ хранит данные в /var/lib/postgresql/18/docker, том — на /var/lib/postgresql.
       # Новое имя тома: старый (pgdata, PostgreSQL 17) 18-я версия не прочитает.
       - pgdata18:/var/lib/postgresql
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus_user} -d ${POSTGRES_DB:-nexus_db}"]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 10s
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "${REDIS_HOST_PORT:-6380}:6379"
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
 
   app:
     build:
@@ -46,7 +39,7 @@ services:
     command: ["cargo", "watch", "-x", "run -p nexus"]
     # Внешние имена — через публичные DNS: резолвер по умолчанию (например, Яндекс) отвечает на
     # files.tmdb.org заглушкой 127.0.0.1, и «Обновить рейтинги» не скачивает дамп TMDB. Имена
-    # сервисов (postgres, redis, …) по-прежнему резолвит встроенный DNS Docker.
+    # сервисов (postgres, mailpit, …) по-прежнему резолвит встроенный DNS Docker.
     dns: [1.1.1.1, 8.8.8.8]
     # Сервер фронтенда (ISR_URL) запущен на хосте.
     extra_hosts:
@@ -64,7 +57,6 @@ services:
       - ${BOOKS_ARCHIVES_HOST:-/home/dev/cassandra.books/data/archives}:/srv/book-archives:ro
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@postgres:5432/${POSTGRES_DB:-nexus_db}
-      REDIS_URL: redis://redis:6379
       # Перестройка поиска переключается на индекс любого размера: в разработке каталог часто
       # перезаливается целиком. В проде (docker-compose.prod.yml) — по умолчанию 80%.
       SEARCH_REINDEX_MIN_PERCENT: ${SEARCH_REINDEX_MIN_PERCENT:-0}
@@ -120,6 +112,8 @@ services:
       AI_SECRET_KEY: ${AI_SECRET_KEY:-dev-ai-secret}
       TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID:-}
       TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET:-}
+      # Пул как раньше: в dev идут импорты и перестройки параллельно с сайтом. В проде — 5.
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
       BIND_ADDR: 0.0.0.0:8080
       RUST_LOG: ${RUST_LOG:-info,tower_http=debug}
       RUST_BACKTRACE: "1"
@@ -127,8 +121,6 @@ services:
       CARGO_BUILD_JOBS: "2"
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       mailpit:
         condition: service_started
@@ -149,12 +141,9 @@ services:
     environment:
       HOME: /tmp
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus_user}:${POSTGRES_PASSWORD:-nexus_password}@postgres:5432/${POSTGRES_DB:-nexus_db}
-      REDIS_URL: redis://redis:6379
       CARGO_BUILD_JOBS: "2"
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
 
   # Ловушка для писем в dev: всё, что отправляет приложение, видно на http://localhost:8025.
@@ -192,7 +181,6 @@ services:
 volumes:
   coverscache:
   pgdata18:
-  redisdata:
   archivedata:
   cargo-registry:
   app-target:

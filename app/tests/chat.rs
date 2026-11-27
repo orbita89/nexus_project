@@ -15,6 +15,7 @@ use test_utils::request;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use uuid::Uuid;
 
 const SOCIAL: &str = "/api/v1/social";
 const ROOM: &str = "entity:dune-2021";
@@ -2779,4 +2780,59 @@ async fn award_chat_rooms(pool: PgPool) {
         )
         .await;
     assert_eq!(history["items"].as_array().unwrap().len(), 1);
+}
+
+/// Пакетная запись (`social::chat_batcher`): событие и ответ — сразу, строки в БД — пачкой;
+/// `flush` дописывает очередь: счётчик комнаты, последнее сообщение, прочитанное автором и
+/// `chat.read` собеседника — одной транзакцией.
+#[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
+async fn batched_messages_and_reads_reach_postgres_on_flush(pool: PgPool) {
+    let ctx = Ctx::new(pool.clone()).await;
+    let alice = ctx.login("alice", "user").await;
+    let bob = ctx.login("bob", "user").await;
+    let mut alice_ws = ctx.authed(&alice).await;
+    let mut bob_ws = ctx.authed(&bob).await;
+
+    let first = alice_ws.say("раз").await;
+    let second = alice_ws.say("два").await;
+    let third = alice_ws.say("три").await;
+    bob_ws
+        .request(
+            json!({ "type": "chat.read", "room": ROOM, "message_id": second["id"] }),
+            "chat.read_saved",
+        )
+        .await;
+
+    ctx.state.chat.flush().await;
+
+    let (count, last_id): (i32, Option<Uuid>) = sqlx::query_as(
+        "SELECT r.messages_count, r.last_message_id FROM chat_rooms r
+         JOIN chat_messages m ON m.room_id = r.id WHERE m.id = $1::uuid",
+    )
+    .bind(first["id"].as_str().unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 3);
+    assert_eq!(last_id.unwrap().to_string(), third["id"].as_str().unwrap());
+
+    let bodies: Vec<String> = sqlx::query_scalar("SELECT body FROM chat_messages ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bodies, ["раз", "два", "три"]);
+
+    for (user, expected) in [(&alice, &third), (&bob, &second)] {
+        let last: Uuid =
+            sqlx::query_scalar("SELECT last_read_id FROM chat_reads WHERE user_id = $1::uuid")
+                .bind(&user.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(last.to_string(), expected["id"].as_str().unwrap());
+    }
+
+    // История по REST совпадает с тем, что ушло в событии (время — с точностью PostgreSQL).
+    let history = ctx.history("").await;
+    assert_eq!(history["items"][2], third);
 }

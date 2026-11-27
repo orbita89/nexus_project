@@ -1,39 +1,37 @@
-//! Кэш готовых JSON-ответов в два уровня: L1 — память процесса (moka), L2 — Redis.
+//! Кэш готовых JSON-ответов: L1 — память процесса (moka), L2 — хранилище за трейтом [`L2Store`].
+//! В приложении L2 — [`LocalStore`] (только блокировки, Redis убран: экземпляр один, памяти мало).
 //!
 //! Что кэшировать и откуда брать при промахе обоих уровней, решает модуль (сейчас `catalog`:
 //! карточки из индекса). Здесь только уровни и правила:
 //! - L1 → L2 → загрузчик; попадание в L2 кладётся в L1, результат загрузчика — в L1 сразу
-//!   и в L2 в фоне (ответ не ждёт Redis);
+//!   и в L2 в фоне (ответ не ждёт L2);
 //! - одновременные промахи по одному ключу дают одну загрузку;
 //! - «не найдено» не кэшируется;
-//! - ошибка, таймаут Redis или битый JSON — warning в лог и переход к загрузчику, а не ошибка запроса.
+//! - ошибка, таймаут L2 или битый JSON — warning в лог и переход к загрузчику, а не ошибка запроса.
 
 use crate::Config;
 use async_trait::async_trait;
-use deadpool_redis::redis;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::task::TaskTracker;
 
-/// Сколько ждать Redis на одну операцию чтения или записи ключа.
+/// Сколько ждать L2 на одну операцию чтения или записи ключа.
 const L2_TIMEOUT: Duration = Duration::from_millis(100);
 /// Сколько ждать массовые операции (удаление по префиксу).
 const L2_BULK_TIMEOUT: Duration = Duration::from_secs(10);
 /// Через сколько повторить удаление при инвалидации.
 const REDELETE_AFTER: Duration = Duration::from_secs(2);
-/// Ключи сканируются пачками такого размера.
-const SCAN_COUNT: usize = 500;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
-    #[error("redis: {0}")]
-    Redis(String),
-    #[error("redis timeout")]
+    #[error("cache store: {0}")]
+    Store(String),
+    #[error("cache store timeout")]
     Timeout,
 }
 
-/// L2-хранилище. Трейт, чтобы в тестах подменять Redis моком (`MockL2Store`, feature `mock`).
+/// L2-хранилище. Трейт, чтобы в тестах подменять хранилище моком (`MockL2Store`, feature `mock`).
 #[cfg_attr(any(test, feature = "mock"), mockall::automock)]
 #[async_trait]
 pub trait L2Store: Send + Sync {
@@ -48,120 +46,60 @@ pub trait L2Store: Send + Sync {
     async fn extend(&self, key: &str, ttl: Duration) -> Result<bool, CacheError>;
 }
 
-/// Redis через пул соединений deadpool. Соединения открываются при первом запросе,
-/// поэтому недоступный Redis не мешает старту приложения.
-pub struct RedisStore {
-    pool: deadpool_redis::Pool,
-}
-
-impl RedisStore {
-    pub fn new(url: &str) -> Result<Self, CacheError> {
-        let pool = deadpool_redis::Config::from_url(url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .map_err(|e| CacheError::Redis(e.to_string()))?;
-        Ok(Self { pool })
-    }
-
-    async fn conn(&self) -> Result<deadpool_redis::Connection, CacheError> {
-        self.pool
-            .get()
-            .await
-            .map_err(|e| CacheError::Redis(e.to_string()))
-    }
-}
-
-fn redis_error(error: redis::RedisError) -> CacheError {
-    CacheError::Redis(error.to_string())
+/// L2 в памяти процесса: значения не хранит (их держит L1 — второй копии в той же памяти не
+/// нужно), только блокировки с TTL. Экземпляр приложения один, Redis не нужен.
+#[derive(Default)]
+pub struct LocalStore {
+    locks: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 #[async_trait]
-impl L2Store for RedisStore {
-    async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
-        let mut conn = self.conn().await?;
-        redis::cmd("GET")
-            .arg(key)
-            .query_async(&mut conn)
-            .await
-            .map_err(redis_error)
+impl L2Store for LocalStore {
+    async fn get(&self, _key: &str) -> Result<Option<String>, CacheError> {
+        Ok(None)
     }
 
-    async fn set_ex(&self, key: &str, value: &str, ttl: Duration) -> Result<(), CacheError> {
-        let mut conn = self.conn().await?;
-        redis::cmd("SET")
-            .arg(key)
-            .arg(value)
-            .arg("EX")
-            .arg(ttl.as_secs().max(1))
-            .query_async(&mut conn)
-            .await
-            .map_err(redis_error)
+    async fn set_ex(&self, _key: &str, _value: &str, _ttl: Duration) -> Result<(), CacheError> {
+        Ok(())
     }
 
     async fn del(&self, keys: &[String]) -> Result<(), CacheError> {
-        if keys.is_empty() {
-            return Ok(());
+        let mut locks = self.locks.lock().unwrap();
+        for key in keys {
+            locks.remove(key);
         }
-        let mut conn = self.conn().await?;
-        redis::cmd("DEL")
-            .arg(keys)
-            .query_async(&mut conn)
-            .await
-            .map_err(redis_error)
+        Ok(())
     }
 
     async fn del_prefix(&self, prefix: &str) -> Result<u64, CacheError> {
-        let mut conn = self.conn().await?;
-        let pattern = format!("{prefix}*");
-        let mut cursor: u64 = 0;
-        let mut deleted = 0;
-        loop {
-            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(SCAN_COUNT)
-                .query_async(&mut conn)
-                .await
-                .map_err(redis_error)?;
-            if !keys.is_empty() {
-                let count: u64 = redis::cmd("DEL")
-                    .arg(&keys)
-                    .query_async(&mut conn)
-                    .await
-                    .map_err(redis_error)?;
-                deleted += count;
-            }
-            if next == 0 {
-                return Ok(deleted);
-            }
-            cursor = next;
-        }
+        let mut locks = self.locks.lock().unwrap();
+        let before = locks.len();
+        locks.retain(|key, _| !key.starts_with(prefix));
+        Ok((before - locks.len()) as u64)
     }
 
     async fn try_lock(&self, key: &str, ttl: Duration) -> Result<bool, CacheError> {
-        let mut conn = self.conn().await?;
-        let reply: Option<String> = redis::cmd("SET")
-            .arg(key)
-            .arg(1)
-            .arg("NX")
-            .arg("EX")
-            .arg(ttl.as_secs().max(1))
-            .query_async(&mut conn)
-            .await
-            .map_err(redis_error)?;
-        Ok(reply.is_some())
+        let now = std::time::Instant::now();
+        let mut locks = self.locks.lock().unwrap();
+        match locks.get(key) {
+            Some(until) if *until > now => Ok(false),
+            _ => {
+                locks.insert(key.to_string(), now + ttl);
+                Ok(true)
+            }
+        }
     }
 
     async fn extend(&self, key: &str, ttl: Duration) -> Result<bool, CacheError> {
-        let mut conn = self.conn().await?;
-        let set: i64 = redis::cmd("EXPIRE")
-            .arg(key)
-            .arg(ttl.as_secs().max(1))
-            .query_async(&mut conn)
-            .await
-            .map_err(redis_error)?;
-        Ok(set == 1)
+        let now = std::time::Instant::now();
+        let mut locks = self.locks.lock().unwrap();
+        match locks.get_mut(key) {
+            Some(until) if *until > now => {
+                *until = now + ttl;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 }
 
@@ -171,7 +109,8 @@ pub struct CacheSettings {
     /// Префикс всех ключей (`nexus:v1:`); у каждого теста свой.
     pub prefix: String,
     pub l1_ttl: Duration,
-    pub l1_capacity: u64,
+    /// Предел L1 в байтах (сумма длин JSON и ключей).
+    pub l1_max_bytes: u64,
     pub l2_ttl: Duration,
     /// Таймаут одной операции с L2.
     pub l2_timeout: Duration,
@@ -184,7 +123,7 @@ impl CacheSettings {
         Self {
             prefix: "nexus:v1:".into(),
             l1_ttl: Duration::from_secs(config.cache_l1_ttl_secs),
-            l1_capacity: config.cache_l1_capacity,
+            l1_max_bytes: config.cache_l1_max_mb * 1024 * 1024,
             l2_ttl: Duration::from_secs(config.cache_l2_ttl_secs),
             l2_timeout: L2_TIMEOUT,
             redelete_after: REDELETE_AFTER,
@@ -216,7 +155,10 @@ struct Inner {
 impl Cache {
     pub fn new(settings: CacheSettings, l2: Arc<dyn L2Store>) -> Self {
         let l1 = moka::future::Cache::builder()
-            .max_capacity(settings.l1_capacity)
+            .weigher(|key: &String, value: &Arc<str>| {
+                u32::try_from(key.len() + value.len()).unwrap_or(u32::MAX)
+            })
+            .max_capacity(settings.l1_max_bytes)
             .time_to_live(settings.l1_ttl)
             .build();
         Self {
@@ -229,15 +171,9 @@ impl Cache {
         }
     }
 
-    /// Кэш с L2 в Redis. Неверный `url` — кэш выключен, ошибка в лог.
-    pub fn redis(settings: CacheSettings, url: &str) -> Self {
-        match RedisStore::new(url) {
-            Ok(store) => Self::new(settings, Arc::new(store)),
-            Err(error) => {
-                tracing::error!(%error, "cache is disabled: bad REDIS_URL");
-                Self::disabled()
-            }
-        }
+    /// Кэш в памяти процесса: L1 (moka) + блокировки ([`LocalStore`]).
+    pub fn local(settings: CacheSettings) -> Self {
+        Self::new(settings, Arc::new(LocalStore::default()))
     }
 
     pub fn disabled() -> Self {
@@ -298,7 +234,7 @@ impl Cache {
         }
     }
 
-    /// Блокировка в L2 на `ttl` (одна задача на все инстансы). Выключенный кэш — всегда `true`.
+    /// Блокировка в L2 на `ttl` (одна задача за раз). Выключенный кэш — всегда `true`.
     pub async fn try_lock(&self, key: &str, ttl: Duration) -> Result<bool, CacheError> {
         let Some(inner) = &self.inner else {
             return Ok(true);
@@ -326,7 +262,7 @@ impl Cache {
     }
 
     /// Снять блокировку [`Cache::try_lock`] раньше TTL. Таймаут длинный, как у массовых операций:
-    /// не снятая блокировка держится до конца TTL. Ошибка Redis — только warning.
+    /// не снятая блокировка держится до конца TTL. Ошибка L2 — только warning.
     pub async fn unlock(&self, key: &str) {
         let Some(inner) = &self.inner else { return };
         let key = inner.key(key);
@@ -344,7 +280,7 @@ impl Cache {
         inner.l1.get(&inner.key(key)).await
     }
 
-    /// Полный ключ в Redis (с префиксом).
+    /// Полный ключ (с префиксом).
     pub fn full_key(&self, key: &str) -> String {
         match &self.inner {
             Some(inner) => inner.key(key),
@@ -427,7 +363,7 @@ mod tests {
         CacheSettings {
             prefix: "t:".into(),
             l1_ttl: Duration::from_secs(30),
-            l1_capacity: 100,
+            l1_max_bytes: 1024 * 1024,
             l2_ttl: Duration::from_secs(60),
             l2_timeout: Duration::from_millis(50),
             redelete_after: Duration::from_millis(10),
@@ -475,14 +411,55 @@ mod tests {
         let value = cache.get_or_load("k", || load_ok(&calls)).await.unwrap();
         assert_eq!(&*value, "{\"v\":1}");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "waited for Redis"
-        );
+        assert!(started.elapsed() < Duration::from_secs(1), "waited for L2");
         // Фоновая запись тоже обрывается по таймауту, а не висит.
         tokio::time::timeout(Duration::from_secs(1), cache.wait_pending())
             .await
             .expect("pending L2 write is bounded by the timeout");
+    }
+
+    #[tokio::test]
+    async fn local_store_lock_is_exclusive_until_ttl_or_unlock() {
+        let cache = Cache::local(settings());
+        assert!(cache
+            .try_lock("job", Duration::from_secs(60))
+            .await
+            .unwrap());
+        assert!(!cache
+            .try_lock("job", Duration::from_secs(60))
+            .await
+            .unwrap());
+        assert!(cache
+            .extend_lock("job", Duration::from_secs(60))
+            .await
+            .unwrap());
+        cache.unlock("job").await;
+        assert!(!cache
+            .extend_lock("job", Duration::from_secs(60))
+            .await
+            .unwrap());
+        assert!(cache
+            .try_lock("job", Duration::from_millis(1))
+            .await
+            .unwrap());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        // Истёкшая блокировка берётся снова.
+        assert!(cache
+            .try_lock("job", Duration::from_secs(60))
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_cache_serves_from_l1() {
+        let cache = Cache::local(settings());
+        let calls = AtomicUsize::new(0);
+        cache.get_or_load("k", || load_ok(&calls)).await.unwrap();
+        cache.get_or_load("k", || load_ok(&calls)).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        cache.invalidate(&["k".into()]).await;
+        cache.get_or_load("k", || load_ok(&calls)).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

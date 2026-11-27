@@ -8,17 +8,23 @@
 //! В событии только id (`data`): тексты и имена клиент берёт по API. Так событие не
 //! устаревает и не раскрывает удалённое.
 //!
-//! Сейчас шина — `tokio::sync::broadcast` внутри процесса (один экземпляр приложения). Когда
-//! экземпляров станет несколько, за тем же API появится мост через Redis pub/sub.
+//! Шина внутри процесса (экземпляр один, Redis нет). Два вида подписки:
+//! - [`EventBus::subscribe_channel`] — хаб: свой `broadcast` на каждый канал, создаётся при первой
+//!   подписке и удаляется, когда подписчиков не осталось. Так подписчик (WS-соединение) получает
+//!   только события своих каналов, а не весь поток;
+//! - [`EventBus::subscribe`] — все события (тесты, диагностика); без подписчиков ничего не стоит.
 
 use serde_json::Value;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 /// Сколько событий шина держит для отстающего подписчика. Отставший больше — получает
 /// `RecvError::Lagged` и сообщает клиенту, что тот пропустил события.
 pub const BUS_CAPACITY: usize = 1024;
+/// Очередь одного канала хаба: подписчик, отставший больше, получает `Lagged`.
+pub const CHANNEL_CAPACITY: usize = 64;
 
 /// Куда адресовано событие.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -69,6 +75,8 @@ impl Event {
 #[derive(Clone)]
 pub struct EventBus {
     sender: broadcast::Sender<Arc<Event>>,
+    /// Хаб: канал → его `broadcast`. Есть только у каналов с подписчиками.
+    channels: Arc<Mutex<HashMap<Channel, broadcast::Sender<Arc<Event>>>>>,
 }
 
 impl Default for EventBus {
@@ -81,14 +89,56 @@ impl EventBus {
     pub fn new(capacity: usize) -> Self {
         Self {
             sender: broadcast::channel(capacity).0,
+            channels: Arc::default(),
         }
     }
 
     /// Опубликовать событие. Без подписчиков оно просто теряется: ошибкой это не считается,
-    /// публикация не должна валить запрос.
+    /// публикация не должна валить запрос. В каждый канал события — один и тот же `Arc`:
+    /// подписчик нескольких каналов узнаёт повтор по `Arc::ptr_eq`.
     pub fn publish(&self, event: Event) {
         tracing::debug!(kind = event.kind, channels = ?event.channels, "event published");
-        let _ = self.sender.send(Arc::new(event));
+        let event = Arc::new(event);
+        {
+            let mut channels = self.lock();
+            for channel in &event.channels {
+                if let Some(sender) = channels.get(channel) {
+                    if sender.send(event.clone()).is_err() {
+                        // Все подписчики ушли, а release не дошёл — убираем канал здесь.
+                        channels.remove(channel);
+                    }
+                }
+            }
+        }
+        let _ = self.sender.send(event);
+    }
+
+    /// Получать события одного канала, опубликованные после вызова.
+    pub fn subscribe_channel(&self, channel: Channel) -> broadcast::Receiver<Arc<Event>> {
+        self.lock()
+            .entry(channel)
+            .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0)
+            .subscribe()
+    }
+
+    /// Подписчик канала ушёл (его `Receiver` уже удалён): канал без подписчиков удаляется.
+    pub fn release(&self, channel: Channel) {
+        let mut channels = self.lock();
+        if channels
+            .get(&channel)
+            .is_some_and(|sender| sender.receiver_count() == 0)
+        {
+            channels.remove(&channel);
+        }
+    }
+
+    /// Сколько каналов в хабе. Для тестов и метрик.
+    pub fn channel_count(&self) -> usize {
+        self.lock().len()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Channel, broadcast::Sender<Arc<Event>>>> {
+        self.channels.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Получать все события, опубликованные после вызова.
@@ -117,6 +167,38 @@ mod tests {
         assert_eq!(event.kind, "post.created");
         assert_eq!(event.channels, [Channel::Thread(thread)]);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn channel_subscriber_gets_only_its_channel_and_hub_shrinks() {
+        let bus = EventBus::default();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut rx = bus.subscribe_channel(Channel::Room(a));
+        assert_eq!(bus.channel_count(), 1);
+        bus.publish(Event::new("x", vec![Channel::Room(b)], json!({})));
+        bus.publish(Event::new(
+            "y",
+            vec![Channel::Room(a), Channel::Room(b)],
+            json!({}),
+        ));
+        assert_eq!(rx.recv().await.unwrap().kind, "y");
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+        bus.release(Channel::Room(a));
+        assert_eq!(bus.channel_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn release_keeps_channel_with_other_subscribers() {
+        let bus = EventBus::default();
+        let room = Channel::Room(Uuid::new_v4());
+        let first = bus.subscribe_channel(room);
+        let mut second = bus.subscribe_channel(room);
+        drop(first);
+        bus.release(room);
+        assert_eq!(bus.channel_count(), 1);
+        bus.publish(Event::new("z", vec![room], json!({})));
+        assert_eq!(second.recv().await.unwrap().kind, "z");
     }
 
     #[test]

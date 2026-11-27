@@ -11,6 +11,7 @@ pub mod admin;
 pub mod annotations;
 pub mod attachments;
 pub mod chat;
+pub mod chat_batcher;
 pub mod collection_comments;
 pub mod collection_links;
 pub mod collection_search;

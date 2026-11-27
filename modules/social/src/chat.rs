@@ -12,6 +12,7 @@
 //! каждого клиента); правка и удаление — только id, клиент перечитывает `GET /chat/messages/{id}`.
 
 use crate::attachments::{self, Attachment};
+use crate::chat_batcher::{Batcher, PendingMessage};
 use crate::dm::{self, DmRef};
 use crate::events::{self, room_parts};
 use crate::refs;
@@ -29,7 +30,9 @@ use shared::error::ErrorBody;
 use shared::extract::{JsonBody, Path, Query};
 use shared::{AppError, AppResult, AppState, AuthUser, Role};
 use sqlx::PgConnection;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -507,8 +510,243 @@ async fn notify_mentions(
     Ok(())
 }
 
+/// Последних отправленных сообщений, которые помнятся в памяти (id → комната): `chat.read` и
+/// `reply_to` на сообщение, ещё не записанное пачкой, не ходят в БД.
+const RECENT_MESSAGES: usize = 4096;
+/// Сколько держать автора (имя, аватар) в памяти для событий чата.
+const AUTHOR_TTL: Duration = Duration::from_secs(60);
+
 /// Реализация `shared::directory::Chat`: вызывает `realtime` на `chat.send` и `chat.read`.
-pub struct PgChat;
+///
+/// Горячий путь `chat.send` без вложения — без записи в БД: лимит частоты, комната, автор и
+/// последние сообщения — в памяти; сообщение сразу уходит в событие, а в БД — пачкой
+/// ([`crate::chat_batcher`]). С вложением — прямая транзакция, как раньше (привязка вложения
+/// проверяется в БД и должна откатить отправку).
+#[derive(Default)]
+pub struct PgChat {
+    /// Запускается при первой отправке: пул берётся из `AppState`.
+    batcher: OnceLock<Batcher>,
+    /// Комната → id строки `chat_rooms` (уже найдена или создана).
+    rooms: Mutex<HashMap<ChatRoom, Uuid>>,
+    /// Личная переписка → её двое (неизменны).
+    dm_pairs: Mutex<HashMap<Uuid, (Uuid, Uuid)>>,
+    /// Лимит частоты: автор → время последних сообщений.
+    rate: Mutex<HashMap<Uuid, VecDeque<Instant>>>,
+    recent: Mutex<Recent>,
+    authors: Mutex<HashMap<Uuid, (UserRef, Instant)>>,
+}
+
+#[derive(Default)]
+struct Recent {
+    rooms: HashMap<Uuid, Uuid>,
+    order: VecDeque<Uuid>,
+}
+
+impl Recent {
+    fn insert(&mut self, message_id: Uuid, room_id: Uuid) {
+        if self.order.len() == RECENT_MESSAGES {
+            if let Some(old) = self.order.pop_front() {
+                self.rooms.remove(&old);
+            }
+        }
+        self.order.push_back(message_id);
+        self.rooms.insert(message_id, room_id);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Время с точностью PostgreSQL (микросекунды): сообщение из события совпадает с историей.
+fn now_micros() -> DateTime<Utc> {
+    let now = Utc::now();
+    DateTime::from_timestamp_micros(now.timestamp_micros()).unwrap_or(now)
+}
+
+impl PgChat {
+    fn batcher(&self, state: &AppState) -> &Batcher {
+        self.batcher
+            .get_or_init(|| Batcher::spawn(state.db.clone()))
+    }
+
+    /// Не больше [`RATE_MESSAGES`] за [`RATE_WINDOW_SECS`] у автора; иначе 429. Считаются только
+    /// принятые сообщения: попытка, отклонённая проверками, место не занимает
+    /// ([`PgChat::record_rate`] — после всех проверок).
+    fn check_rate(&self, user_id: Uuid) -> AppResult<()> {
+        let window = Duration::from_secs(RATE_WINDOW_SECS);
+        let now = Instant::now();
+        let mut rate = lock(&self.rate);
+        // Изредка выметаем молчащих авторов, чтобы карта не росла.
+        if rate.len() > 10_000 {
+            rate.retain(|_, times| {
+                times
+                    .back()
+                    .is_some_and(|t| now.duration_since(*t) < window)
+            });
+        }
+        let times = rate.entry(user_id).or_default();
+        while times
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= window)
+        {
+            times.pop_front();
+        }
+        if times.len() as i64 >= RATE_MESSAGES {
+            return Err(AppError::TooManyRequests {
+                retry_after_secs: RATE_WINDOW_SECS,
+            });
+        }
+        Ok(())
+    }
+
+    fn record_rate(&self, user_id: Uuid) {
+        lock(&self.rate)
+            .entry(user_id)
+            .or_default()
+            .push_back(Instant::now());
+    }
+
+    /// Собеседник в личке (пара — из памяти после первого запроса). Не участник — 404.
+    async fn dm_peer(&self, state: &AppState, dm_id: Uuid, me: Uuid) -> AppResult<Uuid> {
+        let cached = lock(&self.dm_pairs).get(&dm_id).copied();
+        let (a, b) = match cached {
+            Some(pair) => pair,
+            None => {
+                let peer = dm::peer_of(state, dm_id, me).await?;
+                lock(&self.dm_pairs).insert(dm_id, (me, peer));
+                (me, peer)
+            }
+        };
+        match (a == me, b == me) {
+            (true, _) => Ok(b),
+            (_, true) => Ok(a),
+            _ => Err(AppError::NotFound),
+        }
+    }
+
+    /// id комнаты: из памяти или найти/создать в БД (не в транзакции отправки).
+    async fn room_id_cached(&self, state: &AppState, room: ChatRoom) -> AppResult<Uuid> {
+        if let Some(id) = lock(&self.rooms).get(&room).copied() {
+            return Ok(id);
+        }
+        let mut conn = state.db.acquire().await?;
+        let id = room_id(&mut conn, room).await?;
+        lock(&self.rooms).insert(room, id);
+        Ok(id)
+    }
+
+    /// `reply_to` — неудалённое сообщение той же комнаты (недавнее — из памяти).
+    async fn check_reply(&self, state: &AppState, room_id: Uuid, parent: Uuid) -> AppResult<()> {
+        if lock(&self.recent).rooms.get(&parent) == Some(&room_id) {
+            return Ok(());
+        }
+        let deleted: Option<bool> = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM chat_messages WHERE id = $1 AND room_id = $2",
+        )
+        .bind(parent)
+        .bind(room_id)
+        .fetch_optional(&state.db)
+        .await?;
+        match deleted {
+            None => Err(AppError::BadRequest(
+                "reply_to: no such message in this room".into(),
+            )),
+            Some(true) => Err(AppError::BadRequest(
+                "reply_to: cannot reply to a deleted message".into(),
+            )),
+            Some(false) => Ok(()),
+        }
+    }
+
+    /// Автор для события: из памяти на [`AUTHOR_TTL`], иначе `UserDirectory`.
+    async fn author(&self, state: &AppState, user_id: Uuid) -> AppResult<Option<UserRef>> {
+        if let Some((user, at)) = lock(&self.authors).get(&user_id) {
+            if at.elapsed() < AUTHOR_TTL {
+                return Ok(Some(user.clone()));
+            }
+        }
+        let user = refs::users(state, vec![user_id]).await?.remove(&user_id);
+        if let Some(user) = &user {
+            let mut authors = lock(&self.authors);
+            if authors.len() > 10_000 {
+                authors.retain(|_, (_, at)| at.elapsed() < AUTHOR_TTL);
+            }
+            authors.insert(user_id, (user.clone(), Instant::now()));
+        }
+        Ok(user)
+    }
+
+    /// Отправка с вложением: одна транзакция, как до пакетной записи.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_direct(
+        &self,
+        state: &AppState,
+        user_id: Uuid,
+        room: ChatRoom,
+        room_id: Uuid,
+        body: String,
+        reply_to: Option<Uuid>,
+        attachment_id: Uuid,
+        dm_peer: Option<Uuid>,
+    ) -> AppResult<Value> {
+        // Пачка с более ранними сообщениями — раньше этого (порядок в комнате).
+        self.flush().await;
+        let mut tx = state.db.begin().await?;
+        let (id, created_at): (Uuid, DateTime<Utc>) = sqlx::query_as(
+            "INSERT INTO chat_messages (room_id, author_id, reply_to, body)
+             VALUES ($1, $2, $3, $4) RETURNING id, created_at",
+        )
+        .bind(room_id)
+        .bind(user_id)
+        .bind(reply_to)
+        .bind(&body)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(validate::missing_reference)?;
+        sqlx::query(
+            "UPDATE chat_rooms SET messages_count = messages_count + 1,
+                 last_message_id = GREATEST(last_message_id, $2),
+                 last_message_at = GREATEST(last_message_at, $3)
+             WHERE id = $1",
+        )
+        .bind(room_id)
+        .bind(id)
+        .bind(created_at)
+        .execute(&mut *tx)
+        .await?;
+        // Не своё или уже использованное вложение откатит всю отправку.
+        attachments::attach(&mut tx, attachment_id, user_id, id).await?;
+        mark_read(&mut tx, user_id, room_id, id).await?;
+        if let Some(peer) = dm_peer {
+            sqlx::query("DELETE FROM chat_room_hidden WHERE user_id = $1 AND room_id = $2")
+                .bind(peer)
+                .bind(room_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        lock(&self.recent).insert(id, room_id);
+
+        let (kind, target_id) = room_parts(room);
+        let message_body = body.clone();
+        let row = MessageRow {
+            id,
+            kind: kind.to_string(),
+            target_id,
+            author_id: user_id,
+            reply_to,
+            body,
+            created_at,
+            edited_at: None,
+            deleted_at: None,
+        };
+        let message = serde_json::json!(messages(state, vec![row]).await?.remove(0));
+        events::publish(state, events::chat_message_created(room, &message));
+        notify_mentions(state, user_id, room, &message_body, &message).await?;
+        Ok(message)
+    }
+}
 
 #[async_trait]
 impl Chat for PgChat {
@@ -529,103 +767,64 @@ impl Chat for PgChat {
         };
         // В личную переписку пишут только её двое и только если никто никого не заблокировал.
         let dm_peer = match room {
-            ChatRoom::Dm(id) => Some(dm::peer_of(state, id, user_id).await?),
+            ChatRoom::Dm(id) => Some(self.dm_peer(state, id, user_id).await?),
             _ => None,
         };
         if let Some(peer) = dm_peer {
             dm::check_not_blocked(state, user_id, peer).await?;
         }
-        let recent: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM chat_messages
-             WHERE author_id = $1 AND created_at > now() - make_interval(secs => $2)",
-        )
-        .bind(user_id)
-        .bind(RATE_WINDOW_SECS as f64)
-        .fetch_one(&state.db)
-        .await?;
-        if recent >= RATE_MESSAGES {
-            return Err(AppError::TooManyRequests {
-                retry_after_secs: RATE_WINDOW_SECS,
-            });
-        }
-
-        let mut tx = state.db.begin().await?;
-        let room_id = room_id(&mut tx, room).await?;
+        self.check_rate(user_id)?;
+        let room_id = self.room_id_cached(state, room).await?;
         if let Some(parent) = reply_to {
-            let deleted: Option<bool> = sqlx::query_scalar(
-                "SELECT deleted_at IS NOT NULL FROM chat_messages WHERE id = $1 AND room_id = $2",
-            )
-            .bind(parent)
-            .bind(room_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            match deleted {
-                None => {
-                    return Err(AppError::BadRequest(
-                        "reply_to: no such message in this room".into(),
-                    ))
-                }
-                Some(true) => {
-                    return Err(AppError::BadRequest(
-                        "reply_to: cannot reply to a deleted message".into(),
-                    ))
-                }
-                Some(false) => {}
-            }
+            self.check_reply(state, room_id, parent).await?;
         }
-        let (id, created_at): (Uuid, DateTime<Utc>) = sqlx::query_as(
-            "INSERT INTO chat_messages (room_id, author_id, reply_to, body)
-             VALUES ($1, $2, $3, $4) RETURNING id, created_at",
-        )
-        .bind(room_id)
-        .bind(user_id)
-        .bind(reply_to)
-        .bind(&body)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(validate::missing_reference)?;
-        sqlx::query(
-            "UPDATE chat_rooms SET messages_count = messages_count + 1,
-                 last_message_id = $2, last_message_at = $3
-             WHERE id = $1",
-        )
-        .bind(room_id)
-        .bind(id)
-        .bind(created_at)
-        .execute(&mut *tx)
-        .await?;
-        // Вложение привязываем здесь же: не своё или уже использованное откатит всю отправку.
+        self.record_rate(user_id);
         if let Some(attachment_id) = attachment_id {
-            attachments::attach(&mut tx, attachment_id, user_id, id).await?;
+            return self
+                .send_direct(
+                    state,
+                    user_id,
+                    room,
+                    room_id,
+                    body,
+                    reply_to,
+                    attachment_id,
+                    dm_peer,
+                )
+                .await;
         }
-        // Своё сообщение прочитано.
-        mark_read(&mut tx, user_id, room_id, id).await?;
-        tx.commit().await?;
 
+        let id = Uuid::now_v7();
+        let created_at = now_micros();
         let (kind, target_id) = room_parts(room);
-        let message_body = body.clone();
-        let row = MessageRow {
+        let message = ChatMessage {
             id,
             kind: kind.to_string(),
             target_id,
-            author_id: user_id,
+            author: self.author(state, user_id).await?,
+            body: Some(body.clone()),
             reply_to,
-            body,
+            attachment: None,
             created_at,
             edited_at: None,
-            deleted_at: None,
+            deleted: false,
         };
-        let message = serde_json::json!(messages(state, vec![row]).await?.remove(0));
+        let message = serde_json::json!(message);
+        lock(&self.recent).insert(id, room_id);
+        // Событие — сразу, запись — пачкой (см. chat_batcher).
         events::publish(state, events::chat_message_created(room, &message));
-        // Новое сообщение возвращает переписку в список собеседнику, если он её убирал.
-        if let Some(peer) = dm_peer {
-            sqlx::query("DELETE FROM chat_room_hidden WHERE user_id = $1 AND room_id = $2")
-                .bind(peer)
-                .bind(room_id)
-                .execute(&state.db)
-                .await?;
-        }
-        notify_mentions(state, user_id, room, &message_body, &message).await?;
+        notify_mentions(state, user_id, room, &body, &message).await?;
+        self.batcher(state)
+            .push(PendingMessage {
+                id,
+                room_id,
+                author_id: user_id,
+                reply_to,
+                body,
+                created_at,
+                dm_peer,
+            })
+            .await;
         Ok(message)
     }
 
@@ -636,21 +835,34 @@ impl Chat for PgChat {
         room: ChatRoom,
         message_id: Uuid,
     ) -> AppResult<()> {
-        let mut tx = state.db.begin().await?;
-        let room_id: Option<Uuid> = sqlx::query_scalar(&format!(
-            "SELECT m.room_id FROM chat_messages m JOIN chat_rooms r ON r.id = m.room_id
-             WHERE m.id = $1 AND r.{} = $2",
-            column(room)
-        ))
-        .bind(message_id)
-        .bind(room_parts(room).1)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let room_id = room_id.ok_or(AppError::NotFound)?;
-        mark_read(&mut tx, user_id, room_id, message_id).await?;
-        tx.commit().await?;
+        // Недавнее сообщение (может ещё ждать записи) — комната из памяти.
+        let recent = lock(&self.recent).rooms.get(&message_id).copied();
+        let cached_room = lock(&self.rooms).get(&room).copied();
+        let room_id = match (recent, cached_room) {
+            (Some(recent), Some(room_id)) if recent == room_id => room_id,
+            _ => {
+                let room_id: Option<Uuid> = sqlx::query_scalar(&format!(
+                    "SELECT m.room_id FROM chat_messages m JOIN chat_rooms r ON r.id = m.room_id
+                     WHERE m.id = $1 AND r.{} = $2",
+                    column(room)
+                ))
+                .bind(message_id)
+                .bind(room_parts(room).1)
+                .fetch_optional(&state.db)
+                .await?;
+                room_id.ok_or(AppError::NotFound)?
+            }
+        };
+        // Запись — пачкой; другим устройствам событие сразу.
+        self.batcher(state).read(user_id, room_id, message_id).await;
         events::publish(state, events::chat_read(user_id, room, message_id));
         Ok(())
+    }
+
+    async fn flush(&self) {
+        if let Some(batcher) = self.batcher.get() {
+            batcher.flush().await;
+        }
     }
 
     async fn room_by_slug(

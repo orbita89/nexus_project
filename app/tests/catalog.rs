@@ -2,10 +2,9 @@
 //! ревалидация статики фронтенда), перестройка индекса с версиями.
 //!
 //! Данные — `fixtures/catalog.sql`. Карточки читаются из PostgreSQL; поиск и перестройка — в
-//! индексах Tantivy во временном каталоге (`SEARCH_INDEX_DIR`), блокировка перестройки — в Redis
-//! (`REDIS_URL`, поднимается `make up`). Фронтенд для ISR — [`FakeIsr`]. У каждого теста свои
-//! каталог индексов и префикс ключей; [`test_utils::IndexDir`] и [`test_utils::Cleanup`] удаляют
-//! их и при падении теста.
+//! индексах Tantivy во временном каталоге (`SEARCH_INDEX_DIR`), блокировка перестройки — в кэше
+//! процесса (`shared::cache::LocalStore`). Фронтенд для ISR — [`FakeIsr`]. У каждого теста свои
+//! каталог индексов и кэш; [`test_utils::IndexDir`] удаляет каталог и при падении теста.
 
 use axum::http::{Method, StatusCode};
 use serde_json::{json, Value};
@@ -13,21 +12,19 @@ use shared::{AppState, Config};
 use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use test_utils::{request, Cleanup, TestResponse};
+use test_utils::{request, TestResponse};
 use uuid::Uuid;
 
 const CATALOG: &str = "/api/v1/catalog";
 
 struct Ctx {
     state: AppState,
-    _cleanup: Cleanup,
     _index: Option<test_utils::IndexDir>,
 }
 
 impl Ctx {
     fn from_state(state: AppState, index: Option<test_utils::IndexDir>) -> Self {
         Self {
-            _cleanup: Cleanup::new(&state),
             state,
             _index: index,
         }
@@ -41,7 +38,7 @@ impl Ctx {
         test_utils::state_with_config(pool, config).0
     }
 
-    /// Как в проде: индексы и Redis включены, индексы построены из фикстур (работы, люди, книги).
+    /// Как в проде: индексы и кэш включены, индексы построены из фикстур (работы, люди, книги).
     async fn new(pool: PgPool) -> Self {
         let ctx = Self::unindexed(pool);
         catalog::search::reindex(
@@ -54,7 +51,7 @@ impl Ctx {
         ctx
     }
 
-    /// Индексы и Redis включены, индексов ещё нет.
+    /// Индексы и кэш включены, индексов ещё нет.
     fn unindexed(pool: PgPool) -> Self {
         let (state, index) = test_utils::with_index(Self::base(pool));
         Self::from_state(test_utils::with_cache(state), Some(index))
@@ -1910,13 +1907,11 @@ async fn get_on(state: &AppState, path: &str) -> TestResponse {
     request(app, Method::GET, &format!("{CATALOG}{path}"), None, None).await
 }
 
-/// Карточки сущностей и людей — из PostgreSQL: без индексов и Redis, правки в обход API видны
-/// сразу.
+/// Карточки сущностей и людей — из PostgreSQL: без индексов, с включённым кэшем правки в обход
+/// API видны сразу.
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn cards_read_postgres_without_search_or_redis(pool: PgPool) {
-    let state = test_utils::with_cache_at(Ctx::base(pool), "redis://127.0.0.1:1");
-    let started = std::time::Instant::now();
-
+async fn cards_read_postgres_without_search(pool: PgPool) {
+    let state = test_utils::with_cache(Ctx::base(pool));
     let card = get_on(&state, "/entities/dune-2021").await;
     assert_eq!(card.status, StatusCode::OK);
     assert_eq!(card.json()["title"], "Дюна");
@@ -1941,10 +1936,6 @@ async fn cards_read_postgres_without_search_or_redis(pool: PgPool) {
             .iter()
             .any(|c| c["person"]["full_name"] == "Д. Вильнёв"),
         "{card}"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "waited for Redis"
     );
 }
 

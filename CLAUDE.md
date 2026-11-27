@@ -1,6 +1,6 @@
 # CLAUDE.md — AI agent instructions (Nexus backend)
 
-Nexus: modular monolith — Rust 1.98, axum 0.8, sqlx 0.8, PostgreSQL 18, Redis, Tantivy.
+Nexus: modular monolith — Rust 1.98, axum 0.8, sqlx 0.8, PostgreSQL 18 (без Redis), Tantivy.
 Workspace: `app/` (bin `nexus`), `modules/{auth,catalog,social,realtime}` (one crate each), `libs/shared`, `libs/test-utils`.
 
 ## 1. Context Loading (CRITICAL)
@@ -22,14 +22,14 @@ Workspace: `app/` (bin `nexus`), `modules/{auth,catalog,social,realtime}` (one c
   - `state.people`: `PersonDirectory` — `by_slug`, `by_ids` → `PersonRef` (impl: `catalog`)
   - `state.tags`: `TagDirectory` — `by_slug`, `by_ids` → `TagRef` (impl: `catalog`)
   - `state.awards`: `AwardDirectory` — `by_slug` (`oscar` / `oscar-2024`), `by_ids` → `AwardRoomRef` (impl: `catalog`)
-  - `state.chat`: `Chat` — `send`, `read`, `room_by_slug`, `room_slugs` (impl: `social`; called by `realtime` for WS `chat.send`/`chat.read`)
+  - `state.chat`: `Chat` — `send`, `read`, `room_by_slug`, `room_slugs`, `flush` (impl: `social`; called by `realtime` for WS `chat.send`/`chat.read`)
   Batch always (`by_ids`, `by_slugs`): one query per list, no N+1. New need → new directory method, never a JOIN.
 - Auth checks (`AuthUser`, `AdminUser`, `Role`) live in `shared` — never re-implement them inside a module.
 
 ## 3. Events (CRITICAL)
 
 - Cross-module notifications ONLY via `shared::events::EventBus` (`state.events.publish(...)`). NEVER call another module's code directly.
-- Publish strictly AFTER successful `tx.commit()`; on any error publish nothing.
+- Publish strictly AFTER successful `tx.commit()`; on any error publish nothing. Only exception: chat `chat.message.created` (no attachment) and `chat.read` are published immediately and written to PG in batches by `social::chat_batcher` (50 msgs / 1 s; REST `social` calls `state.chat.flush()` first; SIGTERM flushes). Accepted risk: a crash loses the last ~1 s (user decision 2026-11-26).
 - `Event.data` = ids only — no texts, names or counts; clients re-read data via REST API. Only exception: `chat.message.created` carries the message itself (`social::chat`), otherwise every chat message = a GET from every online client.
 - Channels: `shared::events::Channel::{Thread, Entity, Person, Tag, Room, User}`; the only consumer is `realtime`.
 

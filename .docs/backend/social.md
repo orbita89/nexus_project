@@ -426,11 +426,32 @@
 | `chat_mutes` | PK (`user_id`, `room_id`), оба FK CASCADE; `created_at` | Заглушённые комнаты: события приходят, фронтенд не показывает уведомления |
 
 **Индексы:** `chat_messages_room_idx` (`room_id`, `id DESC`) — история; `chat_messages_author_idx`
-(`author_id`, `created_at DESC`) — лимит частоты.
+(`author_id`, `created_at DESC`) — сообщения автора.
+
+**Хранение (миграция `20261219100000_db_tuning_chat.sql`):** `chat_rooms`, `chat_reads` —
+`fillfactor = 90`, `autovacuum_vacuum_scale_factor = autovacuum_analyze_scale_factor = 0.05`
+(HOT-апдейты счётчика и прочитанного); `chat_messages` — `autovacuum_vacuum_insert_scale_factor =
+autovacuum_analyze_scale_factor = 0.05`. Там же `CREATE EXTENSION pg_stat_statements`
+(загружается через `shared_preload_libraries` в `infra/postgres/postgresql.conf`).
+
+**Запись пачкой (`chat_batcher.rs`, 2026-11-26):** `chat.send` без вложения не пишет в БД
+на горячем пути — id (`Uuid::now_v7`) и `created_at` (с точностью до мкс) задаёт приложение,
+комната (`ChatRoom` → `chat_rooms.id`), пара личной переписки, автор (60 с) и последние 4096
+сообщений (для `reply_to` и `chat.read`) — в памяти `PgChat`. Событие `chat.message.created`
+уходит сразу (до записи), строки пишет фоновый батчер одной транзакцией на 50 сообщений или
+1 с: `INSERT … FROM UNNEST` в `chat_messages` (`reply_to` на исчезнувшее → `NULL`),
+агрегат по комнатам в `chat_rooms` (`messages_count + n`, `last_message_id/at` через
+`GREATEST`), upsert `chat_reads` (автор прочитал своё + `chat.read`, `GREATEST`), `DELETE`
+из `chat_room_hidden` для собеседника в личке. `chat.read` тоже в пачку, событие — сразу.
+Ошибка пачки — повтор по одному, не записавшееся — в лог. С вложением — прямая транзакция
+(сначала `flush`). Перед любым REST `/api/v1/social/*` middleware `flush_chat_before_social`
+(`app/src/lib.rs`) зовёт `state.chat.flush()` (новый метод `shared::directory::Chat::flush`;
+пустая очередь — бесплатно). SIGTERM: WS закрываются (1012), очередь дописывается
+(`app/src/main.rs`). Риск: падение процесса теряет сообщения последней ~1 с.
 
 **Правила:** текст 1–2000 символов (`MAX_CHAT_BODY`, обрезаются пробелы); не больше 5 сообщений
-автора за 10 с (`RATE_MESSAGES`, `RATE_WINDOW_SECS`; счёт по `chat_messages`, работает и на
-нескольких экземплярах) — иначе 429; `reply_to` — неудалённое сообщение той же комнаты;
+автора за 10 с (`RATE_MESSAGES`, `RATE_WINDOW_SECS`; счёт в памяти процесса `PgChat.rate`,
+экземпляр один) — иначе 429; `reply_to` — неудалённое сообщение той же комнаты;
 непрочитанные — чужие неудалённые сообщения новее `last_read_id`, считаются до 100 (`MAX_UNREAD`).
 
 ### Свои комнаты админа и `chat_room_members` ✅ — чат, этап 3
@@ -1158,7 +1179,8 @@ WebSocket-соединений пользователя (`interest.added` / `int
 | `threads.rs`, `posts.rs` | Форум: темы и сообщения |
 | `interests.rs` | Интересы: сущности, люди, теги (общие `add_interest` / `remove_interest`) |
 | `rooms.rs` | Комнаты со slug: список и поиск, комната, вступление и выход, скрытие системных из «Моих чатов», свои комнаты пользователей (лимиты, зарезервированные слаги, правка и удаление владельцем), жалобы и их разбор, админские создание/правка/удаление; системные закрыты от всех изменений |
-| `chat.rs` | Чат: `PgChat` (`shared::directory::Chat` для realtime), мои чаты, история, поиск по сообщениям, разбор `@упоминаний`, правка, удаление, заглушение |
+| `chat_batcher.rs` | Пакетная запись чата: сообщения и «прочитано» одной транзакцией (50 шт. / 1 с), `flush` |
+| `chat.rs` | Чат: `PgChat` (`shared::directory::Chat` для realtime; лимит частоты, комнаты, авторы в памяти), мои чаты, история, поиск по сообщениям, разбор `@упоминаний`, правка, удаление, заглушение |
 | `feed.rs` | Лента: ярусы, курсор |
 | `events.rs` | События для `realtime` |
 | `attachments.rs` | Вложения чата: загрузка и пережатие в WebP, раздача с проверкой доступа, привязка к сообщению, уборка сирот |

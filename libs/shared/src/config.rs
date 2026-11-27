@@ -10,7 +10,6 @@ pub struct Config {
     /// Адрес, который слушает HTTP-сервер.
     pub bind_addr: String,
     pub database_url: String,
-    pub redis_url: String,
     /// Куда класть вложения чата. Файлы раздаёт приложение, а не nginx: вложение из личной
     /// переписки не должно открываться по прямой ссылке.
     pub attachments_dir: String,
@@ -19,9 +18,9 @@ pub struct Config {
     pub avatars_dir: String,
     /// Кэш карточек каталога ([`crate::cache`]): L1 в памяти процесса, `CACHE_L1_TTL_SECS`.
     pub cache_l1_ttl_secs: u64,
-    /// Сколько записей держит L1, `CACHE_L1_CAPACITY`.
-    pub cache_l1_capacity: u64,
-    /// L2 в Redis, `CACHE_L2_TTL_SECS`.
+    /// Предел памяти L1 в мегабайтах (по длине JSON), `CACHE_L1_MAX_MB`.
+    pub cache_l1_max_mb: u64,
+    /// TTL записи в L2 (за трейтом `L2Store`), `CACHE_L2_TTL_SECS`.
     pub cache_l2_ttl_secs: u64,
     /// Полная перестройка поискового индекса по расписанию, `SEARCH_REINDEX_INTERVAL_SECS`.
     /// `0` — только при старте и вручную.
@@ -205,11 +204,10 @@ impl Config {
                 "DATABASE_URL",
                 "postgres://nexus_user:nexus_password@localhost:5432/nexus_db",
             ),
-            redis_url: var_or("REDIS_URL", "redis://localhost:6379"),
             attachments_dir: var_or("ATTACHMENTS_DIR", "data/attachments"),
             avatars_dir: var_or("AVATARS_DIR", "data/avatars"),
             cache_l1_ttl_secs: number_or("CACHE_L1_TTL_SECS", 30),
-            cache_l1_capacity: number_or("CACHE_L1_CAPACITY", 10_000),
+            cache_l1_max_mb: number_or("CACHE_L1_MAX_MB", 32),
             cache_l2_ttl_secs: number_or("CACHE_L2_TTL_SECS", 86_400),
             search_reindex_interval_secs: number_or("SEARCH_REINDEX_INTERVAL_SECS", 86_400),
             search_reindex_min_percent: percent_or("SEARCH_REINDEX_MIN_PERCENT", 80),

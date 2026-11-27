@@ -1034,7 +1034,7 @@ CHECK (1..65535)` — место в общем списке (1 — первое)
 | Ошибка с полем | `shared::error::AppError::Invalid { field, message }` / `AppError::on_field` → 400 `{error, code:"validation", field}` (`ErrorBody.field`) | валидация баннеров |
 | Дамп LibGen | локальный файл (`flate2` для `.gz`); обложки — `https://libgen.is/covers/` (`books::COVERS`) | `nexus books import` |
 | Книжный поиск | `tantivy` 0.26 (+ `stemmer`; свой `Collector` `OrdHits`) — слой А; `roaring` 0.10 (фасеты на `RoaringBitmap`) и `arc-swap` 1 (`ArcSwap<Sidecar>`, подмена без блокировок) — слой Б в RAM; каталог `BOOKS_INDEX_DIR` (`Config::books_index_dir`; не задан — книги в Meilisearch; там же снимок `sidecar.bin`); обложки — `BOOK_COVERS_DIR` (`Config::book_covers_dir`), gateway `/covers/books/` | `catalog::books::{index,sidecar,sync,search,ranks,cassandra}`, `nexus books cassandra\|index\|search\|ranks\|sidecar` |
-| Блокировки перестройки | Redis (`shared::cache`): `nexus:v1:catalog:reindex-running`, `nexus:v1:catalog:reindex-lock` | «одна перестройка за раз» между инстансами |
+| Блокировки перестройки | Память процесса (`shared::cache::LocalStore`): `nexus:v1:catalog:reindex-running`, `nexus:v1:catalog:reindex-lock` | «одна перестройка за раз» внутри процесса (Redis убран 2026-11-26) |
 
 </deps>
 
@@ -1309,11 +1309,11 @@ curl -s 'localhost:7700/tasks?limit=10' -H "$KEY" | jq                        # 
 
 ## Карточки ✅
 
-`GET /entities/{slug}` и `GET /people/{slug}` читают PostgreSQL: без кэша, без Redis и без
+`GET /entities/{slug}` и `GET /people/{slug}` читают PostgreSQL: без кэша и без
 Meilisearch. Публичные страницы отдаёт фронтенд статикой (SSG/ISR), сюда приходят её пересборка и
 админка, поэтому кэш не нужен. После правки бэкенд просит фронтенд пересобрать страницы
 ([«Публикация»](#публикация-правок-)). `moka` и `shared::cache` остаются в проекте; каталог использует
-Redis только для блокировок перестройки.
+кэш только для блокировок перестройки (в памяти процесса, `LocalStore`; Redis убран).
 
 ## Публикация правок ✅
 
@@ -1442,7 +1442,7 @@ data: {"type":"done","ok":true,"entity":{ ...карточка как в GET /ent
   `works`, `people`, `isr`; `ReindexResult`: `indexed` = документы movie/series/game/painting, `people_indexed`,
   `previous_count`, `previous_version` = `""`, `deleted` = `[]`), `nexus search rebuild [book|film|series|game|painting|people|all]
   [--force]`, `nexus books index` (= `rebuild book`), `nexus books sidecar`, `nexus search query <works|people> <q>`,
-  `nexus search bench`, `nexus books load`. Блокировки Redis `catalog:reindex-lock` / `catalog:reindex-running`.
+  `nexus search bench`, `nexus books load`. Блокировки (память процесса) `catalog:reindex-lock` / `catalog:reindex-running`.
 - Контракты HTTP не менялись: `GET /search` (общая выдача без `kind` по-прежнему чередует «2 работы — книга» двумя запросами к
   одному индексу), `/entities/{slug}/neighbors`, `similar`, `/search/studios|publishers|museums|countries|tags` (подсказки из
   слоя Б, внутри `kind` — пересчёт по верхушке 2000), `/search/people`.
@@ -1490,9 +1490,9 @@ data: {"type":"done","ok":true,"entity":{ ...карточка как в GET /ent
    пересобирает всю статику в фоне, поэтому шаг значит «запущено», а не «готово» (ход — в логе фронтенда). Только при
    ручном запуске; при старте и по расписанию — нет.
 
-- **Одна за раз.** В процессе — набор идущих перестроек, между инстансами — блокировка
-  `nexus:v1:catalog:reindex-running` в Redis (TTL 2 мин, работающая перестройка продлевает его каждые 30 с: убитый процесс — перезапуск, деплой — не держит блокировку дольше 2 мин; снимается в конце). Занято —
-  `409` до потока. Без Redis перестраивает каждый (warning).
+- **Одна за раз.** В процессе — набор идущих перестроек, и блокировка
+  `nexus:v1:catalog:reindex-running` в памяти процесса (`shared::cache::LocalStore`; отдельный CLI-процесс `nexus …` её не видит; TTL 2 мин, работающая перестройка продлевает его каждые 30 с: убитый процесс — перезапуск, деплой — не держит блокировку дольше 2 мин; снимается в конце). Занято —
+  `409` до потока.
 - **Правки во время перестройки** пишутся и в живой, и в теневой индекс, поэтому после swap не
   теряются. Ограничение: только правки на том же инстансе, где идёт перестройка.
 - **По расписанию** (`SEARCH_REINDEX_INTERVAL_SECS=86400`, `0` — только при старте и вручную)

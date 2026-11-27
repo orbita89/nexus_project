@@ -6,13 +6,18 @@
 #   docker compose -f infra/docker-compose.prod.yml --env-file infra/.env.prod up -d
 #
 # Обязательные переменные заданы как ${VAR:?...}: без них compose не стартует, а не поднимает
-# прод с паролем по умолчанию. Наружу открыт только nginx; Postgres и Redis — нет.
+# прод с паролем по умолчанию. Наружу открыт только nginx; Postgres — нет.
 
 name: "nexus-${NEXUS_ENV:?NEXUS_ENV is required (staging or production)}"
 
 services:
   postgres:
     image: postgres:18-alpine
+    # Настройки под слабый сервер (1 ГБ RAM): infra/postgres/postgresql.conf.
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    shm_size: 64m
+    mem_limit: 256m
+    stop_grace_period: 30s
     restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nexus}
@@ -22,6 +27,7 @@ services:
       # С 18-й версии образ хранит данные в /var/lib/postgresql/18/docker, том — на /var/lib/postgresql.
       # Новое имя тома: старый (pgdata, PostgreSQL 17) 18-я версия не прочитает.
       - pgdata18:/var/lib/postgresql
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus}"]
       interval: 5s
@@ -29,25 +35,15 @@ services:
       retries: 10
       start_period: 10s
 
-  redis:
-    image: redis:7-alpine
-    restart: always
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   app:
     # Тег — sha коммита из CI: на прод уходит ровно тот образ, что прошёл staging.
     image: ${NEXUS_IMAGE:?NEXUS_IMAGE is required, e.g. ghcr.io/orbita89/nexus_project:<sha>}
     restart: always
+    mem_limit: 384m
+    # SIGTERM → graceful shutdown: дописать буферы чата в БД.
+    stop_grace_period: 20s
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexus}
-      REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (openssl rand -base64 48)}
       SMTP_URL: ${SMTP_URL:?SMTP_URL is required (smtps://user:pass@host:465)}
       MAIL_FROM: ${MAIL_FROM:?MAIL_FROM is required}
@@ -85,6 +81,12 @@ services:
       MIMALLOC_PURGE_DELAY: ${MIMALLOC_PURGE_DELAY-0}
       # Потоков для поиска: лишние запросы ждут в очереди, а не множат память и CPU.
       NEXUS_BLOCKING_THREADS: ${NEXUS_BLOCKING_THREADS-4}
+      # Слабый сервер (1 ГБ, 1–2 ядра): 2 рабочих потока tokio, 5 соединений к Postgres
+      # (max_connections=20 в infra/postgres/postgresql.conf).
+      TOKIO_WORKER_THREADS: ${TOKIO_WORKER_THREADS-2}
+      DB_POOL_MAX: ${DB_POOL_MAX-5}
+      # Одновременных WebSocket на процесс; сверх — 503, клиент переподключается позже.
+      WS_MAX_CONNECTIONS: ${WS_MAX_CONNECTIONS-5000}
       # Индекс книг (по умолчанию <SEARCH_INDEX_DIR>/books). Строит `nexus books index` (и сам
       # сервер, если каталог пуст).
       BOOKS_INDEX_DIR: ${BOOKS_INDEX_DIR-/var/lib/nexus/books-index}
@@ -110,8 +112,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
 
   # Единственная точка входа. Тот же конфиг, что в dev. HTTPS добавляется, когда будут сервер
   # и домен (documents/deploy.md, «HTTPS»).
@@ -135,5 +135,4 @@ volumes:
   coverscache:
   epubcache:
   pgdata18:
-  redisdata:
   archivedata:

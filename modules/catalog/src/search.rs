@@ -17,7 +17,7 @@
 //! 2. известность людей и все публичные люди — так же;
 //! 3. фронтенду — пересборка всей статики (`{"all": true}`), только при ручном запуске.
 //!
-//! Перестройка одна за раз: в процессе — флаг, между инстансами — блокировка в Redis. Правки во
+//! Перестройка одна за раз: в процессе — флаг, и блокировка в кэше (`shared::cache`). Правки во
 //! время перестройки повторяются после переключения.
 
 use crate::entities::check_year;
@@ -157,8 +157,8 @@ pub(crate) fn unavailable() -> AppError {
 
 /// Право на перестройку. Снимать через [`ReindexLock::release`]; в процессе снимается и при drop.
 pub struct ReindexLock {
-    redis: bool,
-    /// Продление блокировки в Redis, пока она взята.
+    locked: bool,
+    /// Продление блокировки в кэше, пока она взята.
     renew: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -175,12 +175,12 @@ impl ReindexLock {
             *running = true;
         }
         let mut lock = Self {
-            redis: false,
+            locked: false,
             renew: None,
         };
         match state.cache.try_lock(RUNNING_LOCK, RUNNING_LOCK_TTL).await {
             Ok(true) => {
-                lock.redis = true;
+                lock.locked = true;
                 let cache = state.cache.clone();
                 lock.renew = Some(tokio::spawn(async move {
                     loop {
@@ -194,7 +194,7 @@ impl ReindexLock {
                 }));
             }
             Ok(false) => return Err(ReindexError::Busy),
-            // Без Redis не узнать про другие инстансы: перестраиваем, как раньше.
+            // Блокировка недоступна: процессный флаг RUNNING уже взят, перестраиваем.
             Err(error) => tracing::warn!(%error, "reindex lock unavailable, rebuilding anyway"),
         }
         Ok(lock)
@@ -204,7 +204,7 @@ impl ReindexLock {
         if let Some(renew) = self.renew.take() {
             renew.abort();
         }
-        if std::mem::take(&mut self.redis) {
+        if std::mem::take(&mut self.locked) {
             state.cache.unlock(RUNNING_LOCK).await;
         }
     }

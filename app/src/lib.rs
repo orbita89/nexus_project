@@ -110,7 +110,7 @@ pub fn directories(db: PgPool) -> Directories {
         users: Arc::new(auth::directory::PgUserDirectory::new(db.clone())),
         interests: Arc::new(social::directory::PgInterestDirectory::new(db.clone())),
         ratings: Arc::new(catalog::directory::PgEntityRatings::new(db.clone())),
-        chat: Arc::new(social::chat::PgChat),
+        chat: Arc::new(social::chat::PgChat::default()),
         people: Arc::new(catalog::directory::PgPersonDirectory::new(db.clone())),
         tags: Arc::new(catalog::directory::PgTagDirectory::new(db.clone())),
         awards: Arc::new(catalog::directory::PgAwardDirectory::new(db.clone())),
@@ -204,8 +204,30 @@ pub fn build_app(state: AppState) -> Router {
         router = router.merge(SwaggerUi::new("/docs").urls(urls).config(config));
     }
     router
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            flush_chat_before_social,
+        ))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Чат пишет сообщения в БД пачкой (`social::chat_batcher`). Перед REST `social` недописанное
+/// дописывается — только что отправленное видно в истории, «моих чатах», правке и удалении.
+/// Очередь пуста — ничего не стоит.
+async fn flush_chat_before_social(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if request
+        .uri()
+        .path()
+        .starts_with(&format!("{API_PREFIX}/social"))
+    {
+        state.chat.flush().await;
+    }
+    next.run(request).await
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]

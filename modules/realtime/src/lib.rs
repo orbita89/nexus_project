@@ -12,7 +12,8 @@ mod connection;
 mod registry;
 
 use axum::extract::{State, WebSocketUpgrade};
-use axum::response::Response;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::{routing::get, Extension, Router};
 use registry::Registry;
 use shared::AppState;
@@ -29,8 +30,29 @@ pub const EXPIRY_WARNING: Duration = Duration::from_secs(60);
 pub const MAX_CHANNELS: usize = 200;
 /// Одновременных соединений одного пользователя (гостевые не ограничены).
 pub const MAX_CONNECTIONS_PER_USER: usize = 5;
-/// Максимальный размер сообщения от клиента.
+/// Максимальный размер сообщения от клиента (и кадра).
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024;
+/// Буферы сокета. По умолчанию в axum — по 128 КиБ на чтение и запись у КАЖДОГО соединения
+/// (тысяча клиентов — ~256 МБ); сообщения чата маленькие, хватает нескольких КиБ.
+pub const READ_BUFFER_SIZE: usize = 4 * 1024;
+pub const WRITE_BUFFER_SIZE: usize = 4 * 1024;
+/// Предел неотправленного в буфере записи: дальше запись — ошибка, соединение закрывается.
+pub const MAX_WRITE_BUFFER_SIZE: usize = 64 * 1024;
+/// Всего соединений на процесс (гости и вошедшие) по умолчанию; сверх — 503 до апгрейда,
+/// клиент переподключается позже. Переопределяется `WS_MAX_CONNECTIONS`: соединение стоит
+/// ~20–50 КБ (буферы, очереди, задача на каждый канал), 5000 — ~100–250 МБ.
+pub const MAX_CONNECTIONS: usize = 5_000;
+
+fn max_connections() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("WS_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|&n: &usize| n > 0)
+            .unwrap_or(MAX_CONNECTIONS)
+    })
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -43,6 +65,16 @@ async fn ws_handler(
     State(state): State<AppState>,
     Extension(registry): Extension<Arc<Registry>>,
 ) -> Response {
+    let Some(guard) = registry.connect(max_connections()) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many connections").into_response();
+    };
     ws.max_message_size(MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| connection::run(socket, state, registry))
+        .max_frame_size(MAX_MESSAGE_SIZE)
+        .read_buffer_size(READ_BUFFER_SIZE)
+        .write_buffer_size(WRITE_BUFFER_SIZE)
+        .max_write_buffer_size(MAX_WRITE_BUFFER_SIZE)
+        .on_upgrade(move |socket| async move {
+            connection::run(socket, state, registry).await;
+            drop(guard);
+        })
 }

@@ -84,7 +84,7 @@ async fn run() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         print!("{report}");
-        // Повторное удаление карточек из Redis (см. shared::cache) — до выхода процесса.
+        // Фоновые задачи кэша (повторное удаление, см. shared::cache) — до выхода процесса.
         state.cache.wait_pending().await;
         return Ok(());
     }
@@ -356,6 +356,9 @@ async fn run() -> anyhow::Result<()> {
         Ok(removed) => tracing::info!(removed, "cleaned up orphan chat attachments"),
         Err(e) => tracing::warn!(error = %e, "orphan attachment cleanup failed"),
     }
+    let state_shutdown = state.shutdown.clone();
+    let state_chat = state.chat.clone();
+    let db = state.db.clone();
     let app = nexus::build_app(state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
@@ -363,8 +366,48 @@ async fn run() -> anyhow::Result<()> {
     if config.api_docs {
         tracing::info!("API docs: /docs");
     }
-    axum::serve(listener, app).await?;
+    let shutdown = state_shutdown.clone();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            wait_for_signal().await;
+            tracing::info!("shutdown signal: closing connections");
+            shutdown.cancel();
+        })
+        .await?;
+    // Фоновые chat.send, начатые до сигнала, успевают поставить сообщение в очередь.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Очередь чата пишется пачками (social::chat_batcher): дописать до выхода.
+    match tokio::time::timeout(std::time::Duration::from_secs(10), state_chat.flush()).await {
+        Ok(()) => tracing::info!("chat queue flushed"),
+        Err(_) => tracing::error!("chat queue flush timed out"),
+    }
+    db.close().await;
     Ok(())
+}
+
+/// SIGINT (Ctrl+C) или SIGTERM (`docker stop`).
+async fn wait_for_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "SIGTERM handler unavailable");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+    }
 }
 
 const MEDIA_USAGE: &str = "usage: nexus media <fill|check> [--dry-run] [--slug SLUG] [--limit N]";

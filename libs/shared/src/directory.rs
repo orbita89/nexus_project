@@ -244,7 +244,8 @@ pub enum ChatRoom {
 
 /// Чат для `realtime`: сообщения, пришедшие по WebSocket (`chat.send`, `chat.read`), пишет
 /// владелец таблиц чата. Реализует `social`. Событие (`chat.message.created`, `chat.read`)
-/// реализация публикует сама — после `commit`, через `state.events`.
+/// реализация публикует сама. Исключение из «publish после commit»: сообщения и «прочитано»
+/// пишутся в БД пачкой (`social::chat_batcher`), событие уходит сразу — до записи.
 #[async_trait]
 pub trait Chat: Send + Sync {
     /// Отправить сообщение от `user_id` (ответ на `reply_to` той же комнаты, с картинкой
@@ -279,6 +280,10 @@ pub trait Chat: Send + Sync {
     async fn dm_room_ids(&self, state: &AppState, user_id: Uuid) -> AppResult<Vec<Uuid>>;
     /// Участник ли пользователь этой переписки: доступ к истории и к панели.
     async fn dm_member(&self, state: &AppState, dm_id: Uuid, user_id: Uuid) -> AppResult<bool>;
+    /// Дописать в БД всё, что ждёт пакетной записи, и дождаться. Перед чтением чата по REST
+    /// (свои только что отправленные сообщения видны сразу) и при остановке сервера.
+    /// Пустая очередь — сразу.
+    async fn flush(&self) {}
 }
 
 /// Студии каталога. Реализует `catalog`. Нужен `social`: комментарии к странице студии.
