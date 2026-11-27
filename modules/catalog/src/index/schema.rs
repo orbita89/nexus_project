@@ -104,9 +104,15 @@ mod tests {
     #[test]
     fn title_key_term_is_stable_and_short() {
         assert_eq!(title_key_term("мастер"), title_key_term("мастер"));
-        assert_ne!(title_key_term("мастер"), title_key_term("мастер и маргарита"));
+        assert_ne!(
+            title_key_term("мастер"),
+            title_key_term("мастер и маргарита")
+        );
         // FNV-1a 64 пустой строки — смещение: формат не должен меняться без смены схемы.
-        assert_eq!(u64::from_le_bytes(title_key_term("")), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(
+            u64::from_le_bytes(title_key_term("")),
+            0xcbf2_9ce4_8422_2325
+        );
     }
 
     #[test]
@@ -119,6 +125,7 @@ mod tests {
             [
                 "card",
                 "extra",
+                "facet",
                 "kind",
                 "ord",
                 "people",

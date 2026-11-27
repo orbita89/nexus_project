@@ -160,8 +160,10 @@ impl QueryBuilder<'_> {
         let people = self.prefix_terms(searcher, self.f.people, &prefixes[..1])?;
         let boosted = |clauses: Vec<(Occur, Box<dyn Query>)>| -> Option<Box<dyn Query>> {
             (!clauses.is_empty()).then(|| {
-                Box::new(BoostQuery::new(Box::new(BooleanQuery::new(clauses)), BOOST_PREFIX))
-                    as Box<dyn Query>
+                Box::new(BoostQuery::new(
+                    Box::new(BooleanQuery::new(clauses)),
+                    BOOST_PREFIX,
+                )) as Box<dyn Query>
             })
         };
         let title_only = boosted(title.iter().map(|(o, q)| (*o, q.box_clone())).collect());
@@ -248,7 +250,8 @@ impl QueryBuilder<'_> {
         ];
         // Опечатки — только в резервном запросе: нечёткий поиск обходит весь словарь поля в
         // каждом сегменте (десятки мс на слово), а строгий запрос выполняется всегда.
-        if title_fuzzy && !is_stop_word(&term.raw) && term.raw.chars().count() >= FUZZY_MIN_TERM_LEN {
+        if title_fuzzy && !is_stop_word(&term.raw) && term.raw.chars().count() >= FUZZY_MIN_TERM_LEN
+        {
             // `true` — перестановка двух соседних букв стоит одну правку.
             clauses.push(boosted(
                 Box::new(FuzzyTermQuery::new(
@@ -320,7 +323,10 @@ impl QueryBuilder<'_> {
                 Occur::Should,
                 Box::new(BoostQuery::new(
                     Box::new(TermQuery::new(
-                        Term::from_field_bytes(self.f.title_key, &crate::index::schema::title_key_term(&key)),
+                        Term::from_field_bytes(
+                            self.f.title_key,
+                            &crate::index::schema::title_key_term(&key),
+                        ),
                         IndexRecordOption::Basic,
                     )),
                     boost,
@@ -455,7 +461,10 @@ impl tantivy_fst::Automaton for Dfa {
     }
 
     fn is_match(&self, state: &u32) -> bool {
-        matches!(self.0.distance(*state), levenshtein_automata::Distance::Exact(_))
+        matches!(
+            self.0.distance(*state),
+            levenshtein_automata::Distance::Exact(_)
+        )
     }
 
     fn can_match(&self, state: &u32) -> bool {

@@ -29,10 +29,33 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep_until, Instant};
 use uuid::Uuid;
 
-/// Сообщений в пачке: набралось — пишем сразу.
+/// Сообщений в пачке по умолчанию: набралось — пишем сразу. Env `CHAT_BATCH_SIZE`.
 pub const BATCH_SIZE: usize = 50;
-/// Не дольше этого сообщение ждёт записи.
+/// Не дольше этого сообщение ждёт записи (по умолчанию). Env `CHAT_FLUSH_MS`.
 pub const FLUSH_EVERY: Duration = Duration::from_secs(1);
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&n: &usize| n > 0)
+}
+
+/// Размер пачки: `CHAT_BATCH_SIZE` или [`BATCH_SIZE`]. Читается один раз.
+pub fn batch_size() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_usize("CHAT_BATCH_SIZE").unwrap_or(BATCH_SIZE))
+}
+
+/// Интервал сброса: `CHAT_FLUSH_MS` (мс) или [`FLUSH_EVERY`]. Читается один раз.
+pub fn flush_every() -> Duration {
+    static V: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        env_usize("CHAT_FLUSH_MS")
+            .map(|ms| Duration::from_millis(ms as u64))
+            .unwrap_or(FLUSH_EVERY)
+    })
+}
 /// Очередь команд. Полная — `send` ждёт (обратное давление), а не копит память.
 const QUEUE: usize = 1024;
 
@@ -172,11 +195,11 @@ async fn run(pool: PgPool, mut rx: mpsc::Receiver<Cmd>, pending: Arc<AtomicUsize
                 continue;
             }
         }
-        if batch.messages.len() >= BATCH_SIZE {
+        if batch.messages.len() >= batch_size() {
             write_batch(&pool, std::mem::take(&mut batch), &pending).await;
             deadline = None;
         } else if deadline.is_none() {
-            deadline = Some(Instant::now() + FLUSH_EVERY);
+            deadline = Some(Instant::now() + flush_every());
         }
     }
 }

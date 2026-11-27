@@ -163,7 +163,10 @@ impl Columns {
     /// Колонка `i` как массив `T` (без копирования).
     pub fn get<T: Pod>(&self, i: usize) -> std::io::Result<Column<T>> {
         let invalid = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, m.to_string());
-        let &(start, len) = self.ranges.get(i).ok_or_else(|| invalid("no such column"))?;
+        let &(start, len) = self
+            .ranges
+            .get(i)
+            .ok_or_else(|| invalid("no such column"))?;
         let bytes = self.bytes.slice(start..start + len);
         // Проверка один раз: дальше `Deref` приводит без ошибок.
         bytemuck::try_cast_slice::<u8, T>(bytes.as_slice())

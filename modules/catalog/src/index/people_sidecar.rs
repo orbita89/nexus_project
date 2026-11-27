@@ -9,7 +9,9 @@ use std::sync::Arc;
 use roaring::RoaringBitmap;
 
 use super::columns::{self, Column, Columns};
-use super::sidecar::{get_bits, get_str, get_u32, next_generation, put_bits, put_str, put_u32, Order};
+use super::sidecar::{
+    get_bits, get_str, get_u32, next_generation, put_bits, put_str, put_u32, Order,
+};
 use super::types::title_sort_key;
 
 /// Порядок выдачи людей.
@@ -168,18 +170,34 @@ impl PeopleSidecar {
         };
         let mut out = vec![
             filed(
-                part("people:fame", (self.fame.len() * 4) as u64, self.fame.len() as u64),
+                part(
+                    "people:fame",
+                    (self.fame.len() * 4) as u64,
+                    self.fame.len() as u64,
+                ),
                 self.fame.is_mapped(),
             ),
             filed(
-                part("people:order:fame", self.by_fame.bytes(), self.by_fame.ords.len() as u64),
+                part(
+                    "people:order:fame",
+                    self.by_fame.bytes(),
+                    self.by_fame.ords.len() as u64,
+                ),
                 self.by_fame.heap_bytes() == 0,
             ),
             filed(
-                part("people:order:name", self.by_name.bytes(), self.by_name.ords.len() as u64),
+                part(
+                    "people:order:name",
+                    self.by_name.bytes(),
+                    self.by_name.ords.len() as u64,
+                ),
                 self.by_name.heap_bytes() == 0,
             ),
-            part("people:visible", self.visible.serialized_size() as u64, self.visible.len()),
+            part(
+                "people:visible",
+                self.visible.serialized_size() as u64,
+                self.visible.len(),
+            ),
         ];
         for (role, bits) in &self.known_for {
             out.push(part(
@@ -199,7 +217,12 @@ impl PeopleSidecar {
     /// Известность и позиции человека с номером `ord`: (видим, fame, место по известности).
     pub fn inspect(&self, ord: u32) -> Option<(bool, f32, Option<u32>, Option<String>)> {
         let fame = *self.fame.get(ord as usize)?;
-        let pos = self.by_fame.ords.iter().position(|&x| x == ord).map(|p| p as u32);
+        let pos = self
+            .by_fame
+            .ords
+            .iter()
+            .position(|&x| x == ord)
+            .map(|p| p as u32);
         let role = self
             .known_for
             .iter()
@@ -320,8 +343,7 @@ impl PeopleSidecar {
     }
 
     fn read(cols: &Columns, input: &mut impl Read) -> std::io::Result<Self> {
-        let invalid =
-            |m: &'static str| std::io::Error::new(std::io::ErrorKind::InvalidData, m);
+        let invalid = |m: &'static str| std::io::Error::new(std::io::ErrorKind::InvalidData, m);
         let mut magic = [0u8; 8];
         input.read_exact(&mut magic)?;
         if &magic != MAGIC || cols.len() != 5 {

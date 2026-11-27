@@ -116,7 +116,11 @@ impl Refs {
             .map(|(name, slug, logo)| {
                 (
                     name,
-                    format!("{}{SEP}{}", clean(&slug), clean(logo.as_deref().unwrap_or(""))),
+                    format!(
+                        "{}{SEP}{}",
+                        clean(&slug),
+                        clean(logo.as_deref().unwrap_or(""))
+                    ),
                 )
             })
             .collect();
@@ -232,7 +236,10 @@ mod tests {
         assert_eq!(refs.studio("A24").unwrap().logo_url, None);
         assert_eq!(refs.studio("Nope"), None);
         assert_eq!(refs.tag("drama").unwrap().name, "Драма");
-        assert_eq!(refs.tag("drama").unwrap().description.as_deref(), Some("Про чувства"));
+        assert_eq!(
+            refs.tag("drama").unwrap().description.as_deref(),
+            Some("Про чувства")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

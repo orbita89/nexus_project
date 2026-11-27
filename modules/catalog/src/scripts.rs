@@ -657,7 +657,7 @@ mod tests {
         let args = build_args(
             run,
             &values(
-                json!({"limit": 100, "yes": true, "ai": "deepseek", "model": "", "batches": null}),
+                json!({"limit": 100, "yes": true, "ai": "deepseek"}),
             ),
         )
         .unwrap();

@@ -87,6 +87,9 @@ services:
       DB_POOL_MAX: ${DB_POOL_MAX-5}
       # Одновременных WebSocket на процесс; сверх — 503, клиент переподключается позже.
       WS_MAX_CONNECTIONS: ${WS_MAX_CONNECTIONS-5000}
+      # Запись чата пачками: сообщений в пачке и максимум ожидания записи (мс).
+      CHAT_BATCH_SIZE: ${CHAT_BATCH_SIZE-50}
+      CHAT_FLUSH_MS: ${CHAT_FLUSH_MS-1000}
       # Индекс книг (по умолчанию <SEARCH_INDEX_DIR>/books). Строит `nexus books index` (и сам
       # сервер, если каталог пуст).
       BOOKS_INDEX_DIR: ${BOOKS_INDEX_DIR-/var/lib/nexus/books-index}

@@ -760,7 +760,14 @@ impl EntitySidecar {
             })
             .collect();
         // Ключ: (уровень, ручное место, −итог, номер).
-        let key = |d: &RankDetail| (d.tier, d.manual_rank, std::cmp::Reverse(OrdF32(d.total)), d.ord);
+        let key = |d: &RankDetail| {
+            (
+                d.tier,
+                d.manual_rank,
+                std::cmp::Reverse(OrdF32(d.total)),
+                d.ord,
+            )
+        };
         if scored.len() > len {
             scored.select_nth_unstable_by(len, |a, b| key(a).cmp(&key(b)));
             scored.truncate(len);
@@ -824,11 +831,7 @@ impl EntitySidecar {
                     0.0
                 };
                 let max = best.get(&kind).copied().unwrap_or(0.0);
-                let pop = if max > 0.0 {
-                    popularity / max
-                } else {
-                    0.0
-                };
+                let pop = if max > 0.0 { popularity / max } else { 0.0 };
                 let weight = kind.map_or(POPULARITY_WEIGHT, |k| weights.search(kinds[k].0));
                 RankDetail {
                     ord,
@@ -898,7 +901,11 @@ impl EntitySidecar {
             hits.select_nth_unstable_by_key(take, key);
             hits.truncate(take);
         }
-        hits.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| table.str(a.2.label).cmp(table.str(b.2.label))));
+        hits.sort_by(|a, b| {
+            key(a)
+                .cmp(&key(b))
+                .then_with(|| table.str(a.2.label).cmp(table.str(b.2.label)))
+        });
         hits.into_iter()
             .map(|(_, count, row)| (table.str(row.label).to_string(), u64::from(count)))
             .collect()
@@ -1005,7 +1012,13 @@ pub struct EntityInspect {
 }
 
 const ORDER_NAMES: [&str; 7] = [
-    "new", "title", "popular", "rating", "trending", "top_rated", "awarded",
+    "new",
+    "title",
+    "popular",
+    "rating",
+    "trending",
+    "top_rated",
+    "awarded",
 ];
 
 impl EntitySidecar {
@@ -1024,7 +1037,11 @@ impl EntitySidecar {
         let o = &self.orders;
         let mut out = vec![
             filed(
-                part("meta", self.meta.len() * std::mem::size_of::<SortMeta>(), self.meta.len()),
+                part(
+                    "meta",
+                    self.meta.len() * std::mem::size_of::<SortMeta>(),
+                    self.meta.len(),
+                ),
                 self.meta.is_mapped(),
             ),
             filed(
@@ -1036,19 +1053,35 @@ impl EntitySidecar {
                 o.release_day.is_mapped(),
             ),
             filed(
-                part("order:recommended", self.recommended.bytes() as usize, self.recommended.ords.len()),
+                part(
+                    "order:recommended",
+                    self.recommended.bytes() as usize,
+                    self.recommended.ords.len(),
+                ),
                 self.recommended.heap_bytes() == 0,
             ),
         ];
         for (name, order) in ORDER_NAMES.iter().zip(o.all()) {
             out.push(filed(
-                part(&format!("order:{name}"), order.bytes() as usize, order.ords.len()),
+                part(
+                    &format!("order:{name}"),
+                    order.bytes() as usize,
+                    order.ords.len(),
+                ),
                 order.heap_bytes() == 0,
             ));
         }
         let f = &self.facets;
-        out.push(part("facet:visible", f.visible.serialized_size(), f.visible.len() as usize));
-        out.push(part("facet:cover", f.cover.serialized_size(), f.cover.len() as usize));
+        out.push(part(
+            "facet:visible",
+            f.visible.serialized_size(),
+            f.visible.len() as usize,
+        ));
+        out.push(part(
+            "facet:cover",
+            f.cover.serialized_size(),
+            f.cover.len() as usize,
+        ));
         let mut groups: BTreeMap<String, (usize, usize)> = BTreeMap::new();
         for (key, bits) in &f.values {
             let g = groups
@@ -1067,7 +1100,11 @@ impl EntitySidecar {
             f.years.len(),
         ));
         for (group, table) in &f.hints {
-            out.push(part(&format!("hints:{group}"), table.bytes() as usize, table.len()));
+            out.push(part(
+                &format!("hints:{group}"),
+                table.bytes() as usize,
+                table.len(),
+            ));
         }
         out
     }
@@ -1217,9 +1254,10 @@ impl SidecarBuilder {
             facets.cover.insert(ord);
         }
         let slot = kind_slot(doc.kind);
-        for (group, names) in TEXT_FACET_GROUPS
-            .iter()
-            .zip([&doc.studios, &doc.publishers, &doc.museums])
+        for (group, names) in
+            TEXT_FACET_GROUPS
+                .iter()
+                .zip([&doc.studios, &doc.publishers, &doc.museums])
         {
             let mut seen: Vec<String> = Vec::new();
             for name in names {
@@ -1715,7 +1753,9 @@ mod tests {
             assert_eq!(q.len(), 1);
             assert!(terms.contains(&q[0]), "{q:?} not in {terms:?}");
         }
-        assert!(!terms.iter().any(|t| t.starts_with("studio:") && t.len() == 7));
+        assert!(!terms
+            .iter()
+            .any(|t| t.starts_with("studio:") && t.len() == 7));
         assert_eq!(wanted(|q| q.studio = Some("!!!".into())), None);
         assert_eq!(wanted(|_| {}), Some(Vec::new()));
     }
@@ -1727,12 +1767,17 @@ mod tests {
         let mut b = film(1, "Б", EntityKind::Game, 1.0);
         b.studios = vec!["Pixar".into()];
         let side = build(&[a, b]);
-        assert_eq!(side.hints("studio", "pix", None, 5), [("Pixar".to_string(), 2)]);
+        assert_eq!(
+            side.hints("studio", "pix", None, 5),
+            [("Pixar".to_string(), 2)]
+        );
         assert_eq!(
             side.hints("studio", "", Some(EntityKind::Game), 5),
             [("Pixar".to_string(), 1)]
         );
-        assert!(side.hints("studio", "", Some(EntityKind::Series), 5).is_empty());
+        assert!(side
+            .hints("studio", "", Some(EntityKind::Series), 5)
+            .is_empty());
     }
 
     #[test]

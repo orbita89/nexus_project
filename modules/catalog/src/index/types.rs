@@ -254,11 +254,12 @@ pub(crate) fn day_of(date: NaiveDate) -> u64 {
 
 /// Ключ сортировки по названию: первые 9 знаков ключа названия, по 7 бит — порядок «пробел,
 /// кириллица, латиница, цифры» (русский сайт: А–Я, затем A–Z, затем «1984», «0%»). Названия с общим началом длиннее 9 знаков идут в порядке номеров.
-/// Знаки в начале («...», «"») пропускаются; название без букв и цифр («=|=») — в самом конце.
+/// Знаки в начале («...», «"») пропускаются; название без букв и цифр («=|=») или из одного
+/// знака («А», «A.») — в самом конце: иначе такие короткие названия открывают список «По названию».
 pub(crate) fn title_sort_key(title: &str) -> u64 {
     let norm = normalize_key(title);
     let start = norm.trim_start_matches(|c: char| !c.is_alphanumeric());
-    if start.is_empty() {
+    if start.chars().filter(|c| c.is_alphanumeric()).nth(1).is_none() {
         return u64::MAX;
     }
     let mut key = 0u64;
@@ -358,6 +359,8 @@ mod tests {
         assert_eq!(title_sort_key("«Азбука»"), title_sort_key("Азбука"));
         assert!(title_sort_key("Яблоко") < title_sort_key("=|="));
         assert_eq!(title_sort_key("=|="), u64::MAX);
+        assert_eq!(title_sort_key("А."), u64::MAX);
+        assert!(title_sort_key("Яблоко") < title_sort_key("A"));
     }
 
     #[test]

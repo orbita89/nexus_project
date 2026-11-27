@@ -288,7 +288,9 @@ pub async fn item(
             position,
             of: people.len(),
         }],
-        facets: role.map(|r| vec![format!("known_for:{r}")]).unwrap_or_default(),
+        facets: role
+            .map(|r| vec![format!("known_for:{r}")])
+            .unwrap_or_default(),
         card,
     }))
 }

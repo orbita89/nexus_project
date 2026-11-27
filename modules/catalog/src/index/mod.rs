@@ -978,7 +978,11 @@ impl CatalogIndex {
         let mut filter = sidecar.filter(q);
         filter &= &present.entities;
         filter -= &**self.hidden.load();
-        step(&mut out, "Фильтры слоя Б (битовые карты в RAM)", filter.len());
+        step(
+            &mut out,
+            "Фильтры слоя Б (битовые карты в RAM)",
+            filter.len(),
+        );
         let Some(terms) = sidecar::text_facet_terms(q) else {
             step(&mut out, "Фильтр с пустым названием — ничего", 0);
             return Ok(out);
@@ -1002,7 +1006,11 @@ impl CatalogIndex {
             )?;
             filter = works.into_iter().map(|(ord, _)| ord).collect();
             out.facet_terms = terms;
-            step(&mut out, "Фильтры слоя А (термы поля facet в Tantivy)", filter.len());
+            step(
+                &mut out,
+                "Фильтры слоя А (термы поля facet в Tantivy)",
+                filter.len(),
+            );
         }
         let query: String = q.q.chars().take(MAX_QUERY_CHARS).collect();
         let today = chrono::Utc::now().date_naive();
@@ -1016,12 +1024,20 @@ impl CatalogIndex {
         };
         let built = self.builder().build(&searcher, &query)?;
         if built.is_some() {
-            step(&mut out, "Разбор запроса (стемы, автодополнение по словарю)", 0);
+            step(
+                &mut out,
+                "Разбор запроса (стемы, автодополнение по словарю)",
+                0,
+            );
         }
         let Some((strict, fallback, title)) = built else {
             let (ords, total) = sidecar.page(q.sort, &filter, today, len);
             out.total = total as u64;
-            step(&mut out, "Готовый порядок слоя Б (без текста)", total as u64);
+            step(
+                &mut out,
+                "Готовый порядок слоя Б (без текста)",
+                total as u64,
+            );
             for (at, ord) in ords.into_iter().enumerate() {
                 let (title, kind, slug) = card(ord);
                 out.items.push(ExplainItem {
@@ -1046,28 +1062,44 @@ impl CatalogIndex {
             )
         };
         let mut hits = collect(strict.as_ref())?;
-        step(&mut out, "Текст: все слова (название, люди, серия)", hits.len() as u64);
+        step(
+            &mut out,
+            "Текст: все слова (название, люди, серия)",
+            hits.len() as u64,
+        );
         let mut title = title;
         if hits.is_empty() {
             if let Some((fixed, fixed_title)) = self.builder().corrected(&searcher, &query)? {
                 hits = collect(fixed.as_ref())?;
                 title = fixed_title;
                 out.approximate = true;
-                step(&mut out, "Текст: исправленные слова (строгий запрос пуст)", hits.len() as u64);
+                step(
+                    &mut out,
+                    "Текст: исправленные слова (строгий запрос пуст)",
+                    hits.len() as u64,
+                );
             }
         }
         if hits.is_empty() {
             if let Some(fallback) = fallback {
                 hits = collect(fallback.as_ref())?;
                 out.approximate = true;
-                step(&mut out, "Текст: нечёткий запрос (исправление не нашло)", hits.len() as u64);
+                step(
+                    &mut out,
+                    "Текст: нечёткий запрос (исправление не нашло)",
+                    hits.len() as u64,
+                );
             }
         }
         out.total = hits.len() as u64;
         if q.sort != Sort::Relevance {
             let matches: RoaringBitmap = hits.into_iter().map(|(ord, _)| ord).collect();
             let (ords, _) = sidecar.page(q.sort, &matches, today, len);
-            step(&mut out, "Совпавшие — по готовому порядку слоя Б", matches.len());
+            step(
+                &mut out,
+                "Совпавшие — по готовому порядку слоя Б",
+                matches.len(),
+            );
             for (at, ord) in ords.into_iter().enumerate() {
                 let (title, kind, slug) = card(ord);
                 out.items.push(ExplainItem {
@@ -1089,11 +1121,18 @@ impl CatalogIndex {
         };
         step(
             &mut out,
-            &format!("Точное название (title_key): {}; совпало в названии (title)", exact.len()),
+            &format!(
+                "Точное название (title_key): {}; совпало в названии (title)",
+                exact.len()
+            ),
             titled.len(),
         );
         let ranked = sidecar.ranked(&hits, &exact, &titled, len);
-        step(&mut out, "Ранжирование: уровень, затем текст + популярность", hits.len() as u64);
+        step(
+            &mut out,
+            "Ранжирование: уровень, затем текст + популярность",
+            hits.len() as u64,
+        );
         for (at, detail) in ranked.into_iter().enumerate() {
             let (title, kind, slug) = card(detail.ord);
             out.items.push(ExplainItem {
@@ -1167,7 +1206,11 @@ impl CatalogIndex {
         Ok(counts
             .into_iter()
             .map(|(group, n)| {
-                let mut list: Vec<(String, u64)> = best.remove(&group).unwrap_or_default().into_iter().collect();
+                let mut list: Vec<(String, u64)> = best
+                    .remove(&group)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
                 list.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 list.truncate(top);
                 (group, n, list)

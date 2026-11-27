@@ -126,7 +126,8 @@ pub fn open(state: &AppState) -> Option<Result<Arc<CatalogIndex>, IndexError>> {
     // Прод (только чтение) индекс не строит: чужая схема — ошибка, а не удаление файлов и пустой
     // индекс (так `CatalogIndex::open` поступает при сборке).
     if readonly(state) {
-        let found = std::fs::read_to_string(dir.join(shared::tantivy::SCHEMA_FILE)).unwrap_or_default();
+        let found =
+            std::fs::read_to_string(dir.join(shared::tantivy::SCHEMA_FILE)).unwrap_or_default();
         if found.trim() != super::schema::SCHEMA_VERSION {
             return Some(Err(IndexError::from(tantivy::TantivyError::InvalidArgument(format!(
                 "catalog index schema is {:?}, this build needs {:?}: upload an index built by this version",
