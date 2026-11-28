@@ -5,7 +5,7 @@
 services:
   postgres:
     image: postgres:18-alpine
-    # Настройки под слабый сервер (1 ГБ RAM): infra/postgres/postgresql.conf.
+    # Настройки под слабый сервер (2 ГБ RAM): infra/postgres/postgresql.conf.
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf",
               # Тесты (#[sqlx::test]) открывают много соединений параллельно.
               "-c", "max_connections=100"]
@@ -36,6 +36,9 @@ services:
       dockerfile: infra/Dockerfile.dev
     container_name: nexus-app
     restart: unless-stopped
+    # Дескрипторов на процесс: по умолчанию 1024 — это ~1000 WebSocket на весь сервер.
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
     command: ["cargo", "watch", "-x", "run -p nexus"]
     # Внешние имена — через публичные DNS: резолвер по умолчанию (например, Яндекс) отвечает на
     # files.tmdb.org заглушкой 127.0.0.1, и «Обновить рейтинги» не скачивает дамп TMDB. Имена
@@ -158,9 +161,14 @@ services:
     image: nginx:1.27-alpine
     container_name: nexus-gateway
     restart: unless-stopped
+    # Дескрипторов на процесс: по умолчанию 1024 — это ~1000 WebSocket на весь сервер.
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
     ports:
       - "80:80"
     volumes:
+      # Основной конфиг: лимиты соединений под WebSocket (worker_connections 16384).
+      - ./nginx-main.conf:/etc/nginx/nginx.conf:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./proxy_common.conf:/etc/nginx/proxy_common.conf:ro
       - ./covers_cache.conf:/etc/nginx/covers_cache.conf:ro

@@ -17,7 +17,7 @@
 
 use crate::channels::{self, USER_ME};
 use crate::registry::{Registry, Slot};
-use crate::{EXPIRY_WARNING, HEARTBEAT, IDLE_TIMEOUT, MAX_CHANNELS, MAX_CONNECTIONS_PER_USER};
+use crate::{CLOSE_REPLACED, EXPIRY_WARNING, HEARTBEAT, IDLE_TIMEOUT, MAX_CHANNELS};
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket};
 use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -97,7 +97,7 @@ struct Session {
     expires_at: i64,
     /// `auth_expiring` уже отправлен.
     warned: bool,
-    _slot: Slot,
+    slot: Slot,
 }
 
 struct Conn {
@@ -192,6 +192,7 @@ pub async fn run(socket: WebSocket, state: AppState, registry: Arc<Registry>) {
 
     'conn: loop {
         let deadline = conn.deadline();
+        let replaced = conn.session.as_ref().map(|s| s.slot.replaced());
         let mut resync = false;
         let replies = tokio::select! {
             incoming = stream.next() => {
@@ -219,6 +220,12 @@ pub async fn run(socket: WebSocket, state: AppState, registry: Arc<Registry>) {
             // Сервер останавливается: клиент переподключится к новому процессу.
             _ = shutdown.cancelled() => {
                 let close = CloseFrame { code: close_code::RESTART, reason: "server restart".into() };
+                let _ = outbox.try_send(Message::Close(Some(close)));
+                break;
+            }
+            // Тот же пользователь вошёл в другом соединении: это закрываем, клиент не переподключается.
+            _ = async { replaced.as_ref().unwrap().cancelled().await }, if replaced.is_some() => {
+                let close = CloseFrame { code: CLOSE_REPLACED, reason: "replaced".into() };
                 let _ = outbox.try_send(Message::Close(Some(close)));
                 break;
             }
@@ -493,20 +500,17 @@ impl Conn {
             session.warned = false;
             return self.authenticated();
         }
-        let Some(slot) = self.registry.acquire(claims.sub, MAX_CONNECTIONS_PER_USER) else {
-            return error(format!(
-                "no more than {MAX_CONNECTIONS_PER_USER} connections per user"
-            ));
-        };
         let interests = match channels::interests(&self.state, claims.sub).await {
             Ok(interests) => interests,
             Err(e) => return internal(e),
         };
+        // Одно соединение на пользователя: прежнее (другая вкладка, устройство) закроется.
+        let slot = self.registry.acquire(claims.sub);
         self.session = Some(Session {
             user_id: claims.sub,
             expires_at: claims.exp,
             warned: false,
-            _slot: slot,
+            slot,
         });
         self.interests = interests.into_iter().collect();
         self.authenticated()

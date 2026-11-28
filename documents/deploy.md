@@ -57,8 +57,8 @@ ghcr.io/orbita89/nexus_project:main            # последний из main
 
 ## Staging и прод
 
-`infra/docker-compose.prod.yml`: Postgres, Redis, Meilisearch (`MEILI_ENV=production`),
-приложение из образа и nginx — единственный открытый наружу порт. Все секреты обязательны
+`infra/docker-compose.prod.yml`: Postgres (без Redis), приложение из образа, nginx — единственный
+открытый наружу порт — и `backup` (ежедневный `pg_dump`). Все секреты обязательны
 (`${VAR:?...}`): без заполненного `infra/.env.prod` compose не стартует.
 
 ```bash
@@ -70,7 +70,20 @@ docker compose -f infra/docker-compose.prod.yml --env-file infra/.env.prod up -d
 не пересекаются, даже если они на одной машине.
 
 **Обновление:** поменять `NEXUS_IMAGE` на новый sha и
-`docker compose ... pull app && docker compose ... up -d app`. Откат — вернуть прошлый sha.
+`docker compose ... pull app && docker compose ... up -d app && docker image prune -af --filter "until=168h"`.
+Откат — вернуть прошлый sha. `prune` удаляет образы старше недели, на которых не запущен контейнер
+(каждый деплой оставляет прежний образ — сотни МБ; недельный запас нужен для отката).
+
+**Сервер на 2 ГБ / 2 ядра** (значения по умолчанию в compose): Postgres `mem_limit 384m`
+(`shared_buffers 64MB`), app `1g`, `WS_MAX_CONNECTIONS=20000`, nginx — свой основной конфиг
+`infra/nginx-main.conf` (`worker_connections 16384`), у app и nginx `ulimits nofile 65535` (по
+умолчанию 1024 — это ~1000 WebSocket на весь сервер). Логи Docker — не больше 3×10 МБ на контейнер.
+
+**Бэкапы:** сервис `backup` раз в сутки (`BACKUP_EVERY_SECONDS`) пишет `pg_dump -Fc` в
+`BACKUP_DIR` (по умолчанию `/var/backups/nexus`) и хранит `BACKUP_KEEP` (7) последних. Копию вне
+сервера — rsync/rclone из `BACKUP_DIR` по cron. Восстановление:
+`docker compose ... exec -T postgres pg_restore -U nexus -d nexus --clean < nexus-<дата>.dump`.
+Проверять восстановление на staging хотя бы раз в месяц.
 
 Ограничение отката: если новый образ применил миграцию, старый при старте упадёт — sqlx не
 запускается, когда в БД есть миграция, которой нет в бинарнике. До первого прода решить: либо
@@ -170,7 +183,7 @@ docker compose -f infra/docker-compose.prod.yml --env-file /tmp/nexus-local.env 
    `docker login ghcr.io`.
 4. HTTPS (см. выше).
 5. OAuth: отдельные приложения у провайдеров с redirect_uri этого окружения.
-6. Бэкапы Postgres: ежедневный `pg_dump` в хранилище вне сервера + проверка восстановления.
+6. Бэкапы Postgres: сервис `backup` уже в compose (см. «Бэкапы»); настроить копию `BACKUP_DIR` вне сервера + проверку восстановления.
    Там же — cron для `nexus media check` (см. выше).
 7. Деплой из CI: job после `docker`, по SSH выполняет обновление (см. выше). Staging —
    автоматически после main, прод — вручную (GitHub Environments с подтверждением), тем же sha.

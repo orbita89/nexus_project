@@ -57,6 +57,13 @@ pub use types::{BookForm, Card, EntityDoc, Found, Query, Sort, TextDoc};
 
 use crate::models::{EntityKind, EntitySummary};
 
+/// Голова порядка слоя Б: (имя, длина, номера с названиями).
+type OrderHead = (&'static str, u64, Vec<(u32, String)>);
+/// Фасет: (поле, документов, топ термов с числом документов).
+type FacetCounts = (String, u64, Vec<(String, u64)>);
+/// Поиск людей: кто подошёл и, если есть ранжирование, (номер, оценка).
+type PeopleHits = (RoaringBitmap, Option<Vec<(u32, f32)>>);
+
 /// Память писателя: 50 МБ, один поток. На сервере с малой RAM перестройка индекса из сотен
 /// тысяч документов не должна мешать поиску и доходить до OOM killer.
 pub const WRITER_BUDGET: usize = 50_000_000;
@@ -1148,7 +1155,7 @@ impl CatalogIndex {
     }
 
     /// Первые `n` каждого готового порядка слоя Б: (имя, длина, номера с названиями).
-    pub fn order_heads(&self, n: usize) -> Vec<(&'static str, u64, Vec<(u32, String)>)> {
+    pub fn order_heads(&self, n: usize) -> Vec<OrderHead> {
         let searcher = self.reader.searcher();
         let title = |ord: u32| -> String {
             self.card(&searcher, Space::Entity.raw(ord))
@@ -1169,10 +1176,7 @@ impl CatalogIndex {
     /// Термы поля `facet` по группам (`person`, `role`, `studio`…): сколько термов (сумма по
     /// сегментам) и самые частые значения (по числу документов в каждом сегменте, сложенному
     /// по совпавшим; приблизительно).
-    pub fn facet_term_counts(
-        &self,
-        top: usize,
-    ) -> Result<Vec<(String, u64, Vec<(String, u64)>)>, IndexError> {
+    pub fn facet_term_counts(&self, top: usize) -> Result<Vec<FacetCounts>, IndexError> {
         let searcher = self.reader.searcher();
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
         let mut best: BTreeMap<String, HashMap<String, u64>> = BTreeMap::new();
@@ -1340,7 +1344,7 @@ impl CatalogIndex {
         sidecar: &PeopleSidecar,
         q: &str,
         role: Option<&str>,
-    ) -> Result<(RoaringBitmap, Option<Vec<(u32, f32)>>), IndexError> {
+    ) -> Result<PeopleHits, IndexError> {
         let query: String = q.chars().take(MAX_QUERY_CHARS).collect();
         let mut filter = sidecar.filter(role);
         filter &= &present.people;

@@ -18,6 +18,9 @@ use tantivy::{Index, Score, Searcher, TantivyError, Term};
 
 use super::schema::Fields;
 
+/// Исправленный запрос: (строгий, с автодополнением).
+type QueryPair = (Box<dyn Query>, Box<dyn Query>);
+
 /// Максимум слов запроса: лишние отбрасываются.
 const MAX_QUERY_TERMS: usize = 16;
 /// Длина запроса в символах: дальше обрезается.
@@ -387,7 +390,7 @@ impl QueryBuilder<'_> {
         &self,
         searcher: &Searcher,
         text: &str,
-    ) -> Result<Option<(Box<dyn Query>, Box<dyn Query>)>, TantivyError> {
+    ) -> Result<Option<QueryPair>, TantivyError> {
         // Автодополнение последнего слова — как в строгом запросе («брэт пит» → «питт»).
         let mut parsed = self.parse(searcher, text)?;
         let mut changed = false;

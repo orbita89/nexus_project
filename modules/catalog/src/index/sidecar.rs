@@ -772,7 +772,7 @@ impl EntitySidecar {
             scored.select_nth_unstable_by(len, |a, b| key(a).cmp(&key(b)));
             scored.truncate(len);
         }
-        scored.sort_unstable_by(|a, b| key(a).cmp(&key(b)));
+        scored.sort_unstable_by_key(key);
         scored
     }
 

@@ -478,35 +478,34 @@ async fn expired_token_downgrades_to_guest(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "nexus::MIGRATOR", fixtures("catalog"))]
-async fn connections_per_user_are_limited(pool: PgPool) {
+async fn new_connection_of_user_replaces_old_one(pool: PgPool) {
     let ctx = Ctx::new(pool).await;
     let user = ctx.login("user", "user").await;
-    let mut clients = Vec::new();
-    for _ in 0..realtime::MAX_CONNECTIONS_PER_USER {
-        let mut client = ctx.client().await;
-        client.auth(&user.token).await;
-        clients.push(client);
-    }
-    let mut extra = ctx.client().await;
-    extra
-        .request(json!({ "type": "auth", "token": user.token }), "error")
-        .await;
-    // Гостем то же соединение работает.
-    extra.subscribe(&["entity:dune-2021"]).await;
-    // Повторный auth в уже вошедшем соединении место не занимает.
-    clients[0].auth(&user.token).await;
+    let mut old = ctx.client().await;
+    old.auth(&user.token).await;
+    // Повторный auth в том же соединении его не вытесняет.
+    old.auth(&user.token).await;
 
-    // Соединение закрыто — место освобождается (сервер замечает закрытие не мгновенно).
-    clients.pop().unwrap().ws.close(None).await.unwrap();
-    for attempt in 0.. {
-        extra
-            .send(json!({ "type": "auth", "token": user.token }))
-            .await;
-        let reply = extra.next(WAIT).await.unwrap();
-        if reply["type"] == "authenticated" {
-            break;
+    let mut new = ctx.client().await;
+    new.auth(&user.token).await;
+    // Прежнее соединение закрыто кодом 4000 «replaced».
+    let frame = loop {
+        match tokio::time::timeout(WAIT, old.ws.next())
+            .await
+            .expect("no close frame")
+        {
+            Some(Ok(Message::Close(frame))) => break frame.expect("close without frame"),
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            other => panic!("unexpected message: {other:?}"),
         }
-        assert!(attempt < 20, "slot was not released: {reply}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    };
+    assert_eq!(u16::from(frame.code), realtime::CLOSE_REPLACED);
+    assert_eq!(frame.reason.as_str(), "replaced");
+
+    // Новое работает; гости не ограничены.
+    new.subscribe(&["entity:dune-2021"]).await;
+    let mut guest_a = ctx.client().await;
+    let mut guest_b = ctx.client().await;
+    guest_a.subscribe(&["entity:dune-2021"]).await;
+    guest_b.subscribe(&["entity:dune-2021"]).await;
 }

@@ -259,7 +259,12 @@ pub(crate) fn day_of(date: NaiveDate) -> u64 {
 pub(crate) fn title_sort_key(title: &str) -> u64 {
     let norm = normalize_key(title);
     let start = norm.trim_start_matches(|c: char| !c.is_alphanumeric());
-    if start.chars().filter(|c| c.is_alphanumeric()).nth(1).is_none() {
+    if start
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .nth(1)
+        .is_none()
+    {
         return u64::MAX;
     }
     let mut key = 0u64;
@@ -338,12 +343,6 @@ pub(crate) fn popularity_meta(rank_score: Option<f64>) -> u32 {
 /// Неотрицательное число в целое с масштабом; нет значения — `0`, потолок — `u32::MAX`.
 pub(crate) fn scaled(value: Option<f64>, scale: f64) -> u64 {
     (value.unwrap_or(0.0).max(0.0) * scale).min(f64::from(u32::MAX)) as u64
-}
-
-impl Default for EntityKind {
-    fn default() -> Self {
-        Self::Book
-    }
 }
 
 #[cfg(test)]

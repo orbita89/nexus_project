@@ -1,13 +1,17 @@
-//! Учёт соединений пользователей: не больше [`MAX_CONNECTIONS_PER_USER`](crate::MAX_CONNECTIONS_PER_USER).
+//! Учёт соединений: у пользователя одно ([`MAX_CONNECTIONS_PER_USER`](crate::MAX_CONNECTIONS_PER_USER)),
+//! новое вытесняет прежнее.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[derive(Default)]
 pub struct Registry {
-    connections: Mutex<HashMap<Uuid, usize>>,
+    /// Пользователь → (номер соединения, сигнал «тебя заменили»).
+    connections: Mutex<HashMap<Uuid, (u64, CancellationToken)>>,
+    next: AtomicU64,
     /// Все открытые соединения процесса.
     total: AtomicUsize,
 }
@@ -23,19 +27,28 @@ impl Registry {
         Some(ConnGuard(Arc::clone(self)))
     }
 
-    /// Занять место под соединение пользователя; мест нет — `None`. Место освобождается,
-    /// когда [`Slot`] удалён (выход, истечение токена, разрыв).
-    pub fn acquire(self: &Arc<Self>, user_id: Uuid, max: usize) -> Option<Slot> {
+    /// Занять место пользователя. Прежнее соединение того же пользователя получает сигнал
+    /// [`Slot::replaced`] и закрывается само. Место освобождается, когда [`Slot`] удалён.
+    pub fn acquire(self: &Arc<Self>, user_id: Uuid) -> Slot {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let replaced = CancellationToken::new();
         let mut connections = self.connections.lock().unwrap_or_else(|e| e.into_inner());
-        let count = connections.entry(user_id).or_default();
-        if *count >= max {
-            return None;
+        if let Some((_, old)) = connections.insert(user_id, (id, replaced.clone())) {
+            old.cancel();
         }
-        *count += 1;
-        Some(Slot {
+        Slot {
             registry: Arc::clone(self),
             user_id,
-        })
+            id,
+            replaced,
+        }
+    }
+
+    /// Открытых соединений пользователя (0 или 1).
+    #[cfg(test)]
+    pub fn user_connections(&self, user_id: Uuid) -> usize {
+        let connections = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+        usize::from(connections.contains_key(&user_id))
     }
 }
 
@@ -51,6 +64,15 @@ impl Drop for ConnGuard {
 pub struct Slot {
     registry: Arc<Registry>,
     user_id: Uuid,
+    id: u64,
+    replaced: CancellationToken,
+}
+
+impl Slot {
+    /// Срабатывает, когда тот же пользователь вошёл в другом соединении.
+    pub fn replaced(&self) -> CancellationToken {
+        self.replaced.clone()
+    }
 }
 
 impl Drop for Slot {
@@ -60,11 +82,12 @@ impl Drop for Slot {
             .connections
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(count) = connections.get_mut(&self.user_id) {
-            *count -= 1;
-            if *count == 0 {
-                connections.remove(&self.user_id);
-            }
+        // Место уже заняло новое соединение — его не трогаем.
+        if connections
+            .get(&self.user_id)
+            .is_some_and(|(id, _)| *id == self.id)
+        {
+            connections.remove(&self.user_id);
         }
     }
 }
@@ -74,15 +97,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slots_are_limited_and_released() {
+    fn new_slot_replaces_old_one() {
         let registry = Arc::new(Registry::default());
         let user = Uuid::new_v4();
-        let a = registry.acquire(user, 2).unwrap();
-        let _b = registry.acquire(user, 2).unwrap();
-        assert!(registry.acquire(user, 2).is_none());
-        assert!(registry.acquire(Uuid::new_v4(), 2).is_some());
+        let a = registry.acquire(user);
+        assert!(!a.replaced().is_cancelled());
+        let b = registry.acquire(user);
+        assert!(a.replaced().is_cancelled());
+        assert!(!b.replaced().is_cancelled());
+        // Другой пользователь не мешает.
+        let c = registry.acquire(Uuid::new_v4());
+        assert!(!c.replaced().is_cancelled());
+        // Старое место уходит — новое остаётся.
         drop(a);
-        assert!(registry.acquire(user, 2).is_some());
+        assert_eq!(registry.user_connections(user), 1);
+        drop(b);
+        assert_eq!(registry.user_connections(user), 0);
     }
 
     #[test]

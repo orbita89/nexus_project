@@ -65,7 +65,9 @@ impl TryFrom<String> for ReleaseStatus {
 }
 
 /// Тип сущности (Postgres enum `entity_kind`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema,
+)]
 #[sqlx(type_name = "entity_kind", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum EntityKind {
@@ -75,6 +77,7 @@ pub enum EntityKind {
     /// `entities.parent_id`. В каталог и общий поиск сезоны не попадают (`IN_CATALOG`): в разделе
     /// «Сериалы» должен быть «Аркейн», а не «Аркейн, сезон 1» и «Аркейн, сезон 2».
     Season,
+    #[default]
     Book,
     Game,
     /// Живопись: раздел «Картины» (импорт `scripts/catalog-import/paintings_wikidata.py`).

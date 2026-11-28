@@ -656,9 +656,7 @@ mod tests {
         let run = find("books-llm").unwrap();
         let args = build_args(
             run,
-            &values(
-                json!({"limit": 100, "yes": true, "ai": "deepseek"}),
-            ),
+            &values(json!({"limit": 100, "yes": true, "ai": "deepseek"})),
         )
         .unwrap();
         assert_eq!(args, ["--limit", "100", "--yes", "--ai", "deepseek"]);
